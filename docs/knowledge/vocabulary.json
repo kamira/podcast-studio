@@ -1,13 +1,90 @@
 {
   "_doc": "tag 註冊處+別名橋:key=受控 tag(小寫英文),value=任何語言的別名",
-  "llm": ["推理", "reason", "ollama", "qwen", "breeze2", "文案", "taiwanize", "台灣用語"],
-  "tts": ["語音", "speak", "breezyvoice", "合成語音", "念", "發音"],
-  "image": ["生圖", "封面", "cover", "flux", "mflux", "標題"],
-  "video": ["影片", "ffmpeg", "mp4", "make_video", "合成影片"],
-  "subtitle": ["字幕", "srt", "切句", "mov_text"],
-  "mcp": ["mcp", "local-models", "工具", "stdio", "codex", "claude code"],
-  "web-ui": ["網頁", "gradio", "podcast_studio", "介面", "7860"],
-  "memory": ["記憶體", "oom", "卸載", "unload", "keep_alive", "鎖", "lock"],
-  "setup": ["安裝", "重建", "setup_breezyvoice", "patches", "venv", "依賴", "uv"],
-  "interaction": ["使用者指示", "溝通方式", "回覆格式"]
+  "llm": [
+    "推理",
+    "reason",
+    "ollama",
+    "qwen",
+    "breeze2",
+    "文案",
+    "taiwanize",
+    "台灣用語"
+  ],
+  "tts": [
+    "語音",
+    "speak",
+    "breezyvoice",
+    "合成語音",
+    "念",
+    "發音"
+  ],
+  "image": [
+    "生圖",
+    "封面",
+    "cover",
+    "flux",
+    "mflux",
+    "標題"
+  ],
+  "video": [
+    "影片",
+    "ffmpeg",
+    "mp4",
+    "make_video",
+    "合成影片"
+  ],
+  "subtitle": [
+    "字幕",
+    "srt",
+    "切句",
+    "mov_text"
+  ],
+  "mcp": [
+    "mcp",
+    "local-models",
+    "工具",
+    "stdio",
+    "codex",
+    "claude code"
+  ],
+  "web-ui": [
+    "網頁",
+    "gradio",
+    "podcast_studio",
+    "介面",
+    "7860"
+  ],
+  "memory": [
+    "記憶體",
+    "oom",
+    "卸載",
+    "unload",
+    "keep_alive",
+    "鎖",
+    "lock"
+  ],
+  "setup": [
+    "安裝",
+    "重建",
+    "setup_breezyvoice",
+    "patches",
+    "venv",
+    "依賴",
+    "uv"
+  ],
+  "interaction": [
+    "使用者指示",
+    "溝通方式",
+    "回覆格式"
+  ],
+  "review": [
+    "審議",
+    "審議會",
+    "review panel",
+    "席位",
+    "seat",
+    "verdict",
+    "判決",
+    "審查"
+  ]
 }
