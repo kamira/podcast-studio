@@ -17,7 +17,7 @@
      | 席位 | 模型 | 備註 |
      |------|------|------|
      | risk(否決席) | `hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M`,`think:true` | 高風險 CHG 改用 `hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M`(慢,可能 >10 分鐘) |
-     | security(否決席) | `qwen3:8b`,`think:true` | |
+     | security(否決席) | `qwen3:8b`,`think:true` | **高風險 CHG 改用 `hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M`**(2026-10-22 使用者決定;逾時 45 分鐘) |
      | compliance(否決席) | `huihui_ai/qwen3-abliterated:8b`,`think:true` | 未實測;第一次使用時先跑對照題 |
      | impact | `glm4:latest` | 非否決席 |
      | drift | `qwen3:8b`,`think:true` | |
@@ -31,7 +31,9 @@
   - `qwen3:8b`(think)→ fail,理由正確;`<model>` 欄填錯
   - `Qwen3.5-9B Aggressive`(think)→ fail,理由正確;`<model>` 欄填錯
   - `glm4:latest`(同一份 NFR 脈絡)→ **concern**,而且判決行格式壞掉(把模板佔位字原樣輸出);沒給 NFR 脈絡時 → **pass**
-- 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻)
+- 每席逾時:27B 45 分鐘、其餘 15 分鐘;逾時 = 沒有回答,重派一次。審議一律**序列**執行,不並行(使用者指示 2026-10-22)。
+- 證據補充(2026-10-22 CHG-20261022-01 / -03 實審):`qwen3:8b` 在約 3 萬字的 CHG 上擔任 security 席,兩筆共 9 點發現全部與送審原文矛盾(例:稱未檢查 GET 的 Host,原文第 255 行明文規定);`Qwen3.8-27B` 擔任 risk 席的判決與原文相符、證據具體。使用者因此決定高風險 security 席改用 27B。
+- 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻;高風險 security 席 27B 為使用者決定)
 - 狀態:生效
 
 ## DIR-2 — 每個步驟都走 commit → push → PR → CI → merge

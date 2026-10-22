@@ -5,7 +5,7 @@
 
 | id | tier | tags/scope | 一句規則 | 狀態 |
 |----|------|-----------|----------|------|
-| [DIR-1](directives.md#dir-1--審議會席位一律由本機邏輯模型ollama擔任) | 使用者確認 | 全分支 · review, llm | 審議席位一律由本機 Ollama 邏輯模型擔任,一次一席;glm4 不當否決席 | 生效 |
+| [DIR-1](directives.md#dir-1--審議會席位一律由本機邏輯模型ollama擔任) | 使用者確認 | 全分支 · review, llm | 審議席位一律由本機 Ollama 邏輯模型擔任,序列一次一席;glm4 不當否決席;高風險 security 席用 27B | 生效 |
 | [DIR-2](directives.md#dir-2--每個步驟都走-commit--push--pr--ci--merge) | 使用者確認 | 全分支 · cicd, review | 每步驟分支→PR→CI 綠→merge;中高風險 merge 前停等使用者 | 生效 |
 | [DIR-3](directives.md#dir-3--主-agentclaude專注派發實作與審查交給工作者) | 使用者確認 | 全分支 · review, llm, interaction | 主 agent 只派發;本機模型優先,不合格改派 Claude subagent | 生效 |
 
