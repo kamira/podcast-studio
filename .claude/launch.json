@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "podcast-studio",
+      "runtimeExecutable": "/Users/weiss/.local/bin/uv",
+      "runtimeArgs": ["run", "--script", "podcast_studio.py"],
+      "port": 7860
+    }
+  ]
+}
