@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "_doc": "停點契約 / halt-point contract。外部協調器(Python 等)在每個流程關卡(gate)依本次變更的 Risk 查表決定 auto(自主續跑)或 halt(停下等人核准)。always_halt_actions 不論風險一律 halt。可被 CHG 的 Autonomy 欄覆寫(只准加嚴;放寬非 always-halt 需人預先核准)。由 scripts/halt_gate.py 讀取。",
+  "gates": {
+    "requirement_confirmed": { "low": "auto", "medium": "auto", "high": "halt" },
+    "structure_confirmed":   { "low": "auto", "medium": "auto", "high": "halt" },
+    "before_implement":      { "low": "auto", "medium": "auto", "high": "halt" },
+    "acceptance_failed":     { "low": "auto", "medium": "halt", "high": "halt" },
+    "before_merge_or_release": { "low": "auto", "medium": "halt", "high": "halt" }
+  },
+  "always_halt_actions": [
+    "production deploy / release",
+    "data migration / irreversible schema change",
+    "delete data / drop table / hard delete",
+    "move money / financial transaction",
+    "change secrets / credentials / access control / permissions",
+    "publish public content"
+  ],
+  "gate_meaning": {
+    "requirement_confirmed": "需求分析產出 Guideline 後、進結構設計前",
+    "structure_confirmed": "結構設計產出後、開始實作前",
+    "before_implement": "修改治理產出 CHG 後、開始改碼前",
+    "acceptance_failed": "驗收未通過、要回修迴圈前",
+    "before_merge_or_release": "驗收通過後、合併 / 發佈 / 交付前"
+  }
+}

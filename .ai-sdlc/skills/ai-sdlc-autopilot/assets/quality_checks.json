@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "_doc": "委派型驗證的分類表(CHG-20260803-06)。這幾類需要外部工具或漏洞資料庫,runner 無法內建,故採與互動閘相同的『宣告 + 指令 + 產物』模式:runner 只認種類、跑指令、驗產物,不認也不安裝工具。能用 stdlib 做到的靜態與安全檢查則是**內建 always-on**(scripts/static_check.py),不在本表。",
+  "_extending": "新增種類:在 kinds 底下加條目,至少要有 label、asks(這一類要回答的問題)、artifacts(必須留下的可稽核產物)。runner 只驗『宣告的種類存在於本表』與『產物真的產生』。",
+  "kinds": {
+    "typecheck": {
+      "label": "型別檢查",
+      "asks": ["宣告的型別註記與實際用法是否一致", "None 是否被當成有值使用"],
+      "artifacts": ["typecheck-report"],
+      "example_tools": ["mypy", "pyright", "tsc"]
+    },
+    "coverage": {
+      "label": "覆蓋率量測",
+      "asks": ["哪些行從未被執行", "覆蓋率是否達到宣告的門檻"],
+      "artifacts": ["coverage-report"],
+      "example_tools": ["coverage.py", "jest --coverage", "go test -cover"]
+    },
+    "sast": {
+      "label": "靜態應用安全測試",
+      "asks": ["是否有資料流可從外部輸入抵達危險匯點", "已知的不安全 API 用法"],
+      "artifacts": ["sast-report"],
+      "example_tools": ["bandit", "semgrep", "codeql"]
+    },
+    "dependency-audit": {
+      "label": "相依漏洞掃描",
+      "asks": ["相依套件是否有已知 CVE", "是否有版本釘選與 lockfile"],
+      "artifacts": ["audit-report"],
+      "example_tools": ["pip-audit", "osv-scanner", "npm audit"]
+    }
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "_doc": "文件行為宣稱清冊(CHG-20260812-04)。**來源是人工登記,不是抽取**——文件側量過之後精確率只有 32%,而分軌禁止把規範性散文登錄成幾百行 not-applicable。抽取器降級為候選提示,**可漏報、不宣稱完整**。",
+  "_scope_declaration": {
+    "source_of_truth": "人工在文件內以 <!-- claim: id --> 明示登記",
+    "prompter": "候選提示器可漏報;零命中回報「射程外/未證明」,不得回綠",
+    "machine_judged_buckets": [
+      "prose",
+      "fence_comment"
+    ],
+    "machine_judged_vocabulary": "窄詞彙(閘行為動詞);寬詞彙只進遙測",
+    "known_misses": [
+      "skills/ai-sdlc-autopilot/references/handshake.md:26 —— 用寬詞「必須/must」寫的真宣稱,窄詞彙照不到",
+      "不點名任何元件的行為主張(例如「本 skill 的閘會擋下未治理的變更」)—— 兩個訊號都照不到,沒有殘影"
+    ],
+    "banner": "INCOMPLETE COVERAGE: heuristic candidate scan, not exhaustive"
+  },
+  "_telemetry": {
+    "files": 50,
+    "lines": 5809,
+    "component_hits": 119,
+    "wide_hits": 449,
+    "narrow_hits": 44,
+    "buckets": {
+      "fence_comment": 2,
+      "fence": 2,
+      "table": 4,
+      "link_only": 3,
+      "prose": 32
+    },
+    "judged_narrow": 0,
+    "unregistered_narrow": []
+  },
+  "claims": [
+    {
+      "claim_id": "doc-integrity-staged-blocks-commit",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/references/ci-cd.md:65",
+      "claim_text": "- run: python3 scripts/doc_integrity_check.py --staged   # structure drift + CHG↔ACC link; blocks the commit",
+      "text_digest": "223f3a4a9b38",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "doc-integrity-staged-blocks-commit",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/references/ci-cd.zh-tw.md:62",
+      "claim_text": "- run: python3 scripts/doc_integrity_check.py --staged   # 結構漂移 + CHG↔ACC 連結,擋住才能 commit",
+      "text_digest": "9e1e173cef7c",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "gates-wired-blocks-gate-deletion",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/SKILL.md:272",
+      "claim_text": "**Two gates on the tests themselves.** `test_gates_wired.py` blocks *deleting a gate*; these two block the same move one level down — **the cheapest way to turn a build green is to delete the failing ",
+      "text_digest": "fb68ae37e875",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "gates-wired-blocks-gate-deletion",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/SKILL.zh-tw.md:246",
+      "claim_text": "**兩道守住測試本身的閘**。`test_gates_wired.py` 擋的是「拔掉閘門」;這兩道擋的是往下一層的同一招——**讓 build 轉綠最省事的方法,是把那個紅的測試刪掉**。單元閘只問測試指令有沒有回 0,而刪掉那支測試它就回 0 了;變異閘在完全沒有測試時回報的是「未涵蓋」,不是失敗。",
+      "text_digest": "723281717a0b",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "knowledge-lint-fail-loud",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/references/knowledge.md:139",
+      "claim_text": "Schema: [`assets/knowledge_entry.schema.json`](../assets/knowledge_entry.schema.json) — required `id/tier/rule/tags/status`, enum-checked. The lint validates **fail-loud**: an unparseable or invalid e",
+      "text_digest": "fa6d267dbbb3",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "knowledge-lint-fail-loud",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/references/knowledge.zh-tw.md:136",
+      "claim_text": "Schema:[`assets/knowledge_entry.schema.json`](../assets/knowledge_entry.schema.json)——必填 `id/tier/rule/tags/status`,enum 檢查。lint 採 **fail-loud**:解析不了或不合 schema 的條目會擋下提交、而不是被跳過——一條規則靜默消失,比一次提交被擋更糟。",
+      "text_digest": "345cb31f2794",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "local-gate-before-merge-code-bearing",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/references/execution-plan.md:47",
+      "claim_text": "- **`### Local gate`** (or `## Local gate` / `本機閘`): a **code-bearing** change must pass a local self-check **before merge** (Skill >= v1.22, prospective). Format: `- cmd: <command>` / `- pass: <crite",
+      "text_digest": "5cfc824ef463",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "local-gate-before-merge-code-bearing",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/references/execution-plan.zh-tw.md:46",
+      "claim_text": "- **`### 本機閘`**(或 `## 本機閘` / `Local gate`):**程式類**變更在 **merge 之前**必須在本機跑過一次自主檢查(Skill ≥ v1.22,前瞻適用)。格式:`- cmd: <指令>` / `- pass: <通過標準>`。沒宣告時 runner 會依序找專案的慣例載具(`.github/ci_local.sh`、`scripts/check.sh`",
+      "text_digest": "1d06203c99ec",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "local-selfcheck-ahead-of-ci",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/SKILL.md:243",
+      "claim_text": "**A local self-check runs before merge** (v1.22.0) — **ahead of the CI gate**, and **for code-bearing changes only**. Merging used to have exactly one gate (CI green, next paragraph), and that gate ha",
+      "text_digest": "806eeb769848",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "local-selfcheck-ahead-of-ci",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/SKILL.zh-tw.md:217",
+      "claim_text": "**合併前先過本機自主檢查**(v1.22.0)——**排在 CI 閘之前**,且**僅限程式類**。合併前原本只有一道閘(下一段的 CI 全綠),而它有兩個洞:(1) **CI 可能根本跑不起來**,理由與程式無關(額度、帳務、runner 排隊);(2) CI 跑得起來時**它也不是本機**——本機有的東西(開發者的 venv、真實檔案系統、平台特性)CI 不一定有,反過來也是。所以 merg",
+      "text_digest": "6ff05d00f9c1",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "runner-reads-builder-blocked-line",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/references/autonomy.md:50",
+      "claim_text": "**What `auto` asks of the agent.** The user is not watching an autonomous run in real time and cannot answer questions mid-task, so a turn that ends on \"Shall I…?\" or on a statement of intent (\"next I",
+      "text_digest": "c5af494834a1",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "runner-reads-builder-blocked-line",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/references/autonomy.zh-tw.md:47",
+      "claim_text": "**`auto` 對 agent 的要求。** 自主執行時,使用者不會即時看著,也無法在任務中途回答問題;所以一輪若停在「要我…嗎?」或一句意圖宣告(「接下來我會…」),執行就和遇到停點一樣卡住——而且不留停點紀錄。契約寫 `auto` 的地方,不必問就往下做。只在這些地方停:契約回 HALT(停點關卡、永遠停點動作、或不認得的關卡——`unknown = halt`)、drive 層更嚴的政策要",
+      "text_digest": "c5995aee9659",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "sentinel-install-always-halts",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/references/autopilot-loop.md:236",
+      "claim_text": "- **Install = halt** (`scripts/sentinel_install.py install`): creating cron/CI is a persistent-config action → **always halts for human authorization** (`--i-authorize-cron`); even authorized it emits",
+      "text_digest": "12a9b54a217d",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "sentinel-install-always-halts",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/references/autopilot-loop.zh-tw.md:214",
+      "claim_text": "- **安裝=halt**(`scripts/sentinel_install.py install`):建立 cron/CI 屬持久設定 → **永遠 halt 等人授權**(`--i-authorize-cron`);即使授權也只產出可審閱的 crontab 行 + CI 片段,不逕改系統 cron。",
+      "text_digest": "fc2ab7a9378e",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "sentinels-two-tier-escape",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/SKILL.md:325",
+      "claim_text": "`sentinels` runs deterministic requirement-confirmation polling with two-tier escape (A cannot-evaluate → exit 0 baseline; B real halt → exit 3 escalate); wire it on a schedule via `scripts/sentinel_i",
+      "text_digest": "05fc5c97f90a",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "sentinels-two-tier-escape",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/SKILL.zh-tw.md:299",
+      "claim_text": "`sentinels` 跑確定性需求確認輪詢,兩層跳脫(A 無法評估→exit 0 基線;B 真 halt→exit 3 升級人);以 `scripts/sentinel_install.py` 掛排程(建 cron/CI **停等人授權**)。治理語意錨定 ai-sdlc `references/autonomy.md`——本層只做 drive。見 autopilot-loop「常態哨兵與排程再",
+      "text_digest": "df7e8bf2d628",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "verifier-identity-machine-checked",
+      "lang": "en",
+      "source": "skills/ai-sdlc-autopilot/SKILL.md:240",
+      "claim_text": "**High-risk acceptance is checked for independence, not just asked for it** (v1.65.0) — `doc_integrity_check.py` compares the ACC's `Verifier` against the CHG's `Implemented by` on every high-risk rec",
+      "text_digest": "63146527fd9e",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    },
+    {
+      "claim_id": "verifier-identity-machine-checked",
+      "lang": "zh",
+      "source": "skills/ai-sdlc-autopilot/SKILL.zh-tw.md:214",
+      "claim_text": "**高風險驗收的獨立性是被檢查的,不只是被要求的**(v1.65.0)——`doc_integrity_check.py` 對每一張高風險記錄比對 ACC 的「驗收者」與 CHG 的「實作者」,正規化後相同即失敗。這條規則原本寫在三個地方(分級表、independent-acceptance、ci-cd 的 gate 5),而三個地方都沒有執行:欄位 lint 只驗「有沒有『驗收者』這個欄位」,出",
+      "text_digest": "5db19b6b300f",
+      "claim_type": "behavioral",
+      "verification_status": "pending",
+      "reason": "尚未對應到機器驗證機制",
+      "planned_mechanism_id": "doc_claim_probe"
+    }
+  ]
+}

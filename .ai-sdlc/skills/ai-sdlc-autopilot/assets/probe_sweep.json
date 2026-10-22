@@ -1,0 +1,246 @@
+[
+  {
+    "file": "test_api_fuzz.py",
+    "sites": 50,
+    "ok": 47,
+    "decorative": [],
+    "not_run": [
+      "test_api_fuzz.py:259",
+      "test_api_fuzz.py:232",
+      "test_api_fuzz.py:309"
+    ]
+  },
+  {
+    "file": "test_assertion_probe.py",
+    "sites": 7,
+    "ok": 7,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_autopilot_sentinels.py",
+    "sites": 7,
+    "ok": 7,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_behave_step_probe.py",
+    "sites": 65,
+    "ok": 65,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_bilingual_check.py",
+    "sites": 11,
+    "ok": 11,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_build_loop.py",
+    "sites": 52,
+    "ok": 51,
+    "decorative": [],
+    "not_run": [
+      "test_build_loop.py:181"
+    ]
+  },
+  {
+    "file": "test_capabilities.py",
+    "sites": 15,
+    "ok": 13,
+    "decorative": [],
+    "not_run": [
+      "test_capabilities.py:61",
+      "test_capabilities.py:62"
+    ]
+  },
+  {
+    "file": "test_ci_gate.py",
+    "sites": 17,
+    "ok": 17,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_cross_repo_check.py",
+    "sites": 10,
+    "ok": 10,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_doc_counts.py",
+    "sites": 8,
+    "ok": 8,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_doc_integrity_check.py",
+    "sites": 34,
+    "ok": 33,
+    "decorative": [],
+    "not_run": [
+      "test_doc_integrity_check.py:362"
+    ]
+  },
+  {
+    "file": "test_e2e_build_gates.py",
+    "sites": 23,
+    "ok": 23,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_gate_canary.py",
+    "sites": 31,
+    "ok": 31,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_gates_wired.py",
+    "sites": 239,
+    "ok": 237,
+    "decorative": [],
+    "not_run": [
+      "test_gates_wired.py:642",
+      "test_gates_wired.py:672"
+    ]
+  },
+  {
+    "file": "test_governance_health.py",
+    "sites": 54,
+    "ok": 54,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_halt_gate.py",
+    "sites": 20,
+    "ok": 20,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_interaction_gate.py",
+    "sites": 35,
+    "ok": 35,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_knowledge_index.py",
+    "sites": 11,
+    "ok": 11,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_lib_units.py",
+    "sites": 84,
+    "ok": 84,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_license_repro.py",
+    "sites": 28,
+    "ok": 28,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_mechanisms.py",
+    "sites": 29,
+    "ok": 29,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_mutation_harness.py",
+    "sites": 16,
+    "ok": 16,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_nonfunctional.py",
+    "sites": 41,
+    "ok": 41,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_performance.py",
+    "sites": 31,
+    "ok": 30,
+    "decorative": [
+      "test_performance.py:96"
+    ],
+    "not_run": []
+  },
+  {
+    "file": "test_quality_judge.py",
+    "sites": 57,
+    "ok": 57,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_ratchet_flaky.py",
+    "sites": 51,
+    "ok": 50,
+    "decorative": [],
+    "not_run": [
+      "test_ratchet_flaky.py:77"
+    ]
+  },
+  {
+    "file": "test_review_panel.py",
+    "sites": 61,
+    "ok": 60,
+    "decorative": [],
+    "not_run": [
+      "test_review_panel.py:64"
+    ]
+  },
+  {
+    "file": "test_role_loadout.py",
+    "sites": 8,
+    "ok": 8,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_roles.py",
+    "sites": 13,
+    "ok": 13,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_sentinel_flags.py",
+    "sites": 21,
+    "ok": 21,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_sentinel_launch.py",
+    "sites": 9,
+    "ok": 9,
+    "decorative": [],
+    "not_run": []
+  },
+  {
+    "file": "test_static_check.py",
+    "sites": 13,
+    "ok": 13,
+    "decorative": [],
+    "not_run": []
+  }
+]

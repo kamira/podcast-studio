@@ -1,0 +1,141 @@
+[
+  {
+    "claim_id": "gate::JSON validity",
+    "condition_digest": "804703c5c8b2",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'Expecting':擋得住"
+  },
+  {
+    "claim_id": "gate::autopilot plan-check",
+    "condition_digest": "60f9023b0f21",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'CHG-20991231-98':擋得住"
+  },
+  {
+    "claim_id": "gate::bilingual pairs",
+    "condition_digest": "0befe14e13ae",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'canary-sample':擋得住"
+  },
+  {
+    "claim_id": "gate::catalog version",
+    "condition_digest": "21f9a032b963",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'catalog-check 未通過':擋得住"
+  },
+  {
+    "claim_id": "gate::check scope declared",
+    "condition_digest": "6dbc9a41a465",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 '金絲雀沒有宣告的閘':擋得住"
+  },
+  {
+    "claim_id": "gate::claim manifest",
+    "condition_digest": "fd6d4bd2c60d",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 '與實際掃描結果不一致':擋得住"
+  },
+  {
+    "claim_id": "gate::delegated quality checks",
+    "condition_digest": "204e30c6abe1",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  },
+  {
+    "claim_id": "gate::diff coverage",
+    "condition_digest": "60515230ef08",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  },
+  {
+    "claim_id": "gate::doc claims",
+    "condition_digest": "9b3273b4d081",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 '與實際掃描結果不一致':擋得住"
+  },
+  {
+    "claim_id": "gate::doc integrity",
+    "condition_digest": "a943dc5d1a25",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'CHG-20991231-99':擋得住"
+  },
+  {
+    "claim_id": "gate::operational verify",
+    "condition_digest": "651d9179b046",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  },
+  {
+    "claim_id": "gate::path case sensitivity (Linux 相容)",
+    "condition_digest": "e9740ee9a0d2",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'Skills/':擋得住"
+  },
+  {
+    "claim_id": "gate::plugin skills copies",
+    "condition_digest": "0c848fc5e121",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 '複本與來源不同步':擋得住"
+  },
+  {
+    "claim_id": "gate::probe leftovers",
+    "condition_digest": "00776b86c805",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 '_probe_tmp_canary':擋得住"
+  },
+  {
+    "claim_id": "gate::py_compile all scripts",
+    "condition_digest": "8ac18da60844",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'canary_syntax_error':擋得住"
+  },
+  {
+    "claim_id": "gate::run all test_*.py",
+    "condition_digest": "6f25ad5d4a51",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  },
+  {
+    "claim_id": "gate::run all test_*.py(UTF-8 profile 輪:= hosted runner 的編碼環境)",
+    "condition_digest": "ec9fa5ee8995",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  },
+  {
+    "claim_id": "gate::run all test_*.py(非 UTF-8 stdio 輪:cp932)",
+    "condition_digest": "ec9fa5ee8995",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  },
+  {
+    "claim_id": "gate::run behaviour specs",
+    "condition_digest": "7de743519001",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  },
+  {
+    "claim_id": "gate::static & security check",
+    "condition_digest": "cef845f8bf77",
+    "dirty_worktree": 27,
+    "verdict": "blocks",
+    "evidence": "基線綠(rc=0)、壞樣本紅(rc=1),且輸出指名了 'canary_bad_static':擋得住"
+  },
+  {
+    "claim_id": "gate::verifier integrity",
+    "condition_digest": "70d7d7ed3821",
+    "verdict": "no-sample",
+    "evidence": "壞樣本尚未登記——**不是「這道閘沒問題」**"
+  }
+]

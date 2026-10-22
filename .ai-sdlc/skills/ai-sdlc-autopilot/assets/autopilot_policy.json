@@ -1,0 +1,10 @@
+{
+  "_doc": "autopilot 停點策略:風險×階段 → auto/confirm/halt/halt_independent。只准加嚴:CHG Autonomy 欄可收緊、不可放寬;permanent_halts 為硬清單,runner 拒絕任何移除或放寬它的設定。",
+  "defaults": {
+    "low":    {"confirm_gate": "auto",    "task_review": "auto", "operational_verify": "auto", "acceptance": "auto",             "pr": "auto", "merge": "auto"},
+    "medium": {"confirm_gate": "confirm", "task_review": "auto", "operational_verify": "auto", "acceptance": "auto",             "pr": "auto", "merge": "halt"},
+    "high":   {"confirm_gate": "halt",    "task_review": "auto", "operational_verify": "halt", "acceptance": "halt_independent", "pr": "auto", "merge": "halt"}
+  },
+  "permanent_halts": ["irreversible-delete", "payments", "prod-migration", "security-boundary"],
+  "preauthorizable": ["medium.confirm_gate"]
+}

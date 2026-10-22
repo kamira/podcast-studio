@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "_doc": "非功能性驗證的分類表(CHG-20260804-02)。前九張 CHG 補的都是功能正確性方向(對不對);這一張補的是快不快、穩不穩、會不會漏。但**不是一律要求**——對一個 CLI/library repo 課負載測試的稅,會讓人把整套關掉。每一類都列出 applies_to,runner 只做交集,不內建型態判斷。",
+  "_states": "三態必須分得開:通過(驗了且過了)/ 未涵蓋(該驗但這環境驗不了)/ **不適用**(這個專案型態根本不需要驗)。把不適用讀成通過,與把未涵蓋讀成通過是同一個錯誤。",
+  "_profiles": "已知型態:backend-service、frontend-web、cli-tool、library、data-pipeline、docs-only。專案在 .ai-sdlc/profile.json 宣告(可多選);未宣告時**視為全部適用**——錯誤方向倒向多驗而非少驗。",
+  "_extending": "新增種類:加一個條目,至少要有 label、asks(這一類要回答的問題)、artifacts(必須留下的可稽核產物)、applies_to(適用的專案型態)。applies_to 是資料不是程式碼——新增一種型態應該是改設定,不是改 runner。",
+  "kinds": {
+    "performance": {
+      "label": "效能與基準回歸",
+      "asks": [
+        "關鍵路徑的延遲/吞吐與上一版相比有沒有退步",
+        "退步是否超過宣告的容忍帶(而不是「感覺變慢了」)"
+      ],
+      "artifacts": ["benchmark-report"],
+      "applies_to": ["backend-service", "data-pipeline", "library"],
+      "example_drivers": ["pytest-benchmark", "hyperfine", "codspeed", "jmh"],
+      "_why_not_cli": "CLI 工具的單次執行時間通常由人的等待決定而非系統負載;真的在意時把 cli-tool 加進 applies_to 即可。"
+    },
+    "load-stress": {
+      "label": "負載與壓力",
+      "asks": [
+        "在目標併發下錯誤率與延遲的分佈(不是平均值)",
+        "超過容量時是優雅降級還是崩潰"
+      ],
+      "artifacts": ["load-report"],
+      "applies_to": ["backend-service", "data-pipeline"],
+      "example_drivers": ["k6", "locust", "vegeta", "gatling"],
+      "_why_scoped": "只有會同時服務多個請求的東西才有「負載」可言。library 與 CLI 沒有這個面。"
+    },
+    "concurrency": {
+      "label": "併發與競態",
+      "asks": [
+        "共享狀態在並行存取下是否仍正確",
+        "有無死鎖、活鎖、或依賴執行順序才成立的假設"
+      ],
+      "artifacts": ["concurrency-report"],
+      "applies_to": ["backend-service", "data-pipeline"],
+      "example_drivers": ["ThreadSanitizer", "go test -race", "pytest-xdist + 壓力迴圈"],
+      "_why_scoped": "單行程、單執行緒的工具沒有共享狀態可競。library 若對外承諾執行緒安全,應把 library 加進 applies_to。"
+    },
+    "resource-leak": {
+      "label": "資源洩漏",
+      "asks": [
+        "長時間執行後檔案句柄/連線/記憶體是否單調成長",
+        "子行程與暫存檔是否都被回收"
+      ],
+      "artifacts": ["resource-report"],
+      "applies_to": ["backend-service", "data-pipeline"],
+      "example_drivers": ["tracemalloc", "psutil 取樣", "valgrind"],
+      "_why_scoped": "洩漏要在**長時間執行**下才顯現;跑完就退出的 CLI 由作業系統回收。"
+    },
+    "build-reproducibility": {
+      "label": "建置可重現",
+      "asks": [
+        "同一份原始碼兩次建置是否產出相同的成品",
+        "版本與相依是否被釘住(lockfile / 明確版號)"
+      ],
+      "artifacts": ["build-diff-report"],
+      "applies_to": ["backend-service", "frontend-web", "cli-tool", "library", "data-pipeline"],
+      "example_drivers": ["diffoscope", "兩次建置的雜湊比對"],
+      "_why_broad": "凡是會被別人安裝或部署的東西,都該能回答「我拿到的和你建的是同一個嗎」。"
+    },
+    "license-compliance": {
+      "label": "授權合規",
+      "asks": [
+        "相依套件的授權是否與本專案的散布方式相容",
+        "有無 copyleft 感染或未標示的第三方程式碼"
+      ],
+      "artifacts": ["license-report"],
+      "applies_to": ["backend-service", "frontend-web", "cli-tool", "library", "data-pipeline"],
+      "example_drivers": ["pip-licenses", "licensee", "scancode", "fossa"],
+      "_why_broad": "只要有第三方相依就有授權問題,與專案型態無關。"
+    },
+    "api-contract": {
+      "label": "API 合約",
+      "asks": [
+        "對外介面的變更是否向後相容",
+        "破壞性變更是否伴隨版本與遷移說明"
+      ],
+      "artifacts": ["contract-report"],
+      "applies_to": ["backend-service", "library"],
+      "example_drivers": ["openapi-diff", "pact", "griffe", "semver 檢查器"],
+      "_why_scoped": "有對外契約的才需要;CLI 的契約面是旗標與輸出格式,由互動驗證的 cli 類負責。"
+    },
+    "visual-regression": {
+      "label": "視覺回歸",
+      "asks": [
+        "畫面在改動後是否出現非預期的差異",
+        "差異是刻意的還是副作用"
+      ],
+      "artifacts": ["visual-diff-report"],
+      "applies_to": ["frontend-web"],
+      "example_drivers": ["playwright screenshot diff", "percy", "chromatic"],
+      "_why_scoped": "只有會被人用眼睛看的東西才有視覺回歸。"
+    },
+    "property-fuzz": {
+      "label": "屬性測試與模糊測試",
+      "asks": [
+        "在隨機/惡意輸入下是否維持不變式",
+        "解析器面對畸形輸入是崩潰還是正確拒絕"
+      ],
+      "artifacts": ["fuzz-report"],
+      "applies_to": ["backend-service", "library", "data-pipeline"],
+      "example_drivers": ["hypothesis", "atheris", "libFuzzer", "go-fuzz"],
+      "_why_scoped": "會接受外部或不受控輸入的才需要;純內部腳本的輸入由呼叫者決定。"
+    }
+  }
+}

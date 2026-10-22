@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "_doc": "文件裡手抄的計數與現實的對帳清單(CHG-20260810-03,待補項 #27)。文件裡的數字不是斷言,只是散文——沒有東西比對它們,於是每次新增測試檔或規格檔,它們就有一部分變成謊話。這一族連續三輪在同一個地方現形(2026-08-06 的 63/15、CHG-20260810-01 的 5 處、-02 的規格數),三次的處置都是「順手訂正」,而那正是 KN-005:靠記性維持的規則會重複違反。清單是**資料**,檢查器只認 measure 種類——新增一處宣稱是編輯本檔,不是編輯檢查器。由 scripts/test_doc_counts.py 讀取。",
+  "_rules": {
+    "命中次數": "每條 claim 的 pattern 必須在該檔命中**剛好一次**。0 次 = 措辭被改寫或搬走,這條規則已經沒在看任何東西;2+ 次 = 分不出在驗哪一個。兩者都判失敗——掃不到與數字正確在退出碼上一樣(KN-003)。",
+    "清單為空": "整份清單為空即失敗。對零條宣稱回報「全部一致」是恆真回報(KN-001)。",
+    "不得打到歷史": "常駐握手檔刻意留著舊數字(如「全部 29 支」是 CHG-20260810-01 的歷史記錄)。pattern 必須綁定該行的**句型**,不是「找一個數字」——判準寬到打中歷史,這道閘就會要求把記錄改成謊話。",
+    "量測來源": "measure 一律讀實際來源(檔案系統、verifier_manifest.json),不得再抄一個常數——那只是把手抄的地方換一個。"
+  },
+  "_measures": {
+    "test_files": "find skills plugins -name 'test_*.py',排除 plugins/*/skills/*(生成複本)。與 .github/run_tests.sh 的搜尋範圍一致。",
+    "feature_files": "features/*.feature 的數量。",
+    "anchored_files": "verifier_manifest.json 的 files 欄位長度——錨定範圍由 manifest 決定,不由檔案在不在決定。"
+  },
+  "claims": [
+    {
+      "id": "agents-tests",
+      "file": "AGENTS.md",
+      "measure": "test_files",
+      "pattern": "# 全部 (\\d+) 支 test_\\*\\.py"
+    },
+    {
+      "id": "agents-features",
+      "file": "AGENTS.md",
+      "measure": "feature_files",
+      "pattern": "# (\\d+) 份行為規格"
+    },
+    {
+      "id": "agents-anchored",
+      "file": "AGENTS.md",
+      "measure": "anchored_files",
+      "pattern": "錨定構成檢查裝置的 \\*\\*(\\d+) 個檔案\\*\\*"
+    },
+    {
+      "id": "worklog-tests",
+      "file": "docs/worklog/handshake-autopilot.md",
+      "measure": "test_files",
+      "pattern": "\\| 測試檔 \\| \\*\\*(\\d+)\\*\\*"
+    },
+    {
+      "id": "worklog-features",
+      "file": "docs/worklog/handshake-autopilot.md",
+      "measure": "feature_files",
+      "pattern": "\\| 行為規格檔 \\| \\*\\*(\\d+)\\*\\* 份"
+    },
+    {
+      "id": "worklog-anchored",
+      "file": "docs/worklog/handshake-autopilot.md",
+      "measure": "anchored_files",
+      "pattern": "\\| 驗證器完整性錨定 \\| \\*\\*(\\d+)\\*\\* 檔"
+    },
+    {
+      "id": "worklog-gate-table-anchored",
+      "file": "docs/worklog/handshake-autopilot.md",
+      "measure": "anchored_files",
+      "pattern": "驗證器完整性錨\\((\\d+) 檔\\)"
+    },
+    {
+      "id": "skill-en-anchored",
+      "file": "skills/ai-sdlc-autopilot/SKILL.md",
+      "measure": "anchored_files",
+      "pattern": "anchors SHA-256 of the (\\d+) files"
+    },
+    {
+      "id": "skill-zh-anchored",
+      "file": "skills/ai-sdlc-autopilot/SKILL.zh-tw.md",
+      "measure": "anchored_files",
+      "pattern": "錨定構成檢查裝置的 (\\d+) 個檔案的 SHA-256"
+    },
+    {
+      "id": "readme-tests",
+      "file": "README.md",
+      "measure": "test_files",
+      "pattern": "全部 (\\d+) 支 test_\\*\\.py、驗證器"
+    },
+    {
+      "id": "readme-tests-cmd",
+      "file": "README.md",
+      "measure": "test_files",
+      "pattern": "# 全部 (\\d+) 支 test_\\*\\.py"
+    },
+    {
+      "id": "readme-features",
+      "file": "README.md",
+      "measure": "feature_files",
+      "pattern": "\\| (\\d+) 份行為規格"
+    },
+    {
+      "id": "readme-anchored",
+      "file": "README.md",
+      "measure": "anchored_files",
+      "pattern": "錨定構成檢查裝置的 (\\d+) 個檔案"
+    },
+    {
+      "id": "design-tests",
+      "file": "docs/ai-sdlc-autopilot/structure/design.md",
+      "measure": "test_files",
+      "pattern": "(\\d+) 支 test_\\*\\.py × 三種編碼環境"
+    },
+    {
+      "id": "design-features",
+      "file": "docs/ai-sdlc-autopilot/structure/design.md",
+      "measure": "feature_files",
+      "pattern": "規格閘<br/>(\\d+) 份 feature"
+    },
+    {
+      "id": "design-anchored",
+      "file": "docs/ai-sdlc-autopilot/structure/design.md",
+      "measure": "anchored_files",
+      "pattern": "驗證器 (\\d+) 個檔"
+    }
+  ]
+}

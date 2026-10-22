@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "_doc": "`unverified-blocked` 的棘輪基線(CHG-20260813-09,C2 第一筆)。清冊是**重生成物**,重生成物守不住 against 自己的棘輪——所以棘輪落在這份**不被重生成、且進錨定範圍**的檔案上:增改它必須走 `verifier_integrity --update --chg`,與改驗證器同價。`max_blocked` 從 **0** 起:任何一條 blocked 都得付一次具名的成本。",
+  "_rules": {
+    "只減不增": "清冊裡的 `unverified-blocked` 必須在本檔有對應條目;沒有 → 擋下。這讓「增」必付 CHG 簽署 + 錨定重簽的成本。",
+    "過期即紅": "本檔的條目若對應的宣稱已經是 verified/pending,本檔就過期了——**紅到有人把它刪掉為止**,讓「減」也留痕。",
+    "上限": "現況條數 > `max_blocked` 即紅。調升上限要動這份錨定檔,與 `judge_quality` 的「基線只准往下」同構。",
+    "後續 CHG 要存在": "`followup_chg` 指向的檔案必須真的在 `docs/*/changes/` 下,否則 blocked 就成了沒有出口的永久豁免。",
+    "進分母": "**`unverified-blocked` 進通過率的分母。** 不進的話,把難驗的閘標成 blocked 就成了刷分通道——比它要防的問題更糟。"
+  },
+  "max_blocked": 0,
+  "blocked": []
+}

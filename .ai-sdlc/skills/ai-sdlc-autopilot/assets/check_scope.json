@@ -1,0 +1,456 @@
+{
+  "version": 1,
+  "_doc": "每一種檢查的適用對象(CHG-20260813-01)。使用者原話:「所有 CI 不是適用所有領域或項目,每種類型都應該明訂適用對象」。三軸都要——它們**本來就存在,只是藏在程式分支裡**:project_type 藏在 nonfunctional 的 applies_to、change_scope 藏在 change_scope.py、artifact_shipped 藏在 build_suite 的複本清單。砍掉任一軸,那個軸就退回程式碼裡繼續隱式決定。**本筆不跳過任何檢查**:宣告、schema、缺宣告轉紅與零漂移基線而已;依宣告實際跳過留給下一筆——同一筆同時改政策資料與執行接線,等於讓變更用自己新訂的規則替自己驗收。由 .github/check_scope_declared.py 讀取。",
+  "_axes": {
+    "project_type": "這個檢查對哪些**專案型態**有意義(值域同 nonfunctional_checks.json)",
+    "change_scope": "這一筆**碰到什麼**時才需要它(code / docs / spec / all)",
+    "artifact_shipped": "它守的是**出貨物**還是**內部工具**(shipped / internal / both)"
+  },
+  "_rules": {
+    "缺宣告": "**擋下**,不是「視為全部適用」。使用者的動詞是「明訂」——缺宣告是結構錯誤;而「未宣告=全適用」正是效能噪音的來源:預設多驗不是保守,是把噪音當保險。",
+    "not-relevant": "某一軸與這個檢查無關時可具名 not-relevant,**但必須帶 _why_<軸> 理由**(KN-006:空白豁免看起來像有交代,比漏寫更糟)。",
+    "排除的可見性": "被宣告排除的種類**必須顯示條數,永不折進通過率**——關掉閘會讓分數變好看,那就是刷分工具的定義。",
+    "零漂移": "宣告推導出的「今天該跑」必須等於今天實際跑的。要排除一個正在跑的檢查,得寫進 _signed_exclusions 並具名理由——**排除的總量在沒人看的地方長大,才是 pragma 那次的真正形狀**。",
+    "種類清單不手抄": "從 quality_checks.json / nonfunctional_checks.json / ci_local.sh 三個真來源發現。手抄的清單不會自己跟上,而漏掉的那個不會抗議(#40)。",
+    "逐格核准": "`_signed_exclusions` 的條目是 `<kind>@<change>/<shipped>`,**逐格**不是逐檢查(CHG-20260813-02,兩席一致)。檢查級簽名是**開放式授權**:為一格簽下去的那個人,並沒有審議過其餘五格日後的收窄——條目變多不是成本,是把跨格影響逐格點名本來就該付的顯性化。"
+  },
+  "_signed_exclusions": [],
+  "checks": {
+    "JSON validity": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "all"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "壞掉的 JSON 會讓讀它的每一道閘以「讀不到」的形狀失敗,而那與「沒問題」在退出碼上一樣。"
+    },
+    "api-contract": {
+      "project_type": [
+        "library",
+        "backend-service"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "對外承諾函式契約的才有破壞性變更可言;CLI 的對外面是旗標,由互動閘管。"
+    },
+    "autopilot plan-check": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "docs"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "CHG 的計畫格式住在 docs/;它是治理文件的 schema,不是程式的。"
+    },
+    "bilingual pairs": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "docs",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "雙語複本是出貨文件的性質;程式變更不會讓 ## 數量分岔。"
+    },
+    "build-reproducibility": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "docs",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "出貨複本由 build_suite 產生,而**文件也會被複製進 plugin**——所以文書變更同樣要驗同步。內部工具不進複本,沒有可重現性可言。"
+    },
+    "catalog version": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "all"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "發佈鐵律:任何 plugins/** 或 skills/** 實質變動都要 bump catalog,含只改一行文件——否則 client 認定目錄無變更、不重抓新版。CHG-20260812-04 起也驗 CHANGELOG 有沒有跟上。"
+    },
+    "check scope declared": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "all"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "宣告登記簿自己也是一種檢查,所以它自己也要宣告——**這道閘的第一個受測者是它自己**。三軸都填 all:任何型態、任何變更、出貨與內部都適用,因為它守的是「有沒有東西沒被宣告」,而那與變更碰到什麼無關。"
+    },
+    "claim manifest": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "閘門宣稱抽自 test_gates_wired.py、behave 步驟與 ci_local.sh——三個都是程式面。"
+    },
+    "concurrency": {
+      "project_type": [
+        "backend-service",
+        "data-pipeline"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "同上:沒有並行請求就沒有並行競態可測。"
+    },
+    "coverage": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "規格檔也算:behave 已進覆蓋率量測(CHG-20260811-03),改規格會動到覆蓋率分母。"
+    },
+    "delegated quality checks": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "它是委派四工具與非功能性產出者的載具;自己沒有射程,射程由被載的那些決定。"
+    },
+    "dependency-audit": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "相依是整個 repo 共用的,分不出出貨與內部;文書變更不動 requirements。"
+    },
+    "diff coverage": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "未覆蓋的**改動行**要逐行具名;文書變更沒有可覆蓋行,判定會回「不適用」而非通過。"
+    },
+    "doc claims": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "docs"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "文件裡「這道閘會擋 X」的登記,射程就是出貨文件那 50 個檔(CHG-20260812-04)。"
+    },
+    "doc integrity": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "all"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "結構同步 + CHG↔ACC + 欄位 + secrets:治理帳本的完整性對任何型態、任何變更都成立。"
+    },
+    "license-compliance": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "授權感染的是散布物;內部開發期工具不散布(CHG-20260804-03 的既有判讀)。"
+    },
+    "load-stress": {
+      "project_type": [
+        "backend-service",
+        "data-pipeline"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "只有會同時服務多個請求的東西才有「負載」可言;CLI 與 library 沒有這個面。"
+    },
+    "operational verify": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "docs",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "實際操作驗收含 plan-check 全掃與紅可達自檢,兩者分別踩在文件與程式上。"
+    },
+    "path case sensitivity (Linux 相容)": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "all"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "路徑大小寫不一致在 Windows 上永遠不顯形,而在 Linux 上是硬錯。文件路徑同樣會被引用。"
+    },
+    "performance": {
+      "project_type": [
+        "backend-service",
+        "data-pipeline"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "CHG-20260812-05 已在本 repo 除役(儀器解析度大於待測視窗:目標 156 ms、量到 125.000 ms = Windows 計時粒度的整數倍),待補項 #50 記著此後無人守。**而出貨的 nonfunctional_checks.json 仍寫著它適用 library,那是刻意的分岔**:那張表是給消費者專案的指引,改它等於替所有人宣告「library 不需要效能測試」。所以除役做在本 repo 的接線上,而本欄宣告的是**本 repo 的適用對象**。"
+    },
+    "plugin skills copies": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "docs",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "複本同步:文件與程式都會被複製進 plugin,**複本必然分岔**是這個 repo 的常設判讀。"
+    },
+    "probe leftovers": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "反轉探針的殘留會寫進原始碼目錄,而它曾經**照樣出貨**(CHG-20260810-06)。"
+    },
+    "property-fuzz": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "解析器不論出不出貨都會吃到畸形輸入;fuzz 射程清冊(#42)管的是誰在射程內。"
+    },
+    "py_compile all scripts": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "語法錯誤是程式的性質。"
+    },
+    "resource-leak": {
+      "project_type": [
+        "backend-service",
+        "data-pipeline"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "洩漏要長時間執行才顯形;一次性 CLI 呼叫結束就回收。"
+    },
+    "run all test_*.py": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "單元測試層。規格檔算進來是因為 steps 與 test_*.py 共用被測模組。"
+    },
+    "run all test_*.py(UTF-8 profile 輪:= hosted runner 的編碼環境)": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "同上,反方向的同一條軸——只在 UTF-8 現形的缺陷本機與 CI 兩邊都抓不到(CHG-20260810-05)。"
+    },
+    "run all test_*.py(非 UTF-8 stdio 輪:cp932)": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "同上,換一條編碼軸。這一輪不需要 runner,只是一個環境變數(CHG-20260807-02)。"
+    },
+    "run behaviour specs": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "spec"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "行為規格驗的是程式的對外行為;改規格或改被測程式都要跑。"
+    },
+    "sast": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "使用者豁免的是規格文書,不是 shell=True 與路徑處理那些真攻擊面(CHG-20260812-05)。內部工具同樣會被 agent 執行,攻擊面不因不出貨而消失。"
+    },
+    "static & security check": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code",
+        "docs"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "AST 規則只對程式有意義,但 secrets 掃描**涵蓋 docs**——憑證寫進文件一樣是外洩。"
+    },
+    "typecheck": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "型別錯誤是程式的性質,與專案型態無關;文書變更沒有型別可言。內部工具與出貨腳本都要,因為錯的型別在哪一邊都會炸。"
+    },
+    "verifier integrity": {
+      "project_type": [
+        "all"
+      ],
+      "change_scope": [
+        "all"
+      ],
+      "artifact_shipped": [
+        "both"
+      ],
+      "_why": "錨定的是**判斷能不能放行的裝置本身**。任何變更都可能動到它,包括只改一行註解——而那正是要留痕的理由。"
+    },
+    "visual-regression": {
+      "project_type": [
+        "frontend-web"
+      ],
+      "change_scope": [
+        "code"
+      ],
+      "artifact_shipped": [
+        "shipped"
+      ],
+      "_why": "沒有任何會被人用眼睛看的畫面(本 repo 的站台是靜態產物,已由死連結與殘留標記檢查涵蓋)。"
+    }
+  },
+  "_control_plane": {
+    "_doc": "**不可跳過的必跑項**(CHG-20260813-04,收待補項 #53)。它們是決定「哪些檢查會跑」的裝置本身,不是被那個決定管的對象——**硬套三軸只會製造恆真宣告**(填什麼都是 all)。所以登記其存在(有人記得它),但不填業務三軸。它們自己的缺席由 `test_gates_wired.py` 的**靜態存在斷言**守:靜態守動態、層間異質,不是同構遞迴。",
+    "items": {
+      "scope plan": "產出這一輪的不可變計畫。失敗即 fail-closed 進失敗清單 —— 第一版寫成 fail-open,於是計畫產不出來時整個對帳區塊靜靜不執行。",
+      "scope reconcile": "跑後對帳恆等式。它對帳的正是 step 自己,**自己記自己會是循環的**;而「不進計畫所以在射程外」與「宣告了不適用」在可觀測上不可區分——那正是分割完備性要殺的形狀,所以它必須被登記。"
+    }
+  }
+}

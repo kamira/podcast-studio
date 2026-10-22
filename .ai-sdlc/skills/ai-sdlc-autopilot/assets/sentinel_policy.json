@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "_note": "確定性哨兵政策。哨兵=無 LLM 的 check;治理語意(check 清單 + B=真 halt 分類)之單一真相在 ai-sdlc references/autonomy.md,本檔僅為 drive 層對照。兩層跳脫:A 無法評估→exit0 退回基線;B 真 halt→exit3 升級人。",
+  "sentinels": {
+    "requirement": {
+      "check": "plan_check",
+      "desc": "plan ↔ CHG 一致",
+      "cmd": "{python} skills/ai-sdlc-autopilot/scripts/autopilot_runner.py plan-check --chg {chg}"
+    },
+    "structure": {
+      "check": "doc_integrity_check",
+      "desc": "四結構 ↔ code drift",
+      "cmd": "{python} skills/ai-sdlc-autopilot/scripts/doc_integrity_check.py --repo {repo}"
+    },
+    "change": {
+      "check": "halt_gate",
+      "desc": "scope / halt 判定(需 CHG 脈絡:風險×閘查詢)",
+      "requires_chg": true,
+      "_why": "halt_gate 是「某風險在某閘該不該停」的查詢;若以預設 risk/gate 在 repo 級輪詢,依矩陣必然回 HALT(恆真式),會讓排程恆紅、B 層訊號變噪音。故無 --chg 時記為 A 層略過。",
+      "cmd": "{python} skills/ai-sdlc-autopilot/scripts/halt_gate.py --gate {gate} --risk {risk}"
+    },
+    "acceptance": {
+      "check": "governance_health",
+      "desc": "整體治理健康",
+      "cmd": "{python} skills/ai-sdlc-autopilot/scripts/governance_health.py --repo {repo}"
+    }
+  },
+  "reentry": {
+    "max_reentry": 20,
+    "base_case": ["plan_complete", "no_progress", "max_reentry_reached"]
+  },
+  "escape": {
+    "tier_a_cannot_evaluate": {"outcome": "exit0_baseline", "desc": "check 不可用/無法解析/機制失效 → fail-open 退回基線線性流程"},
+    "tier_b_real_halt": {"outcome": "exit3_escalate", "desc": "always-halt 動作 / 風險×閘 HALT / unknown=halt → 升級人,不 fall-through"}
+  }
+}
