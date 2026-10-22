@@ -64,3 +64,14 @@
     假設 PR 新增的 Python 檔含 GitHub 個人存取權杖樣式字串
     當 CI 執行 document job
     那麼 document job 失敗並指出檔案與行號
+
+  場景: PR 修改治理檢查本身
+    假設 PR 把 scripts/ci/commit_check.py 改成永遠成功
+    而且 PR 中有一個沒有 CHG 編號的程式 commit
+    當 CI 執行 chg job
+    那麼 chg job 仍失敗,因為執行的是 base 分支的檢查腳本
+    而且 review job 因治理基礎設施路徑未獲擁有者核准而失敗
+
+  場景: 程式變更不自動 merge
+    假設 PR 自評低風險且改到 media.py,CI 全綠
+    那麼 主 agent 停下等使用者核准,不自動 merge
