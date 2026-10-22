@@ -1,0 +1,34 @@
+{
+  "version": 3,
+  "_doc": "角色 → 該載入的 references 子集(機器可讀)。common 是所有角色進場都要的;roles 給各角色基本集;situational 依偵測(見 SKILL 的 detect→load)追加。外部協調器/agent 啟動某角色時讀本檔決定載哪幾份。名稱對應 references/<name>.md(+ .zh-tw.md)。由 scripts/role_loadout.py 讀取。v3:新增審議席 seat-*(唯讀、不可 spawn;派發包只含自己的席位定義,見 review-panel)。平台中立:spawn 能力對應各框架等效機制。",
+  "common": ["handshake", "knowledge", "doc-integrity"],
+  "roles": {
+    "orchestrator":     ["agent-hierarchy", "agent-worklog", "autonomy", "review-panel"],
+    "analyst":          ["requirement-analysis", "structure-design"],
+    "lead-implementer": ["modification-guide", "structure-design", "agent-hierarchy", "agent-worklog"],
+    "sub-implementer":  ["modification-guide", "agent-worklog"],
+    "verifier":         ["acceptance-verification", "independent-acceptance"],
+    "integrator":       ["independent-acceptance", "cross-agent"],
+    "reviewer":         ["independent-acceptance"],
+    "seat-risk":        ["review-panel", "modification-guide"],
+    "seat-impact":      ["review-panel", "modification-guide"],
+    "seat-drift":       ["review-panel", "doc-integrity"],
+    "seat-compliance":  ["review-panel", "knowledge"],
+    "seat-security":    ["review-panel", "autonomy"],
+    "seat-consistency": ["review-panel", "branch-isolation", "cross-repo"]
+  },
+  "situational": {
+    "multi_repo":           ["cross-repo"],
+    "multi_branch":         ["branch-isolation"],
+    "parallel_or_handoff":  ["cross-agent"],
+    "autonomous_run":       ["autonomy"],
+    "cicd":                 ["ci-cd"]
+  },
+  "aliases": {
+    "A1": "analyst",
+    "I1": "lead-implementer",
+    "I1.x": "sub-implementer",
+    "V1": "verifier",
+    "parent": "orchestrator"
+  }
+}

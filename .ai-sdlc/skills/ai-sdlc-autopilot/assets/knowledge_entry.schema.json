@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ai-sdlc knowledge entry",
+  "_doc": "knowledge 條目正典格式(拆檔模式)。必填 id/tier/rule/tags/status;enum 固定;lint 以 fail-loud 驗證(壞檔擋提交,不跳過)。tags 用小寫英文固定詞彙;rule 祈使句、可測試;source_quote 保留使用者原語言。時間一律 UTC+0。",
+  "type": "object",
+  "required": ["id", "tier", "rule", "tags", "status"],
+  "properties": {
+    "id":     { "type": "string", "pattern": "^(KN|DIR)-[A-Za-z0-9.\\-]+$" },
+    "tier":   { "enum": ["shallow", "deep", "user-confirmed"] },
+    "rule":   { "type": "string", "minLength": 3 },
+    "tags":   { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9\\-]+$" }, "minItems": 1 },
+    "keywords": { "type": "array", "items": { "type": "string" }, "description": "hit axis: free language, any language — user's words, API names, error strings" },
+    "status": { "enum": ["observing", "active", "retired"] },
+    "branch": { "type": "string", "description": "branch name or 'all'" },
+    "date":   { "type": "string", "description": "YYYY-MM-DD (UTC+0)" },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "counters": {
+      "type": "object",
+      "properties": {
+        "seen":         { "type": "integer", "minimum": 0 },
+        "applied":      { "type": "integer", "minimum": 0 },
+        "last_applied": { "type": ["string", "null"] }
+      }
+    },
+    "source_quote": { "type": "string", "deprecated": true, "description": "deprecated (v1.12.1): the rule is user-confirmed at recording, disputes re-consult the user, git history archives versions; a quote is a second never-updated representation + the biggest PII vector. Tolerated on legacy entries." },
+    "reason":  { "type": "string" },
+    "note":    { "type": "string" },
+    "history": { "type": "array", "items": { "type": "object" } }
+  }
+}

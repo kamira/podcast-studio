@@ -1,0 +1,915 @@
+[
+  {
+    "file": "api_fuzz_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "api_fuzz.feature"
+    ]
+  },
+  {
+    "file": "archived_ledger_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "該 CHG 應被具名擋下"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "archived_ledger.feature"
+    ],
+    "features_considered": [
+      "archived_ledger.feature"
+    ]
+  },
+  {
+    "file": "assertion_probe_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "assertion_probe.feature",
+      "behave_step_probe.feature"
+    ]
+  },
+  {
+    "file": "behave_step_probe_steps.py",
+    "sites": 2,
+    "ok": 2,
+    "ok_steps": [
+      "訊息字串應完整保留",
+      "該步驟應落在射程外,未執行應為 {n:d}"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "behave_step_probe.feature"
+    ],
+    "features_considered": [
+      "behave_step_probe.feature"
+    ]
+  },
+  {
+    "file": "build_loop_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "附加段不得聲稱通過"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "api_fuzz.feature",
+      "build_loop.feature",
+      "performance.feature",
+      "test_ratchet.feature"
+    ],
+    "features_considered": [
+      "api_fuzz.feature",
+      "build_loop.feature",
+      "performance.feature",
+      "test_ratchet.feature"
+    ]
+  },
+  {
+    "file": "capability_gated_verification_steps.py",
+    "sites": 3,
+    "ok": 3,
+    "ok_steps": [
+      "未涵蓋棘輪應擋下",
+      "未涵蓋棘輪應放行",
+      "可跑集判定應擋下"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "capability_gated_verification.feature"
+    ],
+    "features_considered": [
+      "capability_gated_verification.feature"
+    ]
+  },
+  {
+    "file": "change_scope_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "change_scope.feature"
+    ]
+  },
+  {
+    "file": "check_scope_steps.py",
+    "sites": 2,
+    "ok": 2,
+    "ok_steps": [
+      "宣告檢查應通過",
+      "宣告檢查應擋下,理由提到 {word}"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "check_scope.feature"
+    ],
+    "features_considered": [
+      "check_scope.feature"
+    ]
+  },
+  {
+    "file": "chg_command_trust_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "互動閘應該停下"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "chg_command_trust.feature"
+    ],
+    "features_considered": [
+      "chg_command_trust.feature"
+    ]
+  },
+  {
+    "file": "ci_failure_class_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "ci_failure_class.feature",
+      "verifier_scope.feature"
+    ]
+  },
+  {
+    "file": "ci_green_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "合併閘應為 \"{verdict}\""
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "ci_green_before_merge.feature"
+    ],
+    "features_considered": [
+      "ci_green_before_merge.feature"
+    ]
+  },
+  {
+    "file": "ci_scope_disclosure_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "應有恆執行的未涵蓋公告步驟"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "ci_scope_disclosure.feature"
+    ],
+    "features_considered": [
+      "ci_scope_disclosure.feature"
+    ]
+  },
+  {
+    "file": "claim_manifest_steps.py",
+    "sites": 3,
+    "ok": 3,
+    "ok_steps": [
+      "清冊建立應擋下,理由是 {reason}",
+      "裝飾的那條應擋下",
+      "清冊建立應通過"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "claim_manifest.feature"
+    ],
+    "features_considered": [
+      "claim_manifest.feature"
+    ]
+  },
+  {
+    "file": "coverage_migration_steps.py",
+    "sites": 3,
+    "ok": 3,
+    "ok_steps": [
+      "量測應失敗",
+      "失敗理由不應端出覆蓋率數字",
+      "棘輪應{verdict}"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "capability_gated_verification.feature",
+      "coverage_migration.feature"
+    ],
+    "features_considered": [
+      "capability_gated_verification.feature",
+      "coverage_migration.feature"
+    ]
+  },
+  {
+    "file": "design_diagrams_steps.py",
+    "sites": 2,
+    "ok": 2,
+    "ok_steps": [
+      "設計圖閘應該擋下",
+      "設計圖閘應該放行"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "design_diagrams.feature"
+    ],
+    "features_considered": [
+      "design_diagrams.feature"
+    ]
+  },
+  {
+    "file": "diff_coverage_steps.py",
+    "sites": 3,
+    "ok": 3,
+    "ok_steps": [
+      "diff coverage 應擋下",
+      "diff coverage 應通過",
+      "diff coverage 應擋下,理由是 {reason}"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "diff_coverage.feature"
+    ],
+    "features_considered": [
+      "diff_coverage.feature"
+    ]
+  },
+  {
+    "file": "doc_claims_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "文件宣稱清冊應擋下,理由是 {reason}"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "doc_claims.feature"
+    ],
+    "features_considered": [
+      "doc_claims.feature"
+    ]
+  },
+  {
+    "file": "doc_counts_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "對帳應擋下"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "doc_counts.feature",
+      "scope_enforcement.feature",
+      "vocab_parser_robustness.feature"
+    ],
+    "features_considered": [
+      "doc_counts.feature",
+      "scope_enforcement.feature",
+      "vocab_parser_robustness.feature"
+    ]
+  },
+  {
+    "file": "entry_point_stub_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "入口錨點檢查應擋下"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "entry_point_stub.feature"
+    ],
+    "features_considered": [
+      "entry_point_stub.feature"
+    ]
+  },
+  {
+    "file": "governance_baseline_steps.py",
+    "sites": 2,
+    "ok": 2,
+    "ok_steps": [
+      "基準點檢查應擋下,理由是 {reason}",
+      "解析結果應為 \"{baseline}\" 與 \"{adopt}\""
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "governance_baseline.feature",
+      "nonfunctional.feature"
+    ],
+    "features_considered": [
+      "governance_baseline.feature",
+      "nonfunctional.feature"
+    ]
+  },
+  {
+    "file": "governance_doc_fuzz_scope_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "api_fuzz.feature",
+      "archived_ledger.feature",
+      "assertion_probe.feature",
+      "behave_step_probe.feature",
+      "build_loop.feature",
+      "capability_gated_verification.feature",
+      "change_scope.feature",
+      "check_scope.feature",
+      "chg_command_trust.feature",
+      "ci_failure_class.feature",
+      "ci_green_before_merge.feature",
+      "ci_scope_disclosure.feature",
+      "claim_manifest.feature",
+      "coverage_migration.feature",
+      "design_diagrams.feature",
+      "diff_coverage.feature",
+      "doc_claims.feature",
+      "doc_counts.feature",
+      "entry_point_stub.feature",
+      "governance_baseline.feature",
+      "governance_doc_fuzz_scope.feature",
+      "halt_policy.feature",
+      "handshake_baseline.feature",
+      "interaction_gate.feature",
+      "interpreter_resolution.feature",
+      "knowledge_ladder_health.feature",
+      "ledger_discovery.feature",
+      "license_repro.feature",
+      "local_gate.feature",
+      "mcp_tools_alive.feature",
+      "named_paths.feature",
+      "nonfunctional.feature",
+      "onboarding_routing.feature",
+      "perf_stability.feature",
+      "performance.feature",
+      "platform_axes.feature",
+      "probe_leftovers.feature",
+      "quality_judge.feature",
+      "remaining_gap_fuzz_scope.feature",
+      "repo_layout.feature",
+      "review_panel.feature",
+      "scope_enforcement.feature",
+      "ship_classification.feature",
+      "static_and_quality.feature",
+      "test_ratchet.feature",
+      "toolchain_probe.feature",
+      "verifier_scope.feature",
+      "vocab_parser_robustness.feature"
+    ]
+  },
+  {
+    "file": "halt_policy_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "每個風險等級的合併裁決都不得比 ai-sdlc 寬鬆"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "build_loop.feature",
+      "ci_failure_class.feature",
+      "halt_policy.feature",
+      "review_panel.feature",
+      "test_ratchet.feature"
+    ],
+    "features_considered": [
+      "build_loop.feature",
+      "ci_failure_class.feature",
+      "halt_policy.feature",
+      "review_panel.feature",
+      "test_ratchet.feature"
+    ]
+  },
+  {
+    "file": "handshake_baseline_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "handshake_baseline.feature"
+    ]
+  },
+  {
+    "file": "interaction_gate_steps.py",
+    "sites": 3,
+    "ok": 3,
+    "ok_steps": [
+      "plan-check 應該擋下",
+      "訊息不得出現任何預設值",
+      "處置應為 \"{disposal}\""
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "capability_gated_verification.feature",
+      "chg_command_trust.feature",
+      "ci_green_before_merge.feature",
+      "design_diagrams.feature",
+      "entry_point_stub.feature",
+      "governance_baseline.feature",
+      "handshake_baseline.feature",
+      "interaction_gate.feature",
+      "local_gate.feature",
+      "quality_judge.feature",
+      "static_and_quality.feature"
+    ],
+    "features_considered": [
+      "capability_gated_verification.feature",
+      "chg_command_trust.feature",
+      "ci_green_before_merge.feature",
+      "design_diagrams.feature",
+      "entry_point_stub.feature",
+      "governance_baseline.feature",
+      "handshake_baseline.feature",
+      "interaction_gate.feature",
+      "local_gate.feature",
+      "quality_judge.feature",
+      "static_and_quality.feature"
+    ]
+  },
+  {
+    "file": "interpreter_resolution_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "應失敗"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "coverage_migration.feature",
+      "interpreter_resolution.feature"
+    ],
+    "features_considered": [
+      "coverage_migration.feature",
+      "interpreter_resolution.feature"
+    ]
+  },
+  {
+    "file": "knowledge_ladder_health_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "knowledge_ladder_health.feature"
+    ]
+  },
+  {
+    "file": "ledger_discovery_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "應擋下並指出缺欄"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "ledger_discovery.feature"
+    ],
+    "features_considered": [
+      "ledger_discovery.feature"
+    ]
+  },
+  {
+    "file": "license_repro_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "狀態應為 \"{want}\""
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "capability_gated_verification.feature",
+      "license_repro.feature",
+      "nonfunctional.feature"
+    ],
+    "features_considered": [
+      "capability_gated_verification.feature",
+      "license_repro.feature",
+      "nonfunctional.feature"
+    ]
+  },
+  {
+    "file": "local_gate_steps.py",
+    "sites": 2,
+    "ok": 2,
+    "ok_steps": [
+      "本機閘應該擋下",
+      "本機閘訊息應附上宣告的指令原文"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "local_gate.feature"
+    ],
+    "features_considered": [
+      "local_gate.feature"
+    ]
+  },
+  {
+    "file": "mcp_tools_alive_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "mcp_tools_alive.feature"
+    ]
+  },
+  {
+    "file": "named_paths_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "named_paths.feature"
+    ]
+  },
+  {
+    "file": "nonfunctional_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "裁決狀態應為 \"{want}\""
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "nonfunctional.feature"
+    ],
+    "features_considered": [
+      "nonfunctional.feature"
+    ]
+  },
+  {
+    "file": "onboarding_routing_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "應擋下並說明落點在 repo 之外"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "onboarding_routing.feature"
+    ],
+    "features_considered": [
+      "onboarding_routing.feature"
+    ]
+  },
+  {
+    "file": "perf_stability_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "訊息不得含肯定式的通過措辭"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "perf_stability.feature"
+    ],
+    "features_considered": [
+      "perf_stability.feature"
+    ]
+  },
+  {
+    "file": "performance_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "performance.feature"
+    ]
+  },
+  {
+    "file": "platform_axes_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "檢查應擋下"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "check_scope.feature",
+      "entry_point_stub.feature",
+      "governance_baseline.feature",
+      "platform_axes.feature",
+      "probe_leftovers.feature",
+      "scope_enforcement.feature"
+    ],
+    "features_considered": [
+      "check_scope.feature",
+      "entry_point_stub.feature",
+      "governance_baseline.feature",
+      "platform_axes.feature",
+      "probe_leftovers.feature",
+      "scope_enforcement.feature"
+    ]
+  },
+  {
+    "file": "probe_leftovers_steps.py",
+    "sites": 3,
+    "ok": 3,
+    "ok_steps": [
+      "殘留檢查應擋下並指名該檔",
+      "殘留檢查應擋下並指名該目錄",
+      "殘留檢查應擋下並指名該步驟檔"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "probe_leftovers.feature"
+    ],
+    "features_considered": [
+      "probe_leftovers.feature"
+    ]
+  },
+  {
+    "file": "quality_judge_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "重建應被拒絕"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "quality_judge.feature"
+    ],
+    "features_considered": [
+      "quality_judge.feature"
+    ]
+  },
+  {
+    "file": "remaining_gap_fuzz_scope_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "remaining_gap_fuzz_scope.feature"
+    ]
+  },
+  {
+    "file": "repo_layout_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "repo_layout.feature"
+    ]
+  },
+  {
+    "file": "review_panel_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "review_panel.feature"
+    ]
+  },
+  {
+    "file": "scope_enforcement_steps.py",
+    "sites": 7,
+    "ok": 7,
+    "ok_steps": [
+      "收窄檢查應通過",
+      "收窄檢查應擋下,理由提到 {word}",
+      "跑集對帳應通過",
+      "跑集對帳應擋下,理由提到 {word}",
+      "計畫產生應擋下,理由提到 {word}",
+      "對帳訊息應明示本輪不是驗收",
+      "記錄跳過應被擋下,理由提到 {word}"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "scope_enforcement.feature"
+    ],
+    "features_considered": [
+      "scope_enforcement.feature"
+    ]
+  },
+  {
+    "file": "ship_classification_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "ship_classification.feature"
+    ]
+  },
+  {
+    "file": "static_and_quality_steps.py",
+    "sites": 2,
+    "ok": 2,
+    "ok_steps": [
+      "委派驗證結果應為 \"{expected}\"",
+      "委派驗證結果不得是 \"{unwanted}\""
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "design_diagrams.feature",
+      "static_and_quality.feature"
+    ],
+    "features_considered": [
+      "design_diagrams.feature",
+      "static_and_quality.feature"
+    ]
+  },
+  {
+    "file": "test_ratchet_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "api_fuzz.feature",
+      "build_loop.feature",
+      "capability_gated_verification.feature",
+      "chg_command_trust.feature",
+      "ci_failure_class.feature",
+      "ci_green_before_merge.feature",
+      "claim_manifest.feature",
+      "design_diagrams.feature",
+      "diff_coverage.feature",
+      "entry_point_stub.feature",
+      "governance_baseline.feature",
+      "halt_policy.feature",
+      "handshake_baseline.feature",
+      "interaction_gate.feature",
+      "knowledge_ladder_health.feature",
+      "license_repro.feature",
+      "local_gate.feature",
+      "mcp_tools_alive.feature",
+      "nonfunctional.feature",
+      "performance.feature",
+      "probe_leftovers.feature",
+      "quality_judge.feature",
+      "review_panel.feature",
+      "static_and_quality.feature",
+      "test_ratchet.feature",
+      "verifier_scope.feature",
+      "vocab_parser_robustness.feature"
+    ]
+  },
+  {
+    "file": "toolchain_probe_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "assertion_probe.feature",
+      "behave_step_probe.feature",
+      "capability_gated_verification.feature",
+      "claim_manifest.feature",
+      "license_repro.feature",
+      "nonfunctional.feature",
+      "toolchain_probe.feature"
+    ]
+  },
+  {
+    "file": "verifier_scope_steps.py",
+    "sites": 0,
+    "ok": 0,
+    "ok_steps": [],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [],
+    "features_considered": [
+      "verifier_scope.feature"
+    ]
+  },
+  {
+    "file": "vocab_parser_robustness_steps.py",
+    "sites": 1,
+    "ok": 1,
+    "ok_steps": [
+      "清冊對帳應擋下"
+    ],
+    "decorative": [],
+    "not_run": [],
+    "out_of_range": [],
+    "baseline_green": [
+      "vocab_parser_robustness.feature"
+    ],
+    "features_considered": [
+      "vocab_parser_robustness.feature"
+    ]
+  }
+]

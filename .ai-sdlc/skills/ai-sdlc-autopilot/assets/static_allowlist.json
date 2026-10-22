@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "_doc": "靜態/安全檢查的具名豁免(CHG-20260803-06)。鍵為 `<檔案>::<規則>`,值為**理由**。刻意不含行號:含行號的話每次改動都要重填,而那會逼人把整份清單當噪音略過,豁免就從『署名』退化成『橡皮圖章』。由 scripts/static_check.py 讀取。",
+  "_rules": "加一條豁免等於說『我看過這一項,而且我認為它在這個位置是正當的』。理由要寫得讓半年後的人能判斷它是否還成立——寫『這是測試』不夠,要寫『為什麼在這裡是安全的』。",
+  "allow": {
+    "skills/ai-sdlc-autopilot/scripts/lib/exec_util.py::shell-true": "runner 的職責就是執行操作者透過 --test-cmd / --verify-cmd 等旗標提供的指令模板。指令來自操作者的命令列,不是外部輸入;改成 argv 陣列會讓使用者無法寫管線與重導向,而那是這些旗標的主要用途。內容來源的指令另有信任邊界把關(CHG-20260803-05)。",
+    "skills/ai-sdlc-autopilot/scripts/lib/ci_gate.py::shell-true": "執行的是 --ci-cmd,由操作者在命令列提供,用於非 GitHub 的 CI 查詢。同 exec_util 的理由。",
+    "skills/ai-sdlc-autopilot/scripts/autopilot_sentinels.py::shell-true": "執行的是哨兵政策檔內的 check 指令。政策檔是操作者維護的設定,且啟動失敗會被 launchable() 先攔下。",
+    "skills/ai-sdlc-autopilot/scripts/mutation_harness.py::shell-true": "執行的是 --test 指定的測試指令,由呼叫者(變異閘或操作者)提供。",
+    "skills/ai-sdlc-autopilot/scripts/test_e2e_build_gates.py::shell-true": "測試 fixture 內對 tmpdir 跑 git 指令,指令為本檔硬編碼的常數字串。",
+    "skills/ai-sdlc-autopilot/scripts/test_e2e_build_gates.py::shell-injection": "測試 fixture 以 f-string 組出 `git {args}`,args 為本檔硬編碼的三個常數之一,不接受任何外部輸入。",
+    "skills/ai-sdlc-autopilot/scripts/test_doc_integrity_check.py::shell-true": "測試 fixture 對 tmpdir 跑 git 指令,指令為硬編碼常數。",
+    "skills/ai-sdlc-autopilot/scripts/test_doc_integrity_check.py::secret:private-key": "這是**測試用的假樣本**——用來驗證 secrets 掃描抓不抓得到私鑰標頭。若把它移除,那條斷言就沒有東西可抓,等於關閉該檢查。",
+    "skills/ai-sdlc-autopilot/scripts/test_doc_integrity_check.py::secret:credential-assignment": "同上,測試用的假憑證字串,用於驗證 credential-assignment 樣式與『非 docs/ 不在射程』兩條斷言。",
+    "skills/ai-sdlc-autopilot/scripts/test_api_fuzz.py::secret:credential-assignment": "`DOC_BAD_INPUT` 是**餵給 check_secrets 的紅可達 fixture**:那道檢查的工作就是抓出文件裡的 credential 賦值,所以測它必須有一個長得像 credential 的字串,否則測到的是一條永遠不觸發的路(CHG-20260809-02)。值寫成 `NOT-A-REAL-KEY-0123456789`,一眼看得出不是真鍵,也不是任何服務的有效格式。**代價要寫明**:這條豁免以檔為單位,若日後這份檔真的混進一個 credential 賦值,掃描不會叫——所以這份檔只准放 fixture,不准放設定。"
+  }
+}

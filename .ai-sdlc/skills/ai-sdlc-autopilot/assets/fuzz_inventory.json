@@ -1,0 +1,292 @@
+{
+  "version": 2,
+  "_doc": "會解析外部輸入的函式清冊(CHG-20260808-01 建立;CHG-20260808-03 改為由證據推導)。**掃描自動、處置也自動**——處置由 `lib/fuzz_scope.derive()` 從證據推導,清冊上的宣告與推導不一致就擋下。第一版是人依函式名批次指派的,而 lint 只驗『值合不合法』:39 條非目標處置裡有 7 條是錯的,6 條落在同一格。**理由可以寫得漂亮,證據不行。**",
+  "_criterion": "模組層級函式,函式體內把外部原始資料轉成結構:json.loads / ast.parse / *.read_text / re.{search,match,finditer,findall,split,fullmatch},包含模組層級 re.compile 綁定的名字、以及迭代出來的 pattern。",
+  "_derivation_order": [
+    "1. 在 TARGETS 內 → targeted",
+    "2. 只有 read_text,沒有 loads/regex/ast → reads-only",
+    "3. 讀取路徑全部指向 repo 自己的常數 → repo-asset",
+    "4. 其餘 → registered-gap(必須帶待補項編號)",
+    "**第 2 條必須排在第 3 條之前**:plan.read_chg 的路徑來自參數,先問路徑會被推成 gap(誤報),而它只讀不解析。順序是判定的一部分,不是實作細節。",
+    "判不出來一律往 registered-gap 倒——往多驗那邊,不往少驗那邊(KN-004)。"
+  ],
+  "_dispositions": {
+    "targeted": "在 .github/run_property_fuzz.py 的 TARGETS 內,每輪 fuzz 實跑。",
+    "reads-only": "有 read_text 但沒有任何解析呼叫——讀進來不解讀,壞掉的內容不會在這裡變成崩潰。",
+    "repo-asset": "讀取路徑指向本 repo 自己出貨的檔;輸入不是外部來的,且 ci_local 的 JSON validity 已逐檔驗過。",
+    "registered-gap": "**同一風險面、尚未涵蓋、已登記**。不是豁免——每條必須帶待補項編號,追得到人。"
+  },
+  "_removed_dispositions": {
+    "thin-wrapper": "CHG-20260808-03 拿掉。判準是「真正的解析在別的函式」,而函式**會進清冊就是因為它自己在解析**——判準與入選條件直接衝突。一個永遠搪塞得過去的類別就會被拿來搪塞:上一輪 7 個錯有 6 個在這格。",
+    "self-written": "CHG-20260808-03 拿掉。它真正想說的是「只讀不解析」,而那個機器判得出來,不必靠人說。已由 reads-only 取代。"
+  },
+  "entries": {
+    "capabilities._traversable": {
+      "disposition": "reads-only"
+    },
+    "ci_gate.parse_checks": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.archived_reason": {
+      "disposition": "reads-only"
+    },
+    "doc_integrity_check.check_chg_acc": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_commits": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_coverage_registry": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_directive_shape": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_entry_point": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_fields": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_governance_baseline": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_knowledge_entries": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_knowledge_index": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_recurrence_field": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_regression_pointers": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_secrets": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_uncovered_registered": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.check_verifier_identity": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.normalise_identity": {
+      "disposition": "targeted"
+    },
+    "doc_integrity_check.parse_baseline_decl": {
+      "disposition": "targeted"
+    },
+    "exec_util.blocked_report": {
+      "disposition": "targeted"
+    },
+    "exec_util.build_contract": {
+      "disposition": "repo-asset"
+    },
+    "exec_util.cmd_exe_missing": {
+      "disposition": "targeted"
+    },
+    "exec_util.global_constraints": {
+      "disposition": "targeted"
+    },
+    "exec_util.quote_lines": {
+      "disposition": "targeted"
+    },
+    "exec_util.write_handshake": {
+      "disposition": "reads-only"
+    },
+    "fuzz_scope.load_inventory": {
+      "disposition": "repo-asset"
+    },
+    "fuzz_scope.scan": {
+      "disposition": "targeted"
+    },
+    "interaction.exemption": {
+      "disposition": "targeted"
+    },
+    "interaction.load_kinds": {
+      "disposition": "repo-asset"
+    },
+    "interaction.parse_spec": {
+      "disposition": "targeted"
+    },
+    "interaction.required": {
+      "disposition": "targeted"
+    },
+    "interaction.run_gate": {
+      "disposition": "targeted"
+    },
+    "local_gate._has_target": {
+      "disposition": "targeted"
+    },
+    "local_gate.declared": {
+      "disposition": "targeted"
+    },
+    "mcp._load_vocab": {
+      "disposition": "targeted"
+    },
+    "mcp._search_one": {
+      "disposition": "targeted"
+    },
+    "mcp.main": {
+      "disposition": "targeted"
+    },
+    "mcp.parse_script_json": {
+      "disposition": "targeted"
+    },
+    "mechanisms.load_baseline": {
+      "disposition": "repo-asset"
+    },
+    "panel.load_seats": {
+      "disposition": "repo-asset"
+    },
+    "panel.parse_cross": {
+      "disposition": "targeted"
+    },
+    "panel.verdict_lines": {
+      "disposition": "targeted"
+    },
+    "plan.bspec_paths": {
+      "disposition": "targeted"
+    },
+    "plan.bspec_required": {
+      "disposition": "targeted"
+    },
+    "plan.chg_id_of": {
+      "disposition": "targeted"
+    },
+    "plan.declared_template": {
+      "disposition": "targeted"
+    },
+    "plan.diagram_problems": {
+      "disposition": "targeted"
+    },
+    "plan.diagram_required": {
+      "disposition": "targeted"
+    },
+    "plan.diagram_skipped": {
+      "disposition": "targeted"
+    },
+    "plan.interaction_kinds": {
+      "disposition": "targeted"
+    },
+    "plan.mockup_problems": {
+      "disposition": "targeted"
+    },
+    "plan.mockup_required": {
+      "disposition": "targeted"
+    },
+    "plan.mockup_skipped": {
+      "disposition": "targeted"
+    },
+    "plan.parse_tasks": {
+      "disposition": "targeted"
+    },
+    "plan.read_chg": {
+      "disposition": "reads-only"
+    },
+    "plan.risk_of": {
+      "disposition": "targeted"
+    },
+    "plan.section_body": {
+      "disposition": "targeted"
+    },
+    "plan.security_required": {
+      "disposition": "targeted"
+    },
+    "plan.security_skipped": {
+      "disposition": "targeted"
+    },
+    "plan.task_entry": {
+      "disposition": "targeted"
+    },
+    "plan.tick_task": {
+      "disposition": "targeted"
+    },
+    "plan.unsafe_feature_paths": {
+      "disposition": "targeted"
+    },
+    "policy.load_policy": {
+      "disposition": "reads-only"
+    },
+    "policy.parse_policy_text": {
+      "disposition": "targeted"
+    },
+    "profile.exemption": {
+      "disposition": "targeted"
+    },
+    "profile.load_kinds": {
+      "disposition": "repo-asset"
+    },
+    "profile.load_profile": {
+      "disposition": "targeted"
+    },
+    "profile.parse_spec": {
+      "disposition": "targeted"
+    },
+    "profile.required": {
+      "disposition": "targeted"
+    },
+    "profile.run_gate": {
+      "disposition": "reads-only"
+    },
+    "quality.exemption": {
+      "disposition": "targeted"
+    },
+    "quality.load_kinds": {
+      "disposition": "repo-asset"
+    },
+    "quality.parse_spec": {
+      "disposition": "targeted"
+    },
+    "quality.required": {
+      "disposition": "targeted"
+    },
+    "quality.run_gate": {
+      "disposition": "targeted"
+    },
+    "quality_judge.judge_api_contract": {
+      "disposition": "targeted"
+    },
+    "quality_judge.judge_build_repro": {
+      "disposition": "targeted"
+    },
+    "quality_judge.judge_license": {
+      "disposition": "targeted"
+    },
+    "quality_judge.judge_performance": {
+      "disposition": "targeted"
+    },
+    "quality_judge.judge_property_fuzz": {
+      "disposition": "targeted"
+    },
+    "quality_judge.load_baseline": {
+      "disposition": "targeted"
+    },
+    "quality_judge.parse_bandit": {
+      "disposition": "targeted"
+    },
+    "quality_judge.parse_coverage": {
+      "disposition": "targeted"
+    },
+    "quality_judge.parse_coverage_lines": {
+      "disposition": "targeted"
+    },
+    "quality_judge.parse_mypy": {
+      "disposition": "targeted"
+    },
+    "quality_judge.parse_pip_audit": {
+      "disposition": "targeted"
+    },
+    "ratchet.before_after": {
+      "disposition": "reads-only"
+    },
+    "ratchet.test_metrics": {
+      "disposition": "targeted"
+    },
+    "verify.parse_mutation_result": {
+      "disposition": "targeted"
+    }
+  }
+}

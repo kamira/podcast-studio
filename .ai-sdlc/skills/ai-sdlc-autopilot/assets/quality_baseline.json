@@ -1,0 +1,2226 @@
+{
+  "version": 1,
+  "_doc": "委派驗證的基線(CHG-20260804-01)。基線是**止血點,不是免死金牌**:列在這裡的既有發現放行,新增的一律擋,而且基線**只准往下**——發現消失時判讀器會提示移除該條。指紋不含行號(行號會漂移,規則與檔案不會)。每一條都必須有非空理由:豁免要留下署名,不是靜默略過。",
+  "_updating": "更新須指名授權的 CHG(比照 verifier_integrity 的形態)。",
+  "authorised_by": "CHG-20260806-02",
+  "coverage": {
+    "total": 86.04,
+    "reason": "2026-08-12(CHG-20260811-03)由 83.90 調為 85.92。**這是量測制度遷移(measurement migration),不是 coverage exception,也不是退步。** 舊指令只在 `test_*.py` 上量覆蓋率,**完全不跑 behave**——於是「測試寫在行為規格層」的程式碼一律被算成未覆蓋,而行為規格正是本 repo 偏好的紀律(40 份 .feature / 468 個場景)。咬到人的實例:CHG-20260811-02 的新程式有 22 個 behave 場景(真實 git fixture、七條擋下路徑逐條驗理由),覆蓋率棘輪卻判它「下降 0.8%」並擋下合併——那不是缺測,是**量測模型與測試模型對不上**。|| 舊指令:`coverage run --append <每支 test_*.py>`;新指令:同上 **+ `coverage run --append -m behave`**。|| 兩組數字都在**同一環境、同一新指令**下量:合併基準點 `7ee182f`(origin/main)**85.9202%(6200/7216)**——連量兩次完全相同(6200/7216),所以基線**不預留緩衝**、不取好看的整數;取無條件捨去到小數兩位 = 85.92(沿用前版的取法)。|| **工具切換不得順便赦免真正的退步**:本筆自己的分支同樣要 ≥ 重測後的基準點。|| 之後只准隨實際覆蓋率**上調**;再次下調必須具名例外與獨立理由。|| 另加 **diff coverage**(見 `.github/check_diff_coverage.py`):behave 帶來的整體漲幅會形成一塊「額度」,讓日後的新未測程式躲在總數裡——逐行檢查改動的程式碼,才是這道閘真正該問的問題。|| 裁決:codex(DIR-2 本 session 授予);它駁回「補重複單元測試」與「下調基線」,理由是「選 (a) 會把『測試工具看不見』轉嫁成作者必須重複測試;選 (c) 則是在已知量測失真的情況下調低標準」。 || **本筆自己的結果**:加了 `parse_coverage_lines` 與整數判定路徑之後,第一次量是 6213/7240(85.81%)——**低於基線,被自己的閘擋下**。那不是量測問題,是新程式真的沒測:新增 24 個 statement 只覆蓋 13 個。已補 `t5b_coverage_lines`(14 條斷言,測的是**決定要不要擋下合併的判斷邏輯本身**,不是為了數字)。補完後量到 6255/7270,而**最終定案是 6254/7270(86.0247%)**。那一行的差是**我自己造成的、可解釋的、確定性的**:把 `parse_coverage_lines` 登記進 fuzz 清冊之後,`reconcile()` 由「回報一個問題」變成「回空清單」,**那條組裝問題訊息的行不再執行**。已用兩次背靠背量測確認 6254 穩定且**逐檔零差異**。 || **零容差的代價要寫明**:普通的重構刪碼只要比值掉一點點就會擋(實測 6028/7016 即被擋,雖然百分比顯示同為 85.92%)。逃生口是連理由更新基線——那是設計的流程,不是 bug。分母變化一律印出來,讓「靠刪程式達標」看得見。 || ⚠️ **狀態:僅本機驗證,CI 未驗**。跨環境基線驗證(不同 OS / Python / locale 會改變**可覆蓋行集合本身**)是這道閘取得正式效力的**前置條件**,不是 TODO;觸發事件是 CI 恢復(目前因帳務問題一行程式都跑不起來)。在那之前,本檔與任何文件**不得聲稱此 gate 已在 CI 生效**。 || ⚠️ **覆蓋率量的是「執行」不是「驗證」**,而納入 behave 會放大這個落差:一個端到端場景可能點亮幾十行而只斷言終點一行。數字變好看(83.90 → 86.03)**誤導性反而變強**。驗證品質由 review 與 diff coverage 的具名機制把守,不由這個數字把守。 || ⚠️ **量測穩定性:查過了,沒有缺陷,但過程值得記。** 本筆過程中出現過三個讀數(6255 / 6254 / **5987**),我一度判定為「同機量測不穩,零容差的前提被推翻」——**那個判定是錯的**。逐一查證:6255→6254 是上面那條可解釋的一行;**5987(少 267 行)是一個被 kill 的量測留下的殘局污染了緊接的下一次**(我有一個迴圈跑到逾時被砍)。兩次乾淨的背靠背量測是 6254/6254,逐檔零差異。 || **方法要留著,結論要訂正**:看到同一 commit 兩個數字,先當量測缺陷去查、不先動基線——這是 codex 明講的規則,而它這次讓我沒有把一個假問題寫進基線。查出來沒有缺陷,所以基線不是「用降低吸收」,6254 就是這棵樹的真實值。 || **給下一棒的實務點**:被中斷的覆蓋率量測會污染下一次,而污染的方向是**偏低**(擋下而不是放行)——fail-closed,方向安全。看到一個大幅偏低的讀數,先確認上一次量測有沒有被砍掉,再去找「少測了什麼」。 || **2026-08-12 上調:6254/7270 → 6329/7356(86.02% → 86.04%)**,由 CHG-20260811-02(治理基準點的機器強制)帶來:新增 86 行可覆蓋程式、覆蓋 75 行。**這一格正好是新棘輪存在的理由**——舊的百分比判法只會顯示「+0.02%」,而整數版把分母的變化印了出來(`可覆蓋行數 7270 → 7356(+86)`)。上調是鎖住已得的高度,不是放寬。 || ⚠️ **2026-08-12 訂正待補項 44 的性質(CHG-20260812-01)**:使用者裁示「這是**私人 repo**,只採取**最低限度的線上 CI**」。原本寫的「跨環境基線驗證綁 CI 恢復」因此**不是在等,是永遠不會兌現**——而 fable 的判語是:**「一個永不觸發的前置條件,比沒有條件更危險,因為它讓文件看起來有防線。」** || 改寫為**兩層邊界**,缺一不可:**①驗證狀態(事實)**——每個環境標「已驗證(附命令、輸出、OS/版本/工具鏈、可重跑方式)」或「未驗證」;空白就是未驗證,不准寫「應該可以」。目前:**Windows 已驗證,其餘未驗證**。**②支援承諾(政策)**——保證 / 非保證,而規則是**承諾集合 ⊆ 已驗證集合,永遠不得反向**。 || **本閘的效力範圍聲明**:上述 pass 結論**僅及於已驗證環境**;於未驗證環境,**本結論不存在,而非「大概成立」**。 || 升級程序:任一環境要進入保證範圍,須先附**該環境的可重現驗證證據**(本機 / 離線 / 按需工作流皆可,**不要求常設線上 CI**)。",
+    "covered": 6329,
+    "statements": 7356
+  },
+  "findings": {
+    "974775e5d5d69c80": {
+      "kind": "sast",
+      "rule": "B108",
+      "file": "plugins/ai-sdlc-suite/hooks/pre_edit_gate.py",
+      "reason": "誤報:`/tmp/` 是 SKIP_PARTS 裡的**路徑子字串**(用來略過暫存目錄下的檔案),不是暫存檔的建立或使用。"
+    },
+    "66b0f644d25296dc": {
+      "kind": "sast",
+      "rule": "B602",
+      "file": "skills/ai-sdlc-autopilot/scripts/autopilot_sentinels.py",
+      "reason": "已於 static_allowlist.json 具名豁免:runner 的職責就是執行操作者以 --test-cmd / --verify-cmd 等旗標提供的指令模板;改成 argv 陣列會讓使用者無法寫管線與重導向,而那正是這些旗標的主要用途。CHG 內容宣告的指令另有信任邊界把關(CHG-20260803-05)。"
+    },
+    "8995050639cc2f95": {
+      "kind": "sast",
+      "rule": "B602",
+      "file": "skills/ai-sdlc-autopilot/scripts/lib/ci_gate.py",
+      "reason": "已於 static_allowlist.json 具名豁免:runner 的職責就是執行操作者以 --test-cmd / --verify-cmd 等旗標提供的指令模板;改成 argv 陣列會讓使用者無法寫管線與重導向,而那正是這些旗標的主要用途。CHG 內容宣告的指令另有信任邊界把關(CHG-20260803-05)。"
+    },
+    "0f9daa5b98abd725": {
+      "kind": "sast",
+      "rule": "B602",
+      "file": "skills/ai-sdlc-autopilot/scripts/lib/exec_util.py",
+      "reason": "已於 static_allowlist.json 具名豁免:runner 的職責就是執行操作者以 --test-cmd / --verify-cmd 等旗標提供的指令模板;改成 argv 陣列會讓使用者無法寫管線與重導向,而那正是這些旗標的主要用途。CHG 內容宣告的指令另有信任邊界把關(CHG-20260803-05)。"
+    },
+    "9ec59720ff063890": {
+      "kind": "sast",
+      "rule": "B602",
+      "file": "skills/ai-sdlc-autopilot/scripts/mutation_harness.py",
+      "reason": "已於 static_allowlist.json 具名豁免:runner 的職責就是執行操作者以 --test-cmd / --verify-cmd 等旗標提供的指令模板;改成 argv 陣列會讓使用者無法寫管線與重導向,而那正是這些旗標的主要用途。CHG 內容宣告的指令另有信任邊界把關(CHG-20260803-05)。"
+    },
+    "68a699709b59dd62": {
+      "kind": "sast",
+      "rule": "B602",
+      "file": "skills/ai-sdlc-autopilot/scripts/test_e2e_build_gates.py",
+      "reason": "已於 static_allowlist.json 具名豁免:runner 的職責就是執行操作者以 --test-cmd / --verify-cmd 等旗標提供的指令模板;改成 argv 陣列會讓使用者無法寫管線與重導向,而那正是這些旗標的主要用途。CHG 內容宣告的指令另有信任邊界把關(CHG-20260803-05)。"
+    }
+  },
+  "_environment": "基線以 **CI 的 quality job**(ubuntu / Python 3.11)產出。工具的訊息文字會隨執行環境變動,而指紋含訊息——基線必須屬於實際執行強制的那個環境,否則本機與 CI 會互相判對方為新增。",
+  "api_contract": {
+    "cli_flags": [
+      "--agent-cmd",
+      "--allow-no-ci",
+      "--allow-test-reduction",
+      "--allow-untested",
+      "--chg",
+      "--ci-cmd",
+      "--confidence-threshold",
+      "--confirmed",
+      "--dry-run",
+      "--escalate-cmd",
+      "--flaky-runs",
+      "--gherkin-cmd",
+      "--interaction-cmd",
+      "--interaction-kinds",
+      "--max-fix-rounds",
+      "--max-tasks",
+      "--min-kill-rate",
+      "--mutation",
+      "--mutation-max",
+      "--no-commit",
+      "--no-mutation",
+      "--nonfunctional-kinds",
+      "--policy",
+      "--pr",
+      "--quality-baseline",
+      "--quality-kinds",
+      "--reentry-count",
+      "--repo",
+      "--review-cmd",
+      "--review-panel",
+      "--seat-cmd",
+      "--single",
+      "--static-allowlist",
+      "--test-cmd",
+      "--test-platforms",
+      "--trust-chg-commands",
+      "--verified",
+      "--verify-cmd"
+    ],
+    "modules": {
+      "skills/ai-sdlc-autopilot/scripts/autopilot_runner.py": {
+        "cmd_sentinels": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "args"
+          ],
+          "required": [
+            "args"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/autopilot_sentinels.py": {
+        "launchable": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "cmd"
+          ],
+          "required": [
+            "cmd"
+          ],
+          "varargs": false
+        },
+        "load_policy": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [
+            "path"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "poll": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "args"
+          ],
+          "required": [
+            "args"
+          ],
+          "varargs": false
+        },
+        "run_check": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "cmd",
+            "repo"
+          ],
+          "required": [
+            "cmd",
+            "repo"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/bilingual_check.py": {
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "pairs": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "skill_dir"
+          ],
+          "required": [
+            "skill_dir"
+          ],
+          "varargs": false
+        },
+        "profile": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "f"
+          ],
+          "required": [
+            "f"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/cross_repo_check.py": {
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "read_authority_version": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "authority"
+          ],
+          "required": [
+            "authority"
+          ],
+          "varargs": false
+        },
+        "read_repo_pinned": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/doc_integrity_check.py": {
+        "check_chg_acc": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_commits": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "since"
+          ],
+          "required": [
+            "repo",
+            "since"
+          ],
+          "varargs": false
+        },
+        "check_coverage_registry": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_entry_point": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_fields": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "require_branch",
+            "require_commit"
+          ],
+          "required": [
+            "repo",
+            "require_branch",
+            "require_commit"
+          ],
+          "varargs": false
+        },
+        "check_knowledge_bootstrap": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_knowledge_entries": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_knowledge_index": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_recurrence_field": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_regression_pointers": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_secrets": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "check_structural_sync": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "changed",
+            "structural"
+          ],
+          "required": [
+            "changed",
+            "structural"
+          ],
+          "varargs": false
+        },
+        "classify_status": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "git": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": true
+        },
+        "git_staged_files": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/governance_health.py": {
+        "acc_conclusion": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "classify_chg": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "newest_date": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "read": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "f"
+          ],
+          "required": [
+            "f"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/halt_gate.py": {
+        "decide": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "policy",
+            "gate",
+            "risk",
+            "action",
+            "autonomy"
+          ],
+          "required": [
+            "policy",
+            "gate",
+            "risk",
+            "action",
+            "autonomy"
+          ],
+          "varargs": false
+        },
+        "load_policy": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [
+            "path"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/knowledge_index.py": {
+        "build_index": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "parse_entry": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "f"
+          ],
+          "required": [
+            "f"
+          ],
+          "varargs": false
+        },
+        "parse_entry_json": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "f"
+          ],
+          "required": [
+            "f"
+          ],
+          "varargs": false
+        },
+        "strip_ts": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/bench.py": {
+        "calibration_workload": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [],
+          "required": [],
+          "varargs": false
+        },
+        "measure": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "fn",
+            "arg",
+            "repeat"
+          ],
+          "required": [
+            "fn",
+            "arg"
+          ],
+          "varargs": false
+        },
+        "run_bench": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "targets",
+            "repeat"
+          ],
+          "required": [
+            "targets"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/ci_gate.py": {
+        "check": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "pr",
+            "override",
+            "allow_no_ci"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "decide": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "checks",
+            "error",
+            "allow_no_ci"
+          ],
+          "required": [
+            "checks",
+            "error"
+          ],
+          "varargs": false
+        },
+        "fetch": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "pr",
+            "override"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "query_cmd": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "pr"
+          ],
+          "required": [],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/exec_util.py": {
+        "agent_call": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "tmpl",
+            "brief",
+            "cwd"
+          ],
+          "required": [
+            "tmpl",
+            "brief",
+            "cwd"
+          ],
+          "varargs": false
+        },
+        "agent_for_round": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "round_idx",
+            "max_rounds",
+            "agent_cmd",
+            "escalate_cmd"
+          ],
+          "required": [
+            "round_idx",
+            "max_rounds",
+            "agent_cmd",
+            "escalate_cmd"
+          ],
+          "varargs": false
+        },
+        "build_brief": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "chg_text",
+            "task",
+            "mode",
+            "extra"
+          ],
+          "required": [
+            "chg_text",
+            "task",
+            "mode"
+          ],
+          "varargs": false
+        },
+        "compose_extra": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "notes"
+          ],
+          "required": [
+            "notes"
+          ],
+          "varargs": false
+        },
+        "compose_review_extra": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "notes"
+          ],
+          "required": [
+            "notes"
+          ],
+          "varargs": false
+        },
+        "die": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "msg",
+            "code"
+          ],
+          "required": [
+            "msg",
+            "code"
+          ],
+          "varargs": false
+        },
+        "failure_note": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "source",
+            "payload",
+            "limit"
+          ],
+          "required": [
+            "source",
+            "payload"
+          ],
+          "varargs": false
+        },
+        "handshake_block": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "existing",
+            "body"
+          ],
+          "required": [
+            "existing",
+            "body"
+          ],
+          "varargs": false
+        },
+        "mutation_enabled": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "args"
+          ],
+          "required": [
+            "args"
+          ],
+          "varargs": false
+        },
+        "next_round": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "round_idx",
+            "max_rounds"
+          ],
+          "required": [
+            "round_idx",
+            "max_rounds"
+          ],
+          "varargs": false
+        },
+        "run_shell": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "cmd",
+            "cwd"
+          ],
+          "required": [
+            "cmd",
+            "cwd"
+          ],
+          "varargs": false
+        },
+        "unresolved_report": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "entries"
+          ],
+          "required": [
+            "entries"
+          ],
+          "varargs": false
+        },
+        "write_handshake": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "chg_id",
+            "doing",
+            "nxt"
+          ],
+          "required": [
+            "repo",
+            "chg_id",
+            "doing",
+            "nxt"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/fuzzing.py": {
+        "mutate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "rnd",
+            "text"
+          ],
+          "required": [
+            "rnd",
+            "text"
+          ],
+          "varargs": false
+        },
+        "run_fuzz": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "targets",
+            "seeds",
+            "cases",
+            "seed"
+          ],
+          "required": [
+            "targets",
+            "seeds",
+            "cases",
+            "seed"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/interaction.py": {
+        "check_artifacts": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "artifacts"
+          ],
+          "required": [
+            "repo",
+            "artifacts"
+          ],
+          "varargs": false
+        },
+        "choices_message": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "kinds"
+          ],
+          "required": [
+            "kinds"
+          ],
+          "varargs": false
+        },
+        "exemption": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "load_kinds": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [],
+          "varargs": false
+        },
+        "parse_spec": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "required": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "run_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "text",
+            "kinds",
+            "override_cmd",
+            "trust_chg"
+          ],
+          "required": [
+            "repo",
+            "text",
+            "kinds"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/panel.py": {
+        "adjudicate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "verdicts",
+            "threshold"
+          ],
+          "required": [
+            "verdicts"
+          ],
+          "varargs": false
+        },
+        "adjudicate_cross": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "crosses"
+          ],
+          "required": [
+            "crosses"
+          ],
+          "varargs": false
+        },
+        "cross_brief": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "verdicts",
+            "seat"
+          ],
+          "required": [
+            "verdicts",
+            "seat"
+          ],
+          "varargs": false
+        },
+        "downgrade": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "verdict",
+            "threshold"
+          ],
+          "required": [
+            "verdict"
+          ],
+          "varargs": false
+        },
+        "load_seats": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [],
+          "varargs": false
+        },
+        "parse_cross": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "parse_verdict": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "line"
+          ],
+          "required": [
+            "line"
+          ],
+          "varargs": false
+        },
+        "seat_brief": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "chg_text",
+            "task",
+            "seat",
+            "seats"
+          ],
+          "required": [
+            "chg_text",
+            "task",
+            "seat"
+          ],
+          "varargs": false
+        },
+        "seats_for": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "risk",
+            "override",
+            "seats"
+          ],
+          "required": [
+            "risk"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/plan.py": {
+        "bspec_paths": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "bspec_required": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "chg_id_of": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text",
+            "fallback"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "parse_tasks": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "read_chg": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [
+            "path"
+          ],
+          "varargs": false
+        },
+        "risk_of": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "tick_task": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "chg_path",
+            "tid"
+          ],
+          "required": [
+            "chg_path",
+            "tid"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/policy.py": {
+        "load_policy": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [
+            "path"
+          ],
+          "varargs": false
+        },
+        "stage_action": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "matrix",
+            "risk",
+            "stage",
+            "chg_text"
+          ],
+          "required": [
+            "matrix",
+            "risk",
+            "stage",
+            "chg_text"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/profile.py": {
+        "applicable": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "profiles",
+            "kinds"
+          ],
+          "required": [
+            "profiles",
+            "kinds"
+          ],
+          "varargs": false
+        },
+        "choices_message": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "keys",
+            "kinds"
+          ],
+          "required": [
+            "keys",
+            "kinds"
+          ],
+          "varargs": false
+        },
+        "exemption": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "load_kinds": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [],
+          "varargs": false
+        },
+        "load_profile": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "na_message": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "off",
+            "kinds",
+            "profiles"
+          ],
+          "required": [
+            "off",
+            "kinds",
+            "profiles"
+          ],
+          "varargs": false
+        },
+        "parse_spec": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "required": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "run_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "text",
+            "kinds",
+            "profiles",
+            "trust_chg",
+            "baseline"
+          ],
+          "required": [
+            "repo",
+            "text",
+            "kinds",
+            "profiles"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/quality.py": {
+        "check_artifacts": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "artifacts"
+          ],
+          "required": [
+            "repo",
+            "artifacts"
+          ],
+          "varargs": false
+        },
+        "choices_message": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "kinds"
+          ],
+          "required": [
+            "kinds"
+          ],
+          "varargs": false
+        },
+        "exemption": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "load_kinds": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [],
+          "varargs": false
+        },
+        "parse_spec": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "required": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "run_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "text",
+            "kinds",
+            "trust_chg",
+            "baseline"
+          ],
+          "required": [
+            "repo",
+            "text",
+            "kinds"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/quality_judge.py": {
+        "blocking": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "finding"
+          ],
+          "required": [
+            "finding"
+          ],
+          "varargs": false
+        },
+        "fingerprint": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "finding"
+          ],
+          "required": [
+            "finding"
+          ],
+          "varargs": false
+        },
+        "judge": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "kind",
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "kind",
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "judge_api_contract": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "judge_build_repro": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "judge_coverage": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "judge_findings": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "kind",
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "kind",
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "judge_license": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "judge_performance": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "judge_property_fuzz": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text",
+            "baseline"
+          ],
+          "required": [
+            "text",
+            "baseline"
+          ],
+          "varargs": false
+        },
+        "load_baseline": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [
+            "path"
+          ],
+          "varargs": false
+        },
+        "parse_bandit": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "parse_coverage": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "parse_mypy": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        },
+        "parse_pip_audit": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "text"
+          ],
+          "required": [
+            "text"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/ratchet.py": {
+        "before_after": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "changed_test_files": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "decide": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "before",
+            "after",
+            "allow_reduction",
+            "uncovered"
+          ],
+          "required": [
+            "before",
+            "after"
+          ],
+          "varargs": false
+        },
+        "flaky_decide": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "codes"
+          ],
+          "required": [
+            "codes"
+          ],
+          "varargs": false
+        },
+        "flaky_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "test_cmd",
+            "runs"
+          ],
+          "required": [
+            "repo",
+            "test_cmd",
+            "runs"
+          ],
+          "varargs": false
+        },
+        "flaky_runs": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "n"
+          ],
+          "required": [
+            "n"
+          ],
+          "varargs": false
+        },
+        "is_test_path": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "rel"
+          ],
+          "required": [
+            "rel"
+          ],
+          "varargs": false
+        },
+        "ratchet_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "allow_reduction"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "test_metrics": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "source"
+          ],
+          "required": [
+            "source"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/roles.py": {
+        "require_all_built": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx",
+            "who"
+          ],
+          "required": [
+            "ctx",
+            "who"
+          ],
+          "varargs": false
+        },
+        "require_bspec_declared": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "require_confirm_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "require_escape_hatch_declared": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "require_interaction_declared": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "require_no_permanent_halt": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "require_operational_declared": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "require_test_command": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "require_valid_plan": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "role_accept": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "role_build": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx",
+            "single"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "role_plan": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "role_review": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "role_run": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "role_status": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        },
+        "role_verify": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "ctx"
+          ],
+          "required": [
+            "ctx"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/lib/verify.py": {
+        "changed_files": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "escape_hatches": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "args",
+            "chg_text"
+          ],
+          "required": [
+            "args",
+            "chg_text"
+          ],
+          "varargs": false
+        },
+        "mutation_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "test_cmd",
+            "min_kill_rate",
+            "mutation_max"
+          ],
+          "required": [
+            "repo",
+            "test_cmd",
+            "min_kill_rate"
+          ],
+          "varargs": false
+        },
+        "platform_coverage": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "declared"
+          ],
+          "required": [
+            "declared"
+          ],
+          "varargs": false
+        },
+        "static_gate": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "allowlist"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/mutation_harness.py": {
+        "apply_mutation": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "tree",
+            "index"
+          ],
+          "required": [
+            "tree",
+            "index"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "run_test": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "cmd",
+            "cwd"
+          ],
+          "required": [
+            "cmd",
+            "cwd"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/role_loadout.py": {
+        "load_cfg": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [
+            "path"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "resolve": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "cfg",
+            "role"
+          ],
+          "required": [
+            "cfg",
+            "role"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/sentinel_install.py": {
+        "cron_expr": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "interval_min"
+          ],
+          "required": [
+            "interval_min"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "plan_text": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "interval_min",
+            "chg"
+          ],
+          "required": [
+            "repo",
+            "interval_min",
+            "chg"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/static_check.py": {
+        "allowed": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "finding",
+            "allow"
+          ],
+          "required": [
+            "finding",
+            "allow"
+          ],
+          "varargs": false
+        },
+        "iter_files": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "paths"
+          ],
+          "required": [
+            "repo",
+            "paths"
+          ],
+          "varargs": false
+        },
+        "load_allowlist": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path"
+          ],
+          "required": [],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "scan_file": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "path",
+            "rel"
+          ],
+          "required": [
+            "path",
+            "rel"
+          ],
+          "varargs": false
+        }
+      },
+      "skills/ai-sdlc-autopilot/scripts/verifier_integrity.py": {
+        "compute": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo",
+            "files"
+          ],
+          "required": [
+            "repo",
+            "files"
+          ],
+          "varargs": false
+        },
+        "in_scope": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "prefix",
+            "files",
+            "repo"
+          ],
+          "required": [
+            "prefix"
+          ],
+          "varargs": false
+        },
+        "load_manifest": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "repo"
+          ],
+          "required": [
+            "repo"
+          ],
+          "varargs": false
+        },
+        "main": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "argv"
+          ],
+          "required": [
+            "argv"
+          ],
+          "varargs": false
+        },
+        "out_of_scope_note": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "layer",
+            "skipped"
+          ],
+          "required": [
+            "layer",
+            "skipped"
+          ],
+          "varargs": false
+        },
+        "sha256": {
+          "kwargs": false,
+          "kwonly": [],
+          "params": [
+            "p"
+          ],
+          "required": [
+            "p"
+          ],
+          "varargs": false
+        }
+      }
+    },
+    "version": 1
+  },
+  "_api_contract_doc": "對外契約快照(CHG-20260804-04)。判讀器只擋**破壞性**變更:模組/公開函式消失、必填參數消失或新增、CLI 旗標消失。新增一律放行。刻意的破壞需連同版本與遷移說明更新此快照,並指名授權的 CHG。",
+  "performance": {
+    "tolerance": 2.0,
+    "targets": {
+      "plan.parse_tasks": {
+        "ratio": 0.042679
+      },
+      "plan.risk_of": {
+        "ratio": 0.000209
+      },
+      "panel.parse_verdict": {
+        "ratio": 0.001332
+      },
+      "quality.parse_spec": {
+        "ratio": 0.004521
+      },
+      "interaction.parse_spec": {
+        "ratio": 0.004512
+      },
+      "profile.parse_spec": {
+        "ratio": 0.004506
+      },
+      "ratchet.test_metrics": {
+        "ratio": 0.85037
+      },
+      "quality_judge.parse_mypy": {
+        "ratio": 0.205434
+      },
+      "quality_judge.parse_bandit": {
+        "ratio": 0.096114
+      },
+      "quality_judge.judge_findings": {
+        "ratio": 0.340531
+      }
+    },
+    "reason": "2026-08-04 首次量測。比的是相對於同一輪校準負載的比值,不是秒數——共用 CI runner 的速度差好幾倍,拿絕對秒數設門檻會讓這道閘無故轉紅,而無故轉紅的閘會被關掉。門檻 2 倍:抓演算法級退步,不抓排程雜訊。"
+  },
+  "_key_note": "指紋含檔案路徑,而本檔只存 rule/file/reason(不存 message),所以 CHG-20260804-08 的搬家無法以字串替換重算鍵——已依 (rule, file) 對應把理由搬到新鍵。見登記簿 A-12。"
+}

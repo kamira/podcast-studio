@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "_doc": "互動驗證的分類表(CHG-20260803-03)。「會被重複使用的產物,它的使用面必須被真的用過一次」——滑鼠只是 GUI 的形態,函式庫的使用面是公開 API,CLI 的是參數與 stdin。本表列出 runner 認得的種類與各自的最小驗證面;**使用者可自行增補條目**,runner 不限制只能用內建這幾種。由 lib/interaction.py 讀取。",
+  "_extending": "新增種類:在 kinds 底下加一個條目,至少要有 label、surface(要驗到的操作面清單)、artifacts(必須留下的可稽核產物)。runner 只驗『宣告的種類存在於本表』與『產物真的產生了』,不規定你用什麼工具。",
+  "kinds": {
+    "gui-web": {
+      "label": "網頁介面",
+      "surface": [
+        "滑鼠點擊(含主要動作按鈕與導覽)",
+        "鍵盤輸入與表單送出",
+        "焦點與鍵盤可及性(Tab 走訪)",
+        "頁面/路由切換後的狀態保留",
+        "錯誤狀態的顯示(非只有 happy path)"
+      ],
+      "artifacts": ["screenshot", "trace-or-video"],
+      "example_drivers": ["playwright", "selenium", "cypress"]
+    },
+    "gui-native": {
+      "label": "桌面/行動原生介面",
+      "surface": ["滑鼠或觸控操作", "鍵盤輸入", "視窗/畫面切換", "錯誤對話框"],
+      "artifacts": ["screenshot"],
+      "example_drivers": ["playwright", "appium", "winappdriver"]
+    },
+    "cli": {
+      "label": "命令列介面",
+      "surface": [
+        "參數組合(含互斥與缺必填)",
+        "stdin 互動輸入",
+        "退出碼語意逐碼",
+        "非 TTY 環境下的行為(管線/重導向)"
+      ],
+      "artifacts": ["session-log"],
+      "example_drivers": ["subprocess", "pexpect", "bats"]
+    },
+    "library-api": {
+      "label": "函式庫公開 API",
+      "surface": [
+        "每個公開進入點的典型呼叫",
+        "**錯誤路徑**(不合法輸入、缺值、邊界)",
+        "回傳型別與契約",
+        "向後相容(若為既有 API 的修改)"
+      ],
+      "artifacts": ["test-report"],
+      "example_drivers": ["unittest", "pytest", "任何語言的測試框架"]
+    },
+    "service-protocol": {
+      "label": "服務/協定介面",
+      "surface": [
+        "每個端點的成功路徑",
+        "錯誤碼與錯誤格式",
+        "認證/授權的拒絕路徑",
+        "契約(schema)相容性"
+      ],
+      "artifacts": ["request-response-log"],
+      "example_drivers": ["httpx", "curl", "postman-newman", "schemathesis"]
+    }
+  }
+}
