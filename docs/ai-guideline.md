@@ -8,6 +8,7 @@
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
 - 導入方式:adopt(存量導入,程式已存在、從未治理)
 - Governance-baseline: 7da165b6048897abb8acac4bba69db9677827471
+- Adopt-commit: e7b1d0cc03ee52e6208d0617717659cf579bcf94
 
 > **來源等級標記**(本文件與 `docs/structure/*.md` 通用):
 > - **〔觀察〕** 程式裡直接讀得到
@@ -154,7 +155,7 @@
 ## 10. 導入記錄(治理基準點)
 
 - 基準點:`7da165b6048897abb8acac4bba69db9677827471`(導入當下所見的完整 SHA;為取得錨點,本 session 於 2026-10-22 先 `git init` 並把既有檔案原樣提交成此 commit,**內容未做任何修改**)
-- 導入 commit:建立後補入表頭(導入 commit 不能包含自己的 SHA;表頭只宣告基準點時,`doc_integrity_check` 會回報「只宣告其中一個欄位」——在補入前這是預期狀態)
+- 導入 commit:`e7b1d0cc03ee52e6208d0617717659cf579bcf94`(parent = 基準點;只含治理檔)。SHA 於下一筆 commit 補入表頭——導入 commit 不能包含自己的 SHA。`AGENTS.md` 與 `docs/acceptance/` 不在導入 commit 白名單內,也在下一筆加入
 - 工作樹狀態(導入當下,基準 commit 之後):
   - 未提交變更:無
   - 未追蹤檔:無(`git status --porcelain` 只列出 ignored)
