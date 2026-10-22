@@ -1,0 +1,164 @@
+# AI Guideline — podcast-studio
+
+- 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
+- 分支(Branch):main
+- 版本:v1.0
+- 日期:2026-10-22
+- 狀態:草稿(導入反推,待使用者確認;見 §6「待確認」)
+- 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
+- 導入方式:adopt(存量導入,程式已存在、從未治理)
+- Governance-baseline: 7da165b6048897abb8acac4bba69db9677827471
+
+> **來源等級標記**(本文件與 `docs/structure/*.md` 通用):
+> - **〔觀察〕** 程式裡直接讀得到
+> - **〔推論〕** 由證據推得的意圖(證據註明出處,如 `PODCAST_STUDIO.md §8`)
+> - **〔未知〕** 判斷不了,需要人回答
+>
+> 未標等級的敘述不得視為規範。**被寫進本文件不代表該行為正確**——見 §9「導入盤點:具名待補項」。
+
+## 1. 背景與目標
+
+〔推論,來源:`PODCAST_STUDIO.md §1`〕在本機(Apple M5 Pro / 24 GB 統一記憶體)完成一集 podcast 影片,全程離線,不送資料到雲端服務:
+
+1. 依需求產生口播文案
+2. 使用者可直接編輯文案,或下指令請 AI 修改
+3. 依最終文案產生台灣口音語音
+4. 產生 podcast 靜態封面(含中文標題)
+5. 封面 + 語音合成 MP4 影片(含字幕)
+
+〔推論,來源:`PODCAST_STUDIO.md §10`〕另把同一組本機模型包成 MCP 伺服器(`local-models`),讓 Claude Code / Codex 等 agent 直接呼叫。
+
+成功定義:〔未知〕使用者尚未給出可量測的成功標準(見 §6 待確認 Q3)。
+
+## 2. 範圍
+
+### 納入
+- 〔觀察〕Gradio 網頁 `podcast_studio.py`(四分頁:文案 / 語音 / 封面 / 影片),監聽 `127.0.0.1:7860`
+- 〔觀察〕MCP 伺服器 `local_models_mcp.py`(stdio,6 個工具:`reason`、`taiwanize`、`generate_image`、`speak`、`make_video`、`list_models`)
+- 〔觀察〕共用模組 `taiwan_ai.py`(模型設定、`chat()`、`speak()`、`unload_llms()`、`to_tw()`)與 `media.py`(封面、字幕、影片)
+- 〔觀察〕`taiwan_ai.py` 本身也是 CLI(`ask` / `code` / `image` / `speak` / `auto`)——**已棄用**(Q2),程式待 CHG 移除
+- 〔觀察〕BreezyVoice macOS 重建:`setup_breezyvoice.sh` + `patches/breezyvoice-mac/`
+
+### 不納入(明確排除)
+- 〔推論,來源:`PODCAST_STUDIO.md §1`〕任何雲端 API / 對外網路服務
+- 〔推論,來源:`PODCAST_STUDIO.md §8 #1`〕多人對談(目前只支援單人主持)
+- 〔推論,來源:`PODCAST_STUDIO.md §10.5 #7`〕MCP `write_code` 工具(已移除,由 `reason` 兼任)
+- 〔推論,來源:`PODCAST_STUDIO.md §10.5 #6`〕Claude 桌面 app 聊天的 MCP 註冊
+- 〔觀察〕`tools/BreezyVoice/`(第三方 repo,不納入 git,由腳本重建)、`outputs/`(產出物)
+
+## 3. 利害關係人
+
+| 角色 | 關注點 |
+|------|--------|
+| 使用者(專案擁有者,單人) | 本機產出 podcast 影片、文案可控、台灣用語正確、離線 |
+| MCP client(Claude Code / Codex) | 工具契約穩定、長時間工具不逾時、stdout 不被汙染 |
+
+〔推論〕單人專案,沒有其他決策者。
+
+## 4. 功能需求
+
+| 編號 | 需求 | 優先級 | 來源等級 / 備註 |
+|------|------|--------|------|
+| FR-1 | 依主題、風格(5 種)、長度(0.5–10 分鐘)、補充要求產生單人口播稿;推理模型寫初稿 → Breeze2 潤飾 → OpenCC `s2twp` | P0 | 〔觀察〕`podcast_studio.py:22-33` |
+| FR-2 | 文案可手動編輯,或依自然語言指示由推理模型改寫全文 | P0 | 〔觀察〕`podcast_studio.py:36-41,80-83` |
+| FR-3 | 依文案合成台灣華語語音(BreezyVoice),輸出 `outputs/speech-*.wav`;合成前清除 Markdown 符號 | P0 | 〔觀察〕`taiwan_ai.py:128-142` |
+| FR-4 | 產生 16:9 封面:推理模型寫英文 prompt → 卸載 LLM → FLUX 1360×768 → 縮放裁切 1920×1080 → 底部疊中文標題 | P0 | 〔觀察〕`podcast_studio.py:52-59`、`media.py:17-71` |
+| FR-5 | 封面 + 音訊合成 1920×1080 H.264/AAC MP4 | P0 | 〔觀察〕`media.py:111-124` |
+| FR-6 | 字幕:依標點切句(單句上限 24 字,再以逗號切)、依字數比例分配時間;MP4 內嵌軟字幕(mov_text)並另存 `.srt` | P1 | 〔觀察〕`media.py:79-108`;〔推論〕決策來源 `PODCAST_STUDIO.md §8 #3` |
+| FR-7 | 語音與封面兩步互不依賴,可任意順序 | P1 | 〔推論〕`PODCAST_STUDIO.md §2`;〔觀察〕兩個按鈕無相依 |
+| FR-8 | MCP 工具 `reason(prompt, think=true, heavy=false)` 回傳台灣正體文字 | P0 | 〔觀察〕`local_models_mcp.py:32-48` |
+| FR-9 | MCP 工具 `taiwanize(text)` | P1 | 〔觀察〕`local_models_mcp.py:51-57` |
+| FR-10 | MCP 工具 `generate_image(prompt, width=1024, height=1024)`,寬高須為 16 倍數 | P0 | 〔觀察〕`local_models_mcp.py:60-69` |
+| FR-11 | MCP 工具 `speak(text)` 回傳 WAV 絕對路徑 | P0 | 〔觀察〕`local_models_mcp.py:72-79` |
+| FR-12 | MCP 工具 `make_video(image_path, audio_path, script="")`,有 script 時附字幕 | P1 | 〔觀察〕`local_models_mcp.py:82-92` |
+| FR-13 | MCP 工具 `list_models()` 回報各角色模型、是否已下載、目前載入記憶體的模型 | P2 | 〔觀察〕`local_models_mcp.py:95-107` |
+| FR-14 | `taiwan_ai.py` CLI:`ask`(可 `--speak`/`--heavy`/`--no-think`)、`code`、`image`、`speak`、`auto` | — | 〔觀察〕程式仍存在 `taiwan_ai.py:89-171`。**棄用**(2026-10-22,使用者決定「不需要 CLI,只要網頁」;見 Q2)。程式移除須另開 CHG,導入不動程式 |
+| FR-15 | 在 macOS ARM 重建 BreezyVoice(移除 CUDA/Linux 套件,以簡易數字正規化取代 WeTextProcessing) | P1 | 〔觀察〕`setup_breezyvoice.sh` |
+
+優先級為〔推論〕:依 `PODCAST_STUDIO.md §1` 的五步流程定 P0,其餘依附屬程度定。待使用者確認。
+
+## 5. 非功能需求
+
+| 類別 | 要求 | 來源等級 |
+|------|------|----------|
+| 隱私 / 離線 | 推理、生圖、語音、影片全部在本機執行;不呼叫雲端 API | 〔觀察〕程式中對外連線只有 `localhost:11434`(Ollama);〔例外,觀察〕`setup_breezyvoice.sh` 會 `git clone` GitHub 與下載套件(建置期,非執行期) |
+| 安全 | 網頁只監聽 `127.0.0.1`;MCP 只走 stdio,不開網路埠;Gradio `allowed_paths` 只開 `outputs/` | 〔觀察〕`podcast_studio.py:114`、`local_models_mcp.py:112` |
+| 記憶體 | 24 GB 統一記憶體同時只跑一個重型工作;生圖前卸載 LLM(FLUX 峰值約 14–16 GB) | 〔觀察〕MCP 有全域鎖 `local_models_mcp.py:22`;〔觀察〕網頁沒有對應的鎖,見 ADP-2;〔觀察〕heavy 模型不在卸載清單,見 ADP-1 |
+| 效能 | 語音 CPU 約 9 分鐘 / 每分鐘音檔;生圖約 20 秒;`reason(heavy, think)` 可能 >10 分鐘 | 〔推論〕數字來自 `PODCAST_STUDIO.md §6, §11` 與程式註解,**未在導入時量測** |
+| 逾時 | LLM 請求 1800 秒;MCP client 端需設 `MCP_TOOL_TIMEOUT=1800000`(Claude Code)/ `tool_timeout_sec=1800`(Codex) | 〔觀察〕`taiwan_ai.py:68`;〔推論〕client 端設定見 `PODCAST_STUDIO.md §10.3`(在 repo 外,無法驗證) |
+| MCP 協定 | 工具執行期間 stdout 必須導向 stderr | 〔觀察〕`local_models_mcp.py:25-29` |
+| 可維護性 | 單檔 PEP 723 `uv run --script`,依賴宣告在檔頭 | 〔觀察〕 |
+| 相容性 | macOS(STHeiti 字型路徑、`~/.local/bin/mflux-generate`、`/Users/weiss/.local/bin/uv` 絕對路徑) | 〔觀察〕`media.py:12`、`taiwan_ai.py:48`、`.claude/launch.json` |
+
+## 6. 限制與假設
+
+- 限制:
+  - 〔觀察〕只能在 macOS 執行(硬寫字型路徑與工具路徑)
+  - 〔觀察〕依賴本機 Ollama、`mflux-generate`、`tools/BreezyVoice/.venv`;三者都不在 repo 內
+  - 〔推論,來源 `PODCAST_STUDIO.md §6`〕BreezyVoice 只有官方範例女聲;FLUX 畫不出中文字
+- 假設:
+  - 〔推論〕使用者是唯一操作者,網頁與 MCP 不會被多人同時使用
+  - 〔推論〕每分鐘 250 字是台灣華語播報語速(`podcast_studio.py:25` 註解)
+- 待確認(決策,需使用者回答;逐題處理):
+  - **Q1** `podcast_studio.py` / `media.py` 目前標示「暫停、未端到端測試」(`PODCAST_STUDIO.md §11`)——仍在範圍內、要恢復嗎?建議:保留在範圍,以 ADP-6 的端到端驗收作為恢復的第一筆變更。
+  - ~~**Q2** `taiwan_ai.py` 的 CLI 仍要維護嗎?~~ **已決定(2026-10-22,使用者)**:不需要 CLI,只要網頁。FR-14 棄用;`taiwan_ai.py` 保留為共用函式庫;CLI 程式(`ask`/`code`/`image`/`auto`/`main`)與 `code` 角色的移除走導入後的 CHG。
+  - **導入期間使用者提出的新需求**(不屬於現況盤點,**不在導入 commit 內實作或定案**,導入後以 CHG 進 requirement-analysis):網頁能配置模型(與 MCP 共用)、網頁支援 drag and drop。
+  - **Q3** 驗收標準的量化門檻(例:2 分鐘稿端到端幾分鐘內產出、字幕時間誤差上限)。建議:先以「端到端跑完且產出可播放 MP4 + SRT」為門檻,效能數字等量測後再訂。
+  - **Q4** `PODCAST_STUDIO.md` 與本帳本的關係:保留為人寫的設計文件(本帳本引用它),或日後併入 `docs/structure/`?建議:保留不動,本帳本只引用。
+
+## 7. 驗收條件
+
+> 導入**不是**驗收(治理基準點第 6 條)。以下條件**全部未驗證**,狀態以 `docs/acceptance/` 的 ACC 為準;導入時沒有任何 ACC。
+
+- [ ] FR-1/2:網頁產生 2 分鐘稿,字數落在 500 ± 20%,全文無簡體字(OpenCC 反向檢查)
+- [ ] FR-3/11:合成語音產出可播放 WAV,長度 > 0
+- [ ] FR-4/10:封面為 1920×1080 PNG,標題完整落在底部帶狀區(含長標題,見 ADP-3)
+- [ ] FR-5/6/12:MP4 為 1920×1080 H.264/AAC,含一條 mov_text 字幕軌,另存 `.srt` 且最後一段結束時間 = 音檔長度(±0.5 秒)
+- [ ] FR-8~13:MCP stdio client 列出 6 個工具,逐一呼叫成功,stdout 只有 JSON-RPC
+- [ ] NFR 記憶體:`reason(heavy=true)` 之後立即 `generate_image` 不 OOM(見 ADP-1)
+- [ ] FR-15:乾淨環境執行 `setup_breezyvoice.sh` 成功,正規化測試輸出含「兩千零二十六年」
+
+## 8. AI 開發約定
+
+- **進場**:每個 session 先讀 `AGENTS.md` → 本文件 → `docs/structure/*.md` → `docs/knowledge/INDEX.md`。
+- **任何修改先走 modification-guide**,在 `docs/changes/` 開 `CHG-YYYYMMDD-NN.md`;第一筆受治理變更必須在 Adopt-commit 之後。
+- **禁止替基準點以前補造 CHG**:基準點前沒有治理,這件事本身就是記錄。
+- **§9 待補項不得被「順手」修掉**:要修就開 CHG,並在 CHG 引用 ADP 編號。
+- **語言**:使用者面文字、程式註解、文件用繁體中文與台灣用語(沿用 `taiwan_ai.TW`)。
+- **依賴**:維持 PEP 723 單檔 script 形式(`uv run --script`),新依賴寫進檔頭 `dependencies`。
+- **MCP 工具**:工具內一律用 `busy()`(鎖 + stdout 導向 stderr);新增重型工具必須進同一把鎖。
+- **不送資料出本機**:新增任何網路呼叫屬於高風險變更(違反 §5 隱私)。
+- **產出物**寫到 `outputs/`,回傳絕對路徑;`outputs/` 不入 git。
+- **`tools/BreezyVoice/` 的修改**一律落在 `patches/breezyvoice-mac/` 並由 `setup_breezyvoice.sh` 套用,不直接改 `tools/`。
+- **結構設計圖**:預設畫給使用者看並等確認(使用者未表示要跳過)。
+
+## 9. 導入盤點:具名待補項
+
+> 反推過程中發現的缺陷、空洞與債。**導入不修、也不追認**:每一項要修都要開 CHG 並引用編號;要結案要有 ACC。
+> 來源等級:〔觀察〕= 程式路徑讀得到;影響若未重現則標〔推論〕。
+
+| 編號 | 項目 | 證據 | 等級 | 影響 |
+|------|------|------|------|------|
+| ADP-1 | `unload_llms()` 只卸載 `MODELS.values()`;MCP `reason(heavy=true)` 在 `finally` 把 `MODELS["reason"]` 還原,於是 27B 模型(約 13 GB,`keep_alive` 10 分鐘)不在卸載清單 | `taiwan_ai.py:73-81`、`local_models_mcp.py:40-45`、`taiwan_ai.py:60` | 〔觀察〕路徑;〔推論〕OOM 未重現 | heavy 推理後 10 分鐘內呼叫 `generate_image`,27B + FLUX 14–16 GB 可能超過 24 GB |
+| ADP-2 | 網頁沒有跨事件的鎖:文案(LLM)、語音(BreezyVoice)、封面(FLUX)三個事件各自排隊,可能同時執行;網頁與 MCP 兩個行程之間也沒有共用鎖 | `podcast_studio.py:104-110,114`(`queue()` 無全域 concurrency 設定);MCP 的鎖只在自己行程內 `local_models_mcp.py:22` | 〔觀察〕無鎖;〔推論〕Gradio 預設每個事件 concurrency 1、不同事件可並行 | 封面與文案同時跑時 LLM 未卸載 → 記憶體超量 |
+| ADP-3 | `add_title()` 字級降到 48 仍超過 2 行時,迴圈結束但沿用 >2 行排版 | `media.py:42-52` | 〔觀察〕 | 長標題超出底部帶狀區或畫面 |
+| ADP-4 | `speak()` 清 Markdown 的 regex 也刪掉 `-`、`_`、`|`(換成空白) | `taiwan_ai.py:130` | 〔觀察〕轉換;〔推論〕念法改變未重現 | 「2026-10-22」「COVID-19」被拆開,數字正規化結果改變 |
+| ADP-5 | `setup_breezyvoice.sh` 以 `--depth 1` clone 上游 HEAD,未釘 commit | `setup_breezyvoice.sh:11` | 〔觀察〕 | 上游改版後 patches 可能失效,重建不可重現 |
+| ADP-6 | **沒有任何自動化測試**;`PODCAST_STUDIO.md §11` 自述:網頁與 `media.py` 從未執行,MCP 的 `generate_image` / `speak` / `make_video` 未經 MCP 實測 | repo 內無 test 檔;`PODCAST_STUDIO.md §11` | 〔觀察〕 | §7 驗收條件全部無證據 |
+| ADP-7 | MCP `make_video` 接受任意 `audio_path`,但帶 `script` 時以 `wave` 模組讀長度 | `media.py:74-76,116`、`local_models_mcp.py:83` | 〔觀察〕 | 傳入 MP3 / M4A 並附 script → `wave.Error`,工具失敗 |
+| ADP-8 | 輸出檔名以秒為單位的時間戳;同一秒內同前綴的兩次呼叫會覆寫 | `taiwan_ai.py:84-86` | 〔觀察〕;〔推論〕單人使用機率低 | 網頁與 MCP 同時 `speak` 時可能互蓋 |
+| ADP-9 | `speak()` 子程序環境只給 `PYTHONUTF8`、`PATH`,沒有 `HOME` | `taiwan_ai.py:139` | 〔觀察〕;〔未知〕是否影響(文件稱 CLI 曾成功) | 依賴 `HOME` 的快取路徑(HF / matplotlib)可能寫到非預期位置或失敗 |
+| ADP-10 | 網頁勾選框變數名 `burn_subs`(燒錄),實作是軟字幕 mov_text;行為與 `PODCAST_STUDIO.md §8 #3` 一致,只是命名誤導 | `podcast_studio.py:62,99` | 〔觀察〕 | 後續修改者可能誤以為是硬字幕 |
+| ADP-11 | `PODCAST_STUDIO.md` 標示「MCP 伺服器已實作並測試」等狀態——是**自述**,導入時未重驗 | `PODCAST_STUDIO.md` 開頭與 §11 | 〔觀察〕 | 不得當作驗收證據;已盤點 ≠ 已驗收 |
+
+## 10. 導入記錄(治理基準點)
+
+- 基準點:`7da165b6048897abb8acac4bba69db9677827471`(導入當下所見的完整 SHA;為取得錨點,本 session 於 2026-10-22 先 `git init` 並把既有檔案原樣提交成此 commit,**內容未做任何修改**)
+- 導入 commit:建立後補入表頭(導入 commit 不能包含自己的 SHA;表頭只宣告基準點時,`doc_integrity_check` 會回報「只宣告其中一個欄位」——在補入前這是預期狀態)
+- 工作樹狀態(導入當下,基準 commit 之後):
+  - 未提交變更:無
+  - 未追蹤檔:無(`git status --porcelain` 只列出 ignored)
+  - Ignored:`outputs/`(約 2.6 MB:`test_tts.wav`、`anime_pinup.png`、`test_flux.png`)、`tools/`(約 1.9 GB:`tools/BreezyVoice/`,含 `.venv` 1.2 GB、`G2PWModel` 606 MB;**沒有 `.git`**,無法得知對應的上游 commit,見 ADP-5)
+  - Submodule:無
+  - Git LFS:無
+- 導入前的歷史:無(repo 在導入時才 `git init`)。導入前沒有治理,不補造 CHG。
