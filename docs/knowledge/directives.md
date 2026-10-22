@@ -44,7 +44,8 @@
 - 規則:
   1. 每個步驟開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號,push,開 PR,CI 全綠後 merge 回 `main`。不直接 push `main`。
   2. CI 必須涵蓋三類:**document**(doc_integrity_check、knowledge INDEX 新鮮度)、**CHG**(plan-check、commit 引用 CHG 編號)、**program**(`./scripts/check.sh` 測試、語法與 lint)。
-  3. merge 的停點依風險分級(halt policy,只准加嚴):低風險 CI 綠即可自動 merge;**中、高風險在 merge 前停下等使用者核准**——這是治理層的永久規則,本指示不放寬它。
+  3. merge 的停點(只准加嚴):**只有只改 `docs/`、`features/` 的 PR** 可在 CI 綠後自動 merge;**任何改到程式路徑的 PR,不論風險分級,merge 前都停下等使用者核准**;改到治理基礎設施(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/deploy_local.sh`)另需擁有者 `infra-approved` 留言。
+  4. 2026-10-22 收緊緣由:CHG-20261022-03 審議 security 席(27B)指出「自評低風險的程式變更可自動 merge 並部署到本機」,且 CI 檢查若從 PR head 執行可被 PR 自改。
 - 原因:使用者指示(2026-10-22):「每次步驟都要 commit push pr merge 並且要設好完整 CICD(包含 document, chg, program)」。
 - 信度:使用者確認(第 3 條的停點為治理層既有規則,agent 依 halt policy 補上)
 - 狀態:生效(前置未完成:GitHub 遠端與 `gh` 尚未就緒)
