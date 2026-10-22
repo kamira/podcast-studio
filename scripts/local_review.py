@@ -38,7 +38,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -50,7 +50,9 @@ import review_gate  # noqa: E402  共用席位、否決席與風險分級解析
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 NUM_CTX = 40960
-NUM_PREDICT = 4096          # 已驗證的輸出上限:沒有上限時模型會無限產生 findings
+NUM_PREDICT = 4096          # 已驗證的輸出上限(think:false):沒有上限時模型會無限產生 findings
+NUM_PREDICT_THINK = 12288   # think:true 時 Ollama 把思考 token 算進 num_predict,4096 會讓 content 為空
+CHARS_PER_TOKEN = 1.5       # prompt token 粗估:字元數 ÷ 1.5
 REPEAT_PENALTY = 1.1
 MAX_FINDINGS = 20
 SEAT_CHAR_LIMIT = 4000      # 單席貼出上限(安全影響 (g))
@@ -84,12 +86,13 @@ def run_cmd(argv: List[str], input_text: Optional[str] = None) -> str:
     return proc.stdout
 
 
-def call_ollama(body: dict, timeout: int) -> str:
-    """POST Ollama /api/chat,回傳 message.content。逾時或連線失敗會丟例外。"""
+def call_ollama(body: dict, timeout: int) -> dict:
+    """POST Ollama /api/chat,回傳完整回應(含 `message.content` 與 `done_reason`)。
+    逾時或連線失敗會丟例外。"""
     req = urllib.request.Request(OLLAMA_URL, json.dumps(body).encode("utf-8"),
                                  {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)["message"]["content"]
+        return json.load(r)
 
 
 def log(msg: str) -> None:
@@ -125,6 +128,8 @@ def clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     note = "\n…(截斷於 {} 字)".format(limit)
+    if limit <= len(note):
+        return text[:max(limit, 0)]
     return text[:limit - len(note)] + note
 
 
@@ -142,7 +147,7 @@ def read_doc(rel: str) -> str:
 
 
 def filter_diff(diff: str) -> str:
-    """去掉 vendored `.ai-sdlc/` 的 diff 區塊(只列檔名),並截斷。"""
+    """去掉 vendored `.ai-sdlc/` 的 diff 區塊(只計檔案數)。截斷由 fit_diff() 依各席預算處理。"""
     blocks = re.split(r"(?m)^(?=diff --git )", diff)
     kept, vend = [], []
     for b in blocks:
@@ -154,7 +159,21 @@ def filter_diff(diff: str) -> str:
     out = "".join(kept)
     if vend:
         out += "\n(vendored 檔案 {} 個,不送內容)\n".format(len(vend))
-    return clip(out, DIFF_CHAR_LIMIT)
+    return out
+
+
+def num_predict_for(cfg: dict) -> int:
+    return NUM_PREDICT_THINK if cfg["think"] else NUM_PREDICT
+
+
+def fit_diff(diff: str, fixed_chars: int, num_predict: int) -> Tuple[str, Optional[str]]:
+    """把 diff 截到 prompt 粗估(字元 ÷ 1.5)+ num_predict 不超過 num_ctx;回傳 (diff, 截斷說明或 None)。"""
+    budget = int((NUM_CTX - num_predict) * CHARS_PER_TOKEN) - fixed_chars
+    limit = max(0, min(DIFF_CHAR_LIMIT, budget))
+    if len(diff) <= limit:
+        return diff, None
+    return clip(diff, limit), "diff 由 {} 字截短為 {} 字(放進 num_ctx {}、num_predict {})".format(
+        len(diff), limit, NUM_CTX, num_predict)
 
 
 # ---------------------------------------------------------------- 席位
@@ -220,7 +239,7 @@ CROSS_SCHEMA = {"type": "object", "required": ["cross"], "properties": {"cross":
 def ask(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
     """格式不合格或逾時 = 沒有回答 → 重派一次;兩次都失敗回傳 ok=False。"""
     body = {"model": cfg["model"], "stream": False, "keep_alive": 0, "format": schema,
-            "options": {"num_ctx": NUM_CTX, "temperature": 0.2, "num_predict": NUM_PREDICT,
+            "options": {"num_ctx": NUM_CTX, "temperature": 0.2, "num_predict": num_predict_for(cfg),
                         "repeat_penalty": REPEAT_PENALTY},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     if cfg["think"]:
@@ -230,10 +249,20 @@ def ask(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
     for attempt in (1, 2):
         t = time.time()
         try:
-            out = json.loads(call_ollama(body, timeout))
+            resp = call_ollama(body, timeout)
+            content = ((resp.get("message") or {}).get("content") or "").strip()
+            truncated = resp.get("done_reason") == "length"
+            try:
+                out = json.loads(content) if content else None
+            except ValueError:
+                out = None
             if isinstance(out, dict) and check(out):
                 return {"ok": True, "out": out, "secs": round(time.time() - t), "attempt": attempt}
-            err = "格式不合格"
+            if truncated:
+                err = "輸出達 num_predict 上限被截斷(done_reason=length),content {}".format(
+                    "為空" if not content else "無法解析")
+            else:
+                err = "格式不合格"
         except Exception as e:  # noqa: BLE001 逾時、連線失敗、JSON 壞掉都算沒有回答
             err = type(e).__name__
         log("第 {} 次沒有回答:{}".format(attempt, err))
@@ -245,8 +274,17 @@ def _phase1_ok(o: dict) -> bool:
             and isinstance(o.get("findings"), list))
 
 
-def run_panel(seats: Dict[str, dict], data_block: str) -> Dict[str, dict]:
+def run_panel(seats: Dict[str, dict], make_block: Callable[[str], str], diff: str) -> Dict[str, dict]:
+    """make_block(diff 文字) 產生待審資料區塊;diff 依各席 num_predict 截到放得進 num_ctx。"""
     result: Dict[str, dict] = {}
+    notes: Dict[str, List[str]] = {}
+
+    def block_for(name: str, cfg: dict, system: str, prefix: str) -> str:
+        d, note = fit_diff(diff, len(system) + len(prefix) + len(make_block("")), num_predict_for(cfg))
+        if note and note not in notes.setdefault(name, []):
+            notes[name].append(note)
+        return make_block(d)
+
     for name, cfg in seats.items():  # 序列,一次一席
         log("第一階段 {} ← {}".format(name, cfg["model"]))
         veto = "(否決席:fail 即否決)" if name in review_gate.VETO_SEATS else ""
@@ -254,7 +292,8 @@ def run_panel(seats: Dict[str, dict], data_block: str) -> Dict[str, dict]:
                   "列出本領域的發現(最多 {} 項),附證據指向(章節、task 編號或 diff 檔名)、影響、確定度。"
                   "證據必須來自下方資料,不得杜撰。{}{}").format(
             name, veto, cfg["q"], MAX_FINDINGS, DATA_WARNING, TW)
-        user = "# 本席參考資料(main 工作副本)\n{}\n\n{}".format(clip(cfg["ref"], REF_CHAR_LIMIT), data_block)
+        prefix = "# 本席參考資料(main 工作副本)\n{}\n\n".format(clip(cfg["ref"], REF_CHAR_LIMIT))
+        user = prefix + block_for(name, cfg, system, prefix)
         result[name] = {"model": cfg["model"], "phase1": ask(cfg, system, user, VERDICT_SCHEMA, _phase1_ok)}
 
     answered = {n: r["phase1"]["out"] for n, r in result.items() if r["phase1"]["ok"]}
@@ -267,12 +306,15 @@ def run_panel(seats: Dict[str, dict], data_block: str) -> Dict[str, dict]:
         system = ("你是 AI-SDLC 審議會的 {} 席,進入互讀階段。對下列每一個他席判決各標一列:同意或不同意,附一句理由。"
                   "他席共 {} 個:{}。少一列不算同意。{}{}").format(
             name, len(others), ", ".join(others), DATA_WARNING, TW)
-        user = "# 你的判決\n{}\n\n# 他席判決\n{}\n\n{}".format(
-            json.dumps(answered[name], ensure_ascii=False), json.dumps(others, ensure_ascii=False), data_block)
+        prefix = "# 你的判決\n{}\n\n# 他席判決\n{}\n\n".format(
+            json.dumps(answered[name], ensure_ascii=False), json.dumps(others, ensure_ascii=False))
+        user = prefix + block_for(name, cfg, system, prefix)
         need = set(others)
         result[name]["phase2"] = ask(cfg, system, user, CROSS_SCHEMA,
                                      lambda o, need=need: isinstance(o.get("cross"), list) and
                                      {c.get("seat") for c in o["cross"] if isinstance(c, dict)} >= need)
+    for name in result:
+        result[name]["diff_notes"] = notes.get(name, [])
     return result
 
 
@@ -289,6 +331,7 @@ def final_verdict(r: dict) -> str:
 
 def seat_detail(name: str, r: dict) -> str:
     lines = ["席位:{}".format(name), "模型:{}".format(r["model"])]
+    lines += ["注意:{}".format(n) for n in r.get("diff_notes") or []]
     p1 = r["phase1"]
     if p1["ok"]:
         o = p1["out"]
@@ -329,6 +372,12 @@ def build_comment(chg_id: str, risk: Optional[str], pr_no: int, head_sha: str, t
         "- 由 `scripts/local_review.py` 在本機 Ollama 序列執行(兩階段,`keep_alive: 0`)。",
         "- 本審議只是完整性檢查,不是授權;merge 仍需使用者核准。否決席 pass 不能取代使用者在確認閘的判斷。",
         "- 限制:目前只有 Qwen、GLM 兩個模型家族,席位間會共享盲點;本機 8–27B 模型可能被 PR 內容 prompt injection。",
+    ]
+    cut = [n for n, r in result.items() if r.get("diff_notes")]
+    if cut:
+        parts.append("- diff 截斷:{} 席送審的 diff 有截短(詳見各席細節),判決可能未看到完整 diff。".format(
+            "、".join(cut)))
+    parts += [
         "",
         "### 判決",
         "```text",
@@ -441,16 +490,18 @@ def main(argv=None) -> int:
     if seat_filter:
         seats = {n: c for n, c in seats.items() if n in seat_filter}
 
-    data_block = "\n".join([
-        "# 待審資料", DATA_WARNING, "<<<待審資料開始>>>",
-        "## PR 標題", str(pr.get("title") or ""),
-        "## PR 內文", clip(str(pr.get("body") or ""), PR_BODY_LIMIT),
-        "## 變更檔案", "\n".join(files),
-        "## {}(風險分級:{})".format(chg_id, risk or "讀不到"), chg_text,
-        "## diff", filter_diff(diff),
-        "<<<待審資料結束>>>", DATA_WARNING,
-    ])
-    result = run_panel(seats, data_block)
+    def make_block(diff_text: str) -> str:
+        return "\n".join([
+            "# 待審資料", DATA_WARNING, "<<<待審資料開始>>>",
+            "## PR 標題", str(pr.get("title") or ""),
+            "## PR 內文", clip(str(pr.get("body") or ""), PR_BODY_LIMIT),
+            "## 變更檔案", "\n".join(files),
+            "## {}(風險分級:{})".format(chg_id, risk or "讀不到"), chg_text,
+            "## diff", diff_text,
+            "<<<待審資料結束>>>", DATA_WARNING,
+        ])
+
+    result = run_panel(seats, make_block, filter_diff(diff))
     comment = build_comment(chg_id, risk, args.pr, head_sha, str(pr.get("title") or ""), result)
 
     if args.dry_run:

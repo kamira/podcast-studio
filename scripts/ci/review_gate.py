@@ -8,7 +8,8 @@ review_gate.py — CI 審議閘 / review gate
    (`*.py`、`*.sh`、`static/`、`.github/`、`scripts/`、`.ai-sdlc/`)。只改 `docs/`、`features/`
    (且不含 `*.py`、`*.sh`)才可免審議;其餘位置一律從嚴視為需要審議。
 3. 需要審議時,必須有擁有者留言含 `<!-- local-review CHG-YYYYMMDD-NN sha=<head> seats=<json> -->`,
-   且 sha 等於目前 head;多則符合時取最後一則。同一則留言含兩個以上 local-review 標記視為可疑、忽略。
+   且 sha 等於目前 head;標記中的 CHG 必須是該 PR 改到的 CHG 之一(PR 沒改到任何 CHG 時,
+   必須是 PR 內 commit 訊息引用的 CHG 之一);多則符合時取最後一則。同一則留言含兩個以上 local-review 標記視為可疑、忽略。
    判決須含 DIR-1 六席;否決席(risk、security、compliance)任一 `fail`,或任何席位 `no-answer`
    → 失敗。
 4. PR 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、
@@ -53,6 +54,7 @@ INFRA_PREFIXES = (".github/", "scripts/ci/", "tests/ci/", ".ai-sdlc/")
 INFRA_FILES = ("scripts/local_review.py", "scripts/deploy_local.sh")
 
 CHG_FILE_RE = re.compile(r"^docs/changes/CHG-\d{8}-\d{2}\.md$")
+CHG_ID_RE = re.compile(r"CHG-\d{8}-\d{2}")
 RISK_LINE_RE = re.compile(r"^-\s*風險分級\s*[::]\s*(低|中|高)")
 LOCAL_REVIEW_RE = re.compile(
     r"<!--\s*local-review\s+(CHG-\d{8}-\d{2})\s+sha=([0-9a-f]{40})\s+seats=(\{.*?\})\s*-->",
@@ -128,14 +130,22 @@ def has_infra_approval(comments: Iterable[dict], head_sha: str) -> Tuple[bool, L
 
 # ---------------------------------------------------------------- 判定(純函式)
 
+def allowed_chgs(files: Iterable[str], commit_chgs: Iterable[str]) -> List[str]:
+    """標記可引用的 CHG:PR 改到的 CHG;PR 沒改到任何 CHG 時改用 commit 訊息引用的 CHG。"""
+    changed = sorted({f.rsplit("/", 1)[-1][:-3] for f in files if CHG_FILE_RE.match(f)})
+    return changed or sorted(set(commit_chgs))
+
+
 def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
-             chg_risks: Dict[str, Optional[str]]) -> Tuple[bool, List[str]]:
+             chg_risks: Dict[str, Optional[str]],
+             commit_chgs: Iterable[str] = ()) -> Tuple[bool, List[str]]:
     """審議閘判定。
 
     files:PR 改到的路徑(改名者新舊路徑都要列入);
     comments:GitHub issue comments(至少含 `author_association`、`body`),依時間先後排列;
     head_sha:目前 PR head 的完整 sha;
-    chg_risks:PR 改到的 CHG 路徑 → 風險分級(「低」「中」「高」或 None = 讀不到)。
+    chg_risks:PR 改到的 CHG 路徑 → 風險分級(「低」「中」「高」或 None = 讀不到);
+    commit_chgs:PR 內 commit 訊息引用的 CHG 編號(PR 沒改到 CHG 時用來比對標記)。
     回傳 (是否通過, 訊息清單)。
     """
     files = list(files)
@@ -171,7 +181,8 @@ def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
         return ok, msgs
     msgs.append("需要審議:" + ";".join(reasons))
 
-    # 3. 找對應目前 head 的擁有者 local-review 留言(取最後一則)
+    # 3. 找對應目前 head、CHG 相符的擁有者 local-review 留言(取最後一則)
+    allowed = allowed_chgs(files, commit_chgs)
     chosen = None
     for c in comments:
         body = c.get("body") or ""
@@ -186,6 +197,10 @@ def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
             continue
         if parsed["sha"] != head_sha:
             msgs.append("忽略 local-review 留言:sha {} 不是目前 head".format(parsed["sha"][:12]))
+            continue
+        if parsed["chg"] not in allowed:
+            msgs.append("忽略 local-review 留言:{} 不是本 PR 改到或 commit 引用的 CHG({})".format(
+                parsed["chg"], "、".join(allowed) or "無"))
             continue
         chosen = parsed
     if chosen is None:
@@ -255,6 +270,8 @@ def collect(api: str, slug: str, pr: int, token: str, repo: Path):
         if f.get("previous_filename"):
             files.append(f["previous_filename"])
     comments = _get_all("{}/issues/{}/comments".format(base, pr), token)
+    commit_chgs = sorted({m for c in _get_all("{}/pulls/{}/commits".format(base, pr), token)
+                          for m in CHG_ID_RE.findall(((c.get("commit") or {}).get("message")) or "")})
     chg_risks: Dict[str, Optional[str]] = {}
     for path in sorted(set(files)):
         if not CHG_FILE_RE.match(path):
@@ -263,7 +280,7 @@ def collect(api: str, slug: str, pr: int, token: str, repo: Path):
         if not target.is_file():  # 刪除或改名前的舊路徑
             continue
         chg_risks[path] = read_risk(target.read_text(encoding="utf-8", errors="replace"))
-    return files, comments, head_sha, chg_risks
+    return files, comments, head_sha, chg_risks, commit_chgs
 
 
 def main(argv=None) -> int:
@@ -286,12 +303,12 @@ def main(argv=None) -> int:
         return 2
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
     try:
-        files, comments, head_sha, chg_risks = collect(api, args.github_repo, args.pr, token, args.repo)
+        files, comments, head_sha, chg_risks, commit_chgs = collect(api, args.github_repo, args.pr, token, args.repo)
     except (ApiError, KeyError, TypeError) as e:
         print("錯誤:{}".format(e), file=sys.stderr)
         return 2
 
-    ok, msgs = evaluate(files, comments, head_sha, chg_risks)
+    ok, msgs = evaluate(files, comments, head_sha, chg_risks, commit_chgs)
     for m in msgs:
         print("- " + m)
     print("review gate:{}".format("通過" if ok else "不通過"))
