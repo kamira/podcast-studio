@@ -42,3 +42,25 @@
     假設 目前在其他分支
     當 我執行 scripts/deploy_local.sh
     那麼 腳本中止並提示切回 main
+
+  場景: 非擁有者偽造審議留言
+    假設 PR 改到程式路徑
+    而且 一個非 repo 擁有者的帳號貼了合格的 local-review 標記留言
+    當 CI 執行 review job
+    那麼 review job 失敗
+
+  場景: 自評低風險但改到程式
+    假設 PR 對應的 CHG 自評低風險且改到 media.py
+    而且 PR 沒有 local-review 留言
+    當 CI 執行 review job
+    那麼 review job 失敗
+
+  場景: fork PR 不在本機執行
+    假設 PR 來自 fork
+    當 我執行 scripts/local_review.py
+    那麼 腳本拒絕並提示不在本機執行 fork 的內容
+
+  場景: 程式碼中的秘密
+    假設 PR 新增的 Python 檔含 GitHub 個人存取權杖樣式字串
+    當 CI 執行 document job
+    那麼 document job 失敗並指出檔案與行號
