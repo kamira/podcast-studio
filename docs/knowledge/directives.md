@@ -33,3 +33,29 @@
   - `glm4:latest`(同一份 NFR 脈絡)→ **concern**,而且判決行格式壞掉(把模板佔位字原樣輸出);沒給 NFR 脈絡時 → **pass**
 - 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻)
 - 狀態:生效
+
+## DIR-2 — 每個步驟都走 commit → push → PR → CI → merge
+
+- 日期 / 分支:2026-10-22(UTC+0)/ 全分支
+- tags/scope:cicd, review
+- 情境:任何會進 repo 的步驟(帳本、CHG、程式、CI 設定本身)。
+- 規則:
+  1. 每個步驟開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號,push,開 PR,CI 全綠後 merge 回 `main`。不直接 push `main`。
+  2. CI 必須涵蓋三類:**document**(doc_integrity_check、knowledge INDEX 新鮮度)、**CHG**(plan-check、commit 引用 CHG 編號)、**program**(`./scripts/check.sh` 測試、語法與 lint)。
+  3. merge 的停點依風險分級(halt policy,只准加嚴):低風險 CI 綠即可自動 merge;**中、高風險在 merge 前停下等使用者核准**——這是治理層的永久規則,本指示不放寬它。
+- 原因:使用者指示(2026-10-22):「每次步驟都要 commit push pr merge 並且要設好完整 CICD(包含 document, chg, program)」。
+- 信度:使用者確認(第 3 條的停點為治理層既有規則,agent 依 halt policy 補上)
+- 狀態:生效(前置未完成:GitHub 遠端與 `gh` 尚未就緒)
+
+## DIR-3 — 主 agent(Claude)專注派發,實作與審查交給工作者
+
+- 日期 / 分支:2026-10-22(UTC+0)/ 全分支
+- tags/scope:review, llm, interaction
+- 情境:CHG 的 task 施工、審查、文件草稿、CI 失敗分析。
+- 規則:
+  1. 主 agent 負責:拆 task、組派發包、派工、收結果、裁決、對使用者回報;**不親自寫實作**。
+  2. 工作者優先順序:本機模型(Ollama)能勝任的先給本機模型——審議席位(DIR-1)、文件草稿、測試案例草稿、commit / PR 說明、CI 日誌初判;本機模型產出不合格(測試不過或格式不合)時,改派 Claude subagent,並在 CHG 記錄改派原因。
+  3. 本機模型的產出一律經測試或審查才採用,不直接信任。
+- 原因:使用者指示(2026-10-22):「可以使用本地模型協助處理,claude 專注於派發工作」。
+- 信度:使用者確認(第 2 條的分工與改派規則為 agent 推得,使用者可推翻)
+- 狀態:生效
