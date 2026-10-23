@@ -121,3 +121,54 @@ flowchart LR
 〔觀察〕單向、無循環:入口層 → 媒體層 → 模型層 → 外部引擎;入口層也直接用模型層。`media` 依賴 `taiwan_ai`,`taiwan_ai` 不依賴 `media`。
 
 〔觀察〕耦合點:`media.py` 直接讀 `taiwan_ai` 的模組層常數(`OUT`、`MFLUX`、`FLUX`)與函式;MCP 的 `reason` 以**改寫模組全域變數** `tai.MODELS` 切換模型——靠全域鎖才安全,網頁行程裡沒有這把鎖(目前網頁不切 heavy,〔推論〕暫無實害)。
+
+## 開發流程(CI/CD)
+
+> 2026-10-23 依 CHG-20261022-03 新增。本節描述開發流程(repo 的檢查與部署),不是產品執行期的模組;產品「不送資料出本機」的要求不因本節改變,開發期送往 Codex 的審議資料屬 DIR-1 第 9 條的使用者明示例外。
+
+### 架構圖
+
+```mermaid
+flowchart LR
+  subgraph Mac["這台 Mac(本機)"]
+    DISP["主 agent(派發)"]
+    LR["scripts/local_review.py<br/>DIR-1 六席 · Ollama<br/>(27B 暫停)"]
+    DEP["scripts/deploy_local.sh"]
+    APP["網頁伺服器 :7860<br/>(只綁 127.0.0.1)"]
+  end
+  CODEX[["Codex(雲端,read-only)<br/>risk(高風險)/ security / compliance 席"]]
+  subgraph GH["GitHub kamira/podcast-studio(public)"]
+    PR["Pull Request"]
+    CMT["PR 留言<br/>local-review 判決 / infra-approved"]
+    subgraph CI[".github/workflows/ci.yml(代管 ubuntu)"]
+      J1["document<br/>doc_integrity_check · secret_scan"]
+      J2["chg<br/>commit 引用 + plan-check"]
+      J3["program<br/>py_compile · ruff E9,F · unittest"]
+      J4["review<br/>驗 local-review 留言"]
+    end
+    MAIN["main(ruleset:四項 check 必過<br/>只經 PR、只允許 squash)"]
+  end
+  VEN[".ai-sdlc/(vendored v1.66.0)"]
+  DISP -- push 分支 --> PR
+  DISP --> LR -- gh pr comment --> CMT
+  LR -. 送審資料 .-> CODEX
+  PR --> J1 & J2 & J3 & J4
+  J1 & J2 --> VEN
+  J4 --> CMT
+  J1 & J2 & J3 & J4 -- 全綠 + 使用者核准 --> MAIN
+  MAIN -- merge 後 --> DEP --> APP
+```
+
+- 〔觀察〕四個 job 都先把 PR head 取到 `pr/`、base 取到 `trusted/`,治理檢查一律執行 `trusted/` 的腳本,PR 內容只當資料讀取(`.github/workflows/ci.yml` 檔頭註解)。
+- 〔觀察〕main 的 ruleset 要求 `document`、`chg`、`program`、`review` 四項通過,禁止直接 push 與 force push,合併只允許 squash(CHG-20261022-03 派發記錄 T7)。
+- 〔觀察〕DIR-1 第 9 條:security、compliance 席由 Codex 擔任;第 10 條暫停 27B,高風險 CHG 的 risk 席改由 Codex 擔任。`scripts/local_review.py` 的預設值仍含 27B,暫停期間須帶 `--codex-seats risk,security,compliance`。
+- 〔觀察〕`program` job 在 `scripts/check.sh` 不存在時跳過該步(該檔由 CHG-20261022-01 T1 建立)。
+
+### 一個 PR 的流程
+
+1. **開 PR**:每個步驟開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號(只改 `docs/knowledge/` 者除外),push 後開 PR(DIR-2 第 1 條)。
+2. **本機審議**:CHG 風險為中 / 高,或 PR 改到程式路徑時,主 agent 從 main 的工作副本執行 `scripts/local_review.py`,六席兩階段審議後以 `gh pr comment` 貼出判決,留言帶 `<!-- local-review CHG-… sha=<head sha> -->` 標記。只處理本 repo 分支且作者為擁有者的 PR。
+3. **CI 四項**:`document`(doc_integrity_check、全 repo 與 commit 範圍秘密掃描、vendored 完整性)、`chg`(commit 引用 CHG 編號、PR 改到的 CHG 做 plan-check)、`program`(`py_compile`、`ruff check --select E9,F`、`python3 -m unittest discover -s tests/ci`)、`review`(只採信擁有者留言;標記 sha 須為目前 head;否決席無 fail、每席都有回答;改到治理基礎設施路徑另需 `<!-- infra-approved sha=<head> -->`)。
+4. **使用者核准**:CI 全綠後,只改 `docs/`、`features/` 的 PR 可自動 merge;改到任何程式路徑的 PR 不論分級,一律停下等使用者核准(DIR-2 第 3 條)。審議留言只是完整性檢查,授權只有使用者核准(CHG-20261022-03 安全影響 (n))。
+5. **squash merge**:main 只接受 squash merge,標題帶 CHG 編號。
+6. **本機部署**:有程式變更時,在乾淨的 main 上執行 `scripts/deploy_local.sh`:`git pull --ff-only` → 跑 `scripts/check.sh`(存在時)→ 重啟 7860 網頁伺服器 → 驗證本專案行程的全部 LISTEN socket 只綁 `127.0.0.1` / `[::1]`,否則停止伺服器並 exit 1。MCP 伺服器由 client 啟動,腳本只印出重新啟動提醒。
