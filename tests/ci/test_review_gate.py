@@ -153,6 +153,67 @@ class EvaluateTest(unittest.TestCase):
         self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=[], expect=False)
         self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=["CHG-20261022-01", "CHG-20261022-03"])
 
+    # --- T10:依 commit 引用的 CHG 判分級
+    def check2(self, files, comments, commit_chgs, commit_risks, expect, risks=None):
+        ok, msgs = review_gate.evaluate(files, comments, HEAD, risks or {}, commit_chgs, commit_risks)
+        self.assertEqual(ok, expect, "\n".join(msgs))
+        return msgs
+
+    def test_docs_only_citing_high_risk_chg_needs_review(self):
+        msgs = self.check2(["docs/acceptance/ACC-20261023-01.md"], [], ["CHG-20261022-03"],
+                           {"CHG-20261022-03": "高"}, expect=False)
+        self.assertIn("需要審議:commit 引用 CHG-20261022-03,其風險分級為高", msgs)
+        self.assertFalse(any("分級為低" in m for m in msgs), msgs)
+
+    def test_docs_only_citing_medium_risk_chg_with_owner_comment_passes(self):
+        self.check2(["docs/acceptance/ACC-20261023-01.md"], [owner(marker())], ["CHG-20261022-03"],
+                    {"CHG-20261022-03": "中"}, expect=True)
+
+    def test_docs_only_citing_missing_chg_does_not_trigger(self):
+        msgs = self.check2(["docs/ai-guideline.md"], [], ["CHG-20991231-99"], {}, expect=True)
+        self.assertTrue(any("CHG-20991231-99" in m and "沒有該檔" in m for m in msgs), msgs)
+
+    def test_docs_only_citing_low_risk_chg_is_exempt(self):
+        msgs = self.check2(["docs/ai-guideline.md"], [], ["CHG-20261022-01"],
+                           {"CHG-20261022-01": "低"}, expect=True)
+        exempt = [m for m in msgs if m.startswith("免審議")]
+        self.assertEqual(len(exempt), 1, msgs)
+        self.assertIn("未改到 CHG 檔", exempt[0])
+        self.assertIn("commit 引用 CHG-20261022-01,其風險分級為低", exempt[0])
+
+    def test_cited_chg_without_risk_needs_review(self):
+        msgs = self.check2(["docs/ai-guideline.md"], [], ["CHG-20261022-01"],
+                           {"CHG-20261022-01": None}, expect=False)
+        self.assertTrue(any(m.startswith("需要審議:commit 引用 CHG-20261022-01")
+                            and "讀不到" in m for m in msgs), msgs)
+
+    def test_changed_low_but_cited_high_needs_review(self):
+        low = "docs/changes/CHG-20261022-01.md"
+        msgs = self.check2([low], [], ["CHG-20261022-03"], {"CHG-20261022-03": "高"},
+                           expect=False, risks={low: "低"})
+        self.assertIn("需要審議:commit 引用 CHG-20261022-03,其風險分級為高", msgs)
+
+    def test_changed_and_cited_same_chg_reported_once(self):
+        msgs = self.check2([CHG], [], ["CHG-20261022-03"], {"CHG-20261022-03": "高"},
+                           expect=False, risks={CHG: "高"})
+        need = [m for m in msgs if m.startswith("需要審議")]
+        self.assertEqual(need, ["需要審議:PR 改到 {},其風險分級為高".format(CHG)])
+
+    def test_no_message_claims_low_risk_without_chg(self):
+        msgs = self.check2(["features/ci.feature"], [], [], {}, expect=True)
+        self.assertFalse(any("分級為低" in m for m in msgs), msgs)
+        self.assertTrue(any("未改到 CHG 檔" in m and "commit 未引用 CHG" in m for m in msgs), msgs)
+
+    # --- T11:缺留言提示執行方式
+    def test_missing_comment_hints_local_review(self):
+        msgs = self.check(["podcast_studio.py"], [], expect=False)
+        hint = [m for m in msgs if "缺少擁有者" in m]
+        self.assertEqual(len(hint), 1, msgs)
+        self.assertIn("scripts/local_review.py --pr <編號>", hint[0])
+        self.assertIn("--codex-seats risk,security,compliance", hint[0])
+        ok, msgs = review_gate.evaluate(["podcast_studio.py"], [], HEAD, {}, (), None, 25)
+        self.assertTrue(any("scripts/local_review.py --pr 25" in m for m in msgs), msgs)
+
     def test_read_risk_only_header(self):
         text = "# CHG\n\n- 風險分級:低\n\n## 動機\n- 風險分級:高\n"
         self.assertEqual(review_gate.read_risk(text), "低")
@@ -168,6 +229,44 @@ CHG_HIGH = CHG_TEXT.replace("風險分級:中", "風險分級:高")
 
 def prompt_chars(body):
     return sum(len(m["content"]) for m in body["messages"])
+
+
+class CollectTest(unittest.TestCase):
+    """collect() 從 head checkout 讀 commit 引用 CHG 的分級(GitHub API 以替身取代)。"""
+
+    def test_commit_cited_chg_risks_read_from_repo(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / "docs" / "changes").mkdir(parents=True)
+            (repo / "docs/changes/CHG-20261022-03.md").write_text(
+                "# CHG\n\n- 風險分級:高\n\n## 動機\n", encoding="utf-8")
+            (repo / "docs/changes/CHG-20261022-02.md").write_text("# CHG\n\n## 動機\n", encoding="utf-8")
+            (repo / "docs/changes/CHG-20261022-01.md").symlink_to(repo / "docs/changes/CHG-20261022-03.md")
+
+            def fake_get(url, token):
+                if url.endswith("/pulls/5"):
+                    return {"head": {"sha": HEAD}}
+                if "/pulls/5/files" in url:
+                    return [{"filename": "docs/acceptance/ACC-20261023-01.md"}]
+                if "/issues/5/comments" in url:
+                    return []
+                if "/pulls/5/commits" in url:
+                    return [{"commit": {"message": "CHG-20261022-03 CHG-20261022-02 CHG-20261022-01 "
+                                                   "CHG-20991231-99"}}]
+                raise AssertionError(url)
+
+            orig = review_gate._get
+            review_gate._get = fake_get
+            try:
+                files, comments, head, risks, cited, cited_risks = review_gate.collect(
+                    "https://api.example", "o/r", 5, "t", repo)
+            finally:
+                review_gate._get = orig
+        self.assertEqual(risks, {})
+        self.assertEqual(cited, ["CHG-20261022-01", "CHG-20261022-02", "CHG-20261022-03", "CHG-20991231-99"])
+        self.assertEqual(cited_risks, {"CHG-20261022-01": None, "CHG-20261022-02": None,
+                                       "CHG-20261022-03": "高"})
 
 
 class FakeEnv:
