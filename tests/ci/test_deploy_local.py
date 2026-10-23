@@ -325,6 +325,32 @@ exec "{real}" "$@"
         self.assertEqual(ext_file.read_text(encoding="utf-8"), "原始\n")
         self.assertEqual(self.server_pids(), [], "不得啟動伺服器")
 
+    # --- 硬連結 ---
+
+    def _hardlink_case(self, name: str):
+        repo = FakeRepo(self.root, with_server=True)
+        ext_file = self.root / f"ext_{name}"
+        ext_file.write_text("原始\n", encoding="utf-8")
+        (repo.path / "outputs").mkdir()
+        target = repo.path / "outputs" / name
+        try:
+            os.link(ext_file, target)
+        except OSError as exc:
+            reason = f"無法建立硬連結(暫存目錄與 repo 可能不在同一檔案系統):{exc}"
+            print(reason, file=sys.stderr)
+            self.skipTest(reason)
+        code, out = self.deploy(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("硬連結數", out)
+        self.assertEqual(ext_file.read_text(encoding="utf-8"), "原始\n")
+        self.assertEqual(self.server_pids(), [], "不得啟動伺服器")
+
+    def test_log_hardlink_outside_repo_is_refused(self):
+        self._hardlink_case("studio_server.log")
+
+    def test_pidfile_hardlink_outside_repo_is_refused(self):
+        self._hardlink_case(".studio.pid")
+
     def test_pidfile_pointing_elsewhere_is_left_alone(self):
         self.need_lsof()
         repo = FakeRepo(self.root, with_server=True)

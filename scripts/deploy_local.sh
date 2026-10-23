@@ -11,7 +11,7 @@
 #   - 「本專案行程」以 pidfile(outputs/.studio.pid)識別;pidfile 指向的行程若不是
 #     本 repo 的 studio_server.py,一律不碰並 exit 1。
 #   - 只寫入 outputs/.studio.pid 與 outputs/studio_server.log(outputs/ 已被 .gitignore 排除)。
-#     寫入前確認 outputs 與這兩個檔都不是符號連結、outputs 實際路徑在 repo 內,否則中止。
+#     寫入前確認 outputs 與這兩個檔都不是符號連結、兩檔硬連結數為 1、outputs 實際路徑在 repo 內,否則中止。
 #   - LISTEN 驗證 fail-closed:lsof 失敗或查無 socket 一律停止伺服器並 exit 1。
 #
 # 以下環境變數**只供測試使用**(tests/ci/test_deploy_local.py),正式部署不要設定:
@@ -94,7 +94,25 @@ check_outputs() {
 		if [ -L "$f" ]; then
 			die "$f 是符號連結,拒絕寫入"
 		fi
+		# 硬連結:已存在的檔案連結數必須為 1,否則可能指向 repo 外的同一個檔案
+		if [ -e "$f" ]; then
+			if [ ! -f "$f" ]; then
+				die "$f 不是一般檔案,拒絕寫入"
+			fi
+			nlink=$(link_count "$f" 2>/dev/null || true)
+			if [ "$nlink" != "1" ]; then
+				die "$f 的硬連結數為「${nlink:-未知}」(必須為 1),拒絕寫入"
+			fi
+		fi
 	done
+}
+
+# 檔案的硬連結數(macOS 與 Linux 的 stat 參數不同)
+link_count() {
+	case "$(uname)" in
+	Darwin | *BSD) stat -f %l "$1" ;;
+	*) stat -c %h "$1" ;;
+	esac
 }
 
 # 先檢查一次,有問題就在動到任何行程前中止
