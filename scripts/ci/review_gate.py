@@ -8,7 +8,8 @@ review_gate.py — CI 審議閘 / review gate
    `docs/`、`features/` 以外的位置,以及其中的 `*.py`、`*.sh`,一律從嚴視為程式路徑)
    **或** PR 改到的 CHG 風險分級為中 / 高
    **或** PR 內 commit 訊息引用的 CHG(在 head 的 `docs/changes/` 存在者)風險分級為中 / 高(T10)。
-   讀不到分級一律從嚴視為需要審議。commit 引用但 `docs/changes/` 不存在的 CHG 不列入分級判定
+   讀不到分級一律從嚴視為需要審議;CHG 檔是符號連結時不跟隨,視為讀不到。同一 CHG 既被改到又被
+   commit 引用時取較嚴者(讀不到 > 高 > 中 > 低)。commit 引用但 `docs/changes/` 不存在的 CHG 不列入分級判定
    (該情況由 `plan_check_changed.py` 擋下)。訊息逐項寫出觸發原因;免審議時也如實寫出依據。
 3. 需要審議時,必須有擁有者留言含 `<!-- local-review CHG-YYYYMMDD-NN sha=<head> seats=<json> -->`,
    且 sha 等於目前 head;標記中的 CHG 必須是該 PR 改到的 CHG 之一(PR 沒改到任何 CHG 時,
@@ -144,6 +145,25 @@ def _chg_path(chg_id: str) -> str:
     return "docs/changes/{}.md".format(chg_id)
 
 
+_SEVERITY = {"低": 0, "中": 1, "高": 2, None: 3}
+
+
+def stricter(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """取較嚴的分級:讀不到 > 高 > 中 > 低;不認得的值視同讀不到。"""
+    a = a if a in _SEVERITY else None
+    b = b if b in _SEVERITY else None
+    return a if _SEVERITY[a] >= _SEVERITY[b] else b
+
+
+def read_chg_risk(target: Path) -> Tuple[bool, Optional[str]]:
+    """讀 CHG 檔分級,不跟隨符號連結。回傳 (檔案是否存在, 分級);符號連結 → (True, None)。"""
+    if target.is_symlink():
+        return True, None
+    if target.is_file():
+        return True, read_risk(target.read_text(encoding="utf-8", errors="replace"))
+    return False, None
+
+
 def review_command(pr: Optional[int] = None) -> str:
     """缺審議留言時提示的執行方式(T11)。"""
     return ("請執行 `python3 scripts/local_review.py --pr {}`"
@@ -194,7 +214,10 @@ def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
         reasons.append("改到程式或非 docs/features 路徑:{}".format(", ".join(program[:10])
                                                               + (" …" if len(program) > 10 else "")))
     basis = []  # 免審議時如實列出的依據
-    for path, risk in sorted(chg_risks.items()):
+    cited_by_path = {_chg_path(c): r for c, r in commit_chg_risks.items()}
+    for path, own in sorted(chg_risks.items()):
+        # 同一 CHG 也被 commit 引用時取較嚴者(CI 的兩條讀取路徑理應一致;不一致時從嚴)
+        risk = stricter(own, cited_by_path[path]) if path in cited_by_path else own
         if risk in ("中", "高"):
             reasons.append("PR 改到 {},其風險分級為{}".format(path, risk))
         elif risk is None:
@@ -317,20 +340,18 @@ def collect(api: str, slug: str, pr: int, token: str, repo: Path):
     commit_chgs = sorted({m for c in _get_all("{}/pulls/{}/commits".format(base, pr), token)
                           for m in CHG_ID_RE.findall(((c.get("commit") or {}).get("message")) or "")})
     commit_chg_risks: Dict[str, Optional[str]] = {}
-    for chg_id in commit_chgs:
-        target = repo / _chg_path(chg_id)
-        if target.is_symlink():  # 不跟隨符號連結;從嚴視為讀不到分級
-            commit_chg_risks[chg_id] = None
-        elif target.is_file():
-            commit_chg_risks[chg_id] = read_risk(target.read_text(encoding="utf-8", errors="replace"))
+    for chg_id in commit_chgs:  # 符號連結不跟隨,記為讀不到
+        exists, risk = read_chg_risk(repo / _chg_path(chg_id))
+        if exists:
+            commit_chg_risks[chg_id] = risk
     chg_risks: Dict[str, Optional[str]] = {}
     for path in sorted(set(files)):
         if not CHG_FILE_RE.match(path):
             continue
-        target = repo / path
-        if not target.is_file():  # 刪除或改名前的舊路徑
+        exists, risk = read_chg_risk(repo / path)  # 符號連結不跟隨,記為讀不到
+        if not exists:  # 刪除或改名前的舊路徑
             continue
-        chg_risks[path] = read_risk(target.read_text(encoding="utf-8", errors="replace"))
+        chg_risks[path] = risk
     return files, comments, head_sha, chg_risks, commit_chgs, commit_chg_risks
 
 
