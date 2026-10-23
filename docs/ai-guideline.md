@@ -2,7 +2,7 @@
 
 - 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
 - 分支(Branch):main
-- 版本:v1.3(變更歷程見 §11)
+- 版本:v1.4(變更歷程見 §11)
 - 日期:2026-10-22
 - 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24,待 CHG-20261022-01/04 修訂後確認閘)
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
@@ -138,6 +138,7 @@
 | 上傳(v1.1) | 只收白名單副檔名;單檔上限 200 MB;檔名由伺服器重新產生(不信任使用者檔名);只能讀寫 `outputs/` 之下,拒絕路徑穿越 | 新需求 FR-19 的安全要求 |
 | 重型工作互斥(v1.1) | 網頁與 MCP **跨行程**共用一把檔案鎖,同時只跑一個重型工作(解 ADP-2) | 新需求 |
 | 全域設定(v1.1) | 寫 repo 外設定(MCP 註冊)必須使用者在網頁上逐次按下確認,且只透過官方 CLI | 新需求 FR-22 |
+| 開發流程(v1.4) | merge 前 CI 全綠:`document`、`chg`、`program`、`review` 四項 check 全部通過才能 merge 進 main;由 main ruleset 強制 | CHG-20261022-03 / DIR-2 |
 
 ## 6. 限制與假設
 
@@ -180,6 +181,13 @@
 - **產出物**寫到 `outputs/`,回傳絕對路徑;`outputs/` 不入 git。
 - **`tools/BreezyVoice/` 的修改**一律落在 `patches/breezyvoice-mac/` 並由 `setup_breezyvoice.sh` 套用,不直接改 `tools/`。
 - **結構設計圖**:預設畫給使用者看並等確認(使用者未表示要跳過)。
+- **CI/CD(v1.4,CHG-20261022-03 / DIR-2)**:
+  - 每個步驟一個 PR:開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號(只改 `docs/knowledge/` 者除外),不直接 push main。
+  - merge 前 `document`、`chg`、`program`、`review` 四項 check 必須全部通過。
+  - 改到任何程式路徑的 PR,不論風險分級,merge 前一律等使用者核准;只改 `docs/`、`features/` 的 PR 可在 CI 綠後自動 merge。
+  - 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/deploy_local.sh`)的 PR,另需擁有者留言 `<!-- infra-approved sha=<head> -->`。
+  - main 只允許 squash merge,squash 標題帶 CHG 編號。
+  - 本機審議以 `scripts/local_review.py` 執行;DIR-1 第 10 條暫停 27B 期間,一律帶 `--codex-seats risk,security,compliance`。
 
 ## 9. 導入盤點:具名待補項
 
@@ -220,3 +228,4 @@
 | v1.1 | 2026-10-22 | FR-14 棄用(CLI);新增 FR-16~23(節點畫布、檔案拖放、模型設定、MCP 註冊管理、審議席位設定);新增 v1.1 非功能需求 | 使用者指示;CHG-20261022-01、CHG-20261022-02 |
 | v1.3 | 2026-10-23 | 新增 FR-31~34(三分頁、步驟精靈、語速倍率、免責說明與授權);修改 FR-16(節點畫布移入設定)、FR-24(時間軸改為精靈步驟) | 使用者指示;CHG-20261022-01、CHG-20261022-04 修訂 1 |
 | v1.2 | 2026-10-22 | 新增 FR-24~30(影片編輯器時間軸、逐句合成、停頓長度、聲調標註、實際長度字幕、多圖畫面軌、匯出與專案存檔);FR-16 節點畫布改為「生成流程」分頁 | 使用者指示;CHG-20261022-04 |
+| v1.4 | 2026-10-23 | §5 新增「merge 前 CI 全綠」;§8 新增 CI/CD 約定(每步驟 PR、四項檢查、程式變更使用者核准、infra-approved、只允許 squash、暫停 27B 期間的 `--codex-seats`) | CHG-20261022-03 結構文件更新;DIR-1、DIR-2 |
