@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import re
 import subprocess
 import sys
@@ -50,8 +51,8 @@ import review_gate  # noqa: E402  共用席位、否決席與風險分級解析
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 NUM_CTX = 40960
-NUM_PREDICT = 4096          # 已驗證的輸出上限(think:false):沒有上限時模型會無限產生 findings
-NUM_PREDICT_THINK = 12288   # think:true 時 Ollama 把思考 token 算進 num_predict,4096 會讓 content 為空
+NUM_PREDICT = 4096          # 已驗證的輸出上限(think:false):沒有上限時模型會無限產生 findings;也是 think 席的下限
+THINK_MIN_BUDGET = 16384    # think:true 時 Ollama 把思考 token 算進 num_predict;diff 先截短到至少留下這麼多
 CHARS_PER_TOKEN = 1.5       # prompt token 粗估:字元數 ÷ 1.5
 REPEAT_PENALTY = 1.1
 MAX_FINDINGS = 20
@@ -162,18 +163,31 @@ def filter_diff(diff: str) -> str:
     return out
 
 
-def num_predict_for(cfg: dict) -> int:
-    return NUM_PREDICT_THINK if cfg["think"] else NUM_PREDICT
+def estimate_tokens(chars: int) -> int:
+    """prompt token 粗估:字元數 ÷ 1.5(無條件進位)。"""
+    return math.ceil(chars / CHARS_PER_TOKEN)
 
 
-def fit_diff(diff: str, fixed_chars: int, num_predict: int) -> Tuple[str, Optional[str]]:
-    """把 diff 截到 prompt 粗估(字元 ÷ 1.5)+ num_predict 不超過 num_ctx;回傳 (diff, 截斷說明或 None)。"""
-    budget = int((NUM_CTX - num_predict) * CHARS_PER_TOKEN) - fixed_chars
+def reserve_for(cfg: dict) -> int:
+    """送審前要替輸出保留的 token 數:think 席保留思考預算,非 think 席保留固定 num_predict。"""
+    return THINK_MIN_BUDGET if cfg["think"] else NUM_PREDICT
+
+
+def num_predict_for(cfg: dict, prompt_chars: int) -> int:
+    """非 think 席固定 4096;think 席為 num_ctx 減該次 prompt 粗估,下限 4096。"""
+    if not cfg["think"]:
+        return NUM_PREDICT
+    return max(NUM_PREDICT, NUM_CTX - estimate_tokens(prompt_chars))
+
+
+def fit_diff(diff: str, fixed_chars: int, reserve: int) -> Tuple[str, Optional[str]]:
+    """把 diff 截到 prompt 粗估(字元 ÷ 1.5)+ reserve 不超過 num_ctx;回傳 (diff, 截斷說明或 None)。"""
+    budget = int((NUM_CTX - reserve) * CHARS_PER_TOKEN) - fixed_chars
     limit = max(0, min(DIFF_CHAR_LIMIT, budget))
     if len(diff) <= limit:
         return diff, None
-    return clip(diff, limit), "diff 由 {} 字截短為 {} 字(放進 num_ctx {}、num_predict {})".format(
-        len(diff), limit, NUM_CTX, num_predict)
+    return clip(diff, limit), "diff 由 {} 字截短為 {} 字(放進 num_ctx {}、保留輸出 {} token)".format(
+        len(diff), limit, NUM_CTX, reserve)
 
 
 # ---------------------------------------------------------------- 席位
@@ -238,8 +252,9 @@ CROSS_SCHEMA = {"type": "object", "required": ["cross"], "properties": {"cross":
 
 def ask(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
     """格式不合格或逾時 = 沒有回答 → 重派一次;兩次都失敗回傳 ok=False。"""
+    num_predict = num_predict_for(cfg, len(system) + len(user))
     body = {"model": cfg["model"], "stream": False, "keep_alive": 0, "format": schema,
-            "options": {"num_ctx": NUM_CTX, "temperature": 0.2, "num_predict": num_predict_for(cfg),
+            "options": {"num_ctx": NUM_CTX, "temperature": 0.2, "num_predict": num_predict,
                         "repeat_penalty": REPEAT_PENALTY},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     if cfg["think"]:
@@ -275,15 +290,30 @@ def _phase1_ok(o: dict) -> bool:
 
 
 def run_panel(seats: Dict[str, dict], make_block: Callable[[str], str], diff: str) -> Dict[str, dict]:
-    """make_block(diff 文字) 產生待審資料區塊;diff 依各席 num_predict 截到放得進 num_ctx。"""
+    """make_block(diff 文字) 產生待審資料區塊;diff 依各席保留的輸出預算截到放得進 num_ctx。
+
+    think 席:diff 截到 prompt 粗估 ≤ num_ctx − THINK_MIN_BUDGET;diff 截到 0 仍超過(光 CHG 與參考資料就超過)
+    時不再截 CHG,以實際剩餘值(下限 4096)送出,並註明「思考預算不足」。
+    """
     result: Dict[str, dict] = {}
     notes: Dict[str, List[str]] = {}
 
-    def block_for(name: str, cfg: dict, system: str, prefix: str) -> str:
-        d, note = fit_diff(diff, len(system) + len(prefix) + len(make_block("")), num_predict_for(cfg))
-        if note and note not in notes.setdefault(name, []):
+    def add_note(name: str, note: str) -> None:
+        if note not in notes.setdefault(name, []):
             notes[name].append(note)
-        return make_block(d)
+
+    def block_for(name: str, cfg: dict, system: str, prefix: str) -> str:
+        fixed = len(system) + len(prefix) + len(make_block(""))
+        d, note = fit_diff(diff, fixed, reserve_for(cfg))
+        if note:
+            add_note(name, note)
+        block = make_block(d)
+        if cfg["think"]:
+            est = estimate_tokens(len(system) + len(prefix) + len(block))
+            if est > NUM_CTX - THINK_MIN_BUDGET:
+                add_note(name, "思考預算不足:prompt 粗估 {} token,剩餘 {} token 低於 {},num_predict 以 {} 送出".format(
+                    est, NUM_CTX - est, THINK_MIN_BUDGET, max(NUM_PREDICT, NUM_CTX - est)))
+        return block
 
     for name, cfg in seats.items():  # 序列,一次一席
         log("第一階段 {} ← {}".format(name, cfg["model"]))
@@ -373,7 +403,11 @@ def build_comment(chg_id: str, risk: Optional[str], pr_no: int, head_sha: str, t
         "- 本審議只是完整性檢查,不是授權;merge 仍需使用者核准。否決席 pass 不能取代使用者在確認閘的判斷。",
         "- 限制:目前只有 Qwen、GLM 兩個模型家族,席位間會共享盲點;本機 8–27B 模型可能被 PR 內容 prompt injection。",
     ]
-    cut = [n for n, r in result.items() if r.get("diff_notes")]
+    cut = [n for n, r in result.items() if any(x.startswith("diff ") for x in r.get("diff_notes") or [])]
+    short = [n for n, r in result.items() if any("思考預算不足" in x for x in r.get("diff_notes") or [])]
+    if short:
+        parts.append("- 思考預算不足:{} 席光 CHG 與參考資料就超過 num_ctx − {},思考空間可能不夠而沒有回答。".format(
+            "、".join(short), THINK_MIN_BUDGET))
     if cut:
         parts.append("- diff 截斷:{} 席送審的 diff 有截短(詳見各席細節),判決可能未看到完整 diff。".format(
             "、".join(cut)))

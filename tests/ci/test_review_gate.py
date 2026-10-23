@@ -9,6 +9,7 @@ import base64
 import contextlib
 import io
 import json
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -162,10 +163,15 @@ class EvaluateTest(unittest.TestCase):
 CHG_TEXT = "# CHG-20261022-03\n\n- 風險分級:中\n\n## 安全影響\n內容\n"
 
 
+def prompt_chars(body):
+    return sum(len(m["content"]) for m in body["messages"])
+
+
 class FakeEnv:
     """記錄 run_cmd 呼叫並回傳假的 gh / git 輸出。"""
 
-    def __init__(self, fork=False, author="kamira", branch="main"):
+    def __init__(self, fork=False, author="kamira", branch="main", chg_text=CHG_TEXT):
+        self.chg_text = chg_text
         self.calls = []
         self.fork = fork
         self.author = author
@@ -188,7 +194,7 @@ class FakeEnv:
             if path.endswith("/commits"):
                 return "CHG-20261022-03 T4: 測試\n"
             if "/contents/" in path:
-                return json.dumps({"content": base64.b64encode(CHG_TEXT.encode()).decode()})
+                return json.dumps({"content": base64.b64encode(self.chg_text.encode()).decode()})
             if "-H" in argv:
                 return "diff --git a/scripts/x.py b/scripts/x.py\n+print('hi')\n"
             head_repo = "evil/podcast-studio" if self.fork else "kamira/podcast-studio"
@@ -285,8 +291,9 @@ class LocalReviewTest(unittest.TestCase):
         for body, timeout in env.ollama_calls:
             self.assertEqual(body["keep_alive"], 0)
             self.assertFalse(body["stream"])
-            # think 席 12288(思考 token 算進 num_predict),非 think 席 4096
-            self.assertEqual(body["options"]["num_predict"], 12288 if body.get("think") else 4096)
+            # think 席 = num_ctx − prompt 粗估(下限 4096;思考 token 算進 num_predict),非 think 席 4096
+            self.assertEqual(body["options"]["num_predict"],
+                             max(4096, 40960 - math.ceil(prompt_chars(body) / 1.5)) if body.get("think") else 4096)
             self.assertEqual(body["options"]["num_ctx"], 40960)
             self.assertEqual(body["options"]["repeat_penalty"], 1.1)
             self.assertIn("format", body)
@@ -295,7 +302,7 @@ class LocalReviewTest(unittest.TestCase):
         think = {b["model"]: b.get("think", False) for b, _ in env.ollama_calls}
         self.assertFalse(think["glm4:latest"])
         self.assertTrue(think["qwen3:8b"])
-        self.assertTrue(any(b["options"]["num_predict"] == 12288 for b, _ in env.ollama_calls))
+        self.assertTrue(any(b["options"]["num_predict"] > 16384 for b, _ in env.ollama_calls if b.get("think")))
         self.assertTrue(any(b["options"]["num_predict"] == 4096 for b, _ in env.ollama_calls))
         veto_models = {b["model"] for b, _ in env.ollama_calls
                        if any("{} 席".format(s) in b["messages"][0]["content"] for s in review_gate.VETO_SEATS)}
@@ -352,6 +359,62 @@ class LocalReviewTest(unittest.TestCase):
             self.assertLessEqual(prompt / 1.5 + body["options"]["num_predict"], 40960)
         self.assertIn("diff 截斷", out)
         self.assertIn("截短為", out)
+
+    def test_think_num_predict_is_num_ctx_minus_prompt_estimate(self):
+        think, plain = {"think": True}, {"think": False}
+        self.assertEqual(local_review.num_predict_for(think, 15000), 40960 - 10000)  # prompt 粗估 1 萬
+        self.assertEqual(local_review.num_predict_for(think, 60000), 4096)  # 剩餘 960 → 下限 4096
+        self.assertEqual(local_review.num_predict_for(plain, 15000), 4096)
+        self.assertEqual(local_review.num_predict_for(plain, 300), 4096)
+
+    def test_think_seat_diff_truncated_to_keep_think_budget(self):
+        env = FakeEnv()
+        big = "diff --git a/scripts/x.py b/scripts/x.py\n+" + "y\n" * 30000  # 6 萬字,需要截 diff
+        orig = env.run_cmd
+
+        def run_cmd(argv, input_text=None):
+            if argv[:2] == ["gh", "api"] and "-H" in argv:
+                env.calls.append(list(argv))
+                return big
+            return orig(argv, input_text)
+        env.run_cmd = run_cmd
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        think = [b for b, _ in env.ollama_calls if b.get("think")]
+        plain = [b for b, _ in env.ollama_calls if not b.get("think")]
+        self.assertTrue(think and plain)
+        for body in think:
+            est = math.ceil(prompt_chars(body) / 1.5)
+            self.assertLessEqual(est, 40960 - 16384)
+            self.assertGreaterEqual(body["options"]["num_predict"], 16384)
+            self.assertEqual(body["options"]["num_predict"], 40960 - est)
+            self.assertIn("截斷於", body["messages"][1]["content"])  # 沿用既有截斷註記
+        for body in plain:
+            self.assertEqual(body["options"]["num_predict"], 4096)
+        self.assertIn("截短為", out)
+        self.assertNotIn("思考預算不足", out)
+
+    def check_chg_too_big(self, chg_chars):
+        env = FakeEnv(chg_text=CHG_TEXT + "長" * chg_chars)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,security"])
+        self.assertEqual(code, 0)
+        think = [b for b, _ in env.ollama_calls if b.get("think")]
+        self.assertTrue(think)
+        for body in think:
+            est = math.ceil(prompt_chars(body) / 1.5)
+            self.assertGreater(est, 40960 - 16384)
+            self.assertEqual(body["options"]["num_predict"], max(4096, 40960 - est))
+            self.assertIn("長" * chg_chars, body["messages"][1]["content"])  # CHG 不截
+        self.assertIn("思考預算不足", out)
+        return think
+
+    def test_chg_too_big_uses_remaining_budget(self):
+        think = self.check_chg_too_big(40000)  # 剩餘約 1.2 萬:介於 4096 與 16384 之間
+        self.assertTrue(all(4096 < b["options"]["num_predict"] < 16384 for b in think))
+
+    def test_chg_far_too_big_uses_floor(self):
+        think = self.check_chg_too_big(70000)  # 光 CHG 就超過 num_ctx
+        self.assertTrue(all(b["options"]["num_predict"] == 4096 for b in think))
 
     def test_unknown_seat_exits_2(self):
         code, _, _ = self.run_main(FakeEnv(), ["--pr", "9", "--seats", "bogus"])
