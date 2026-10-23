@@ -22,7 +22,9 @@ glm4 不當否決席。
 security、compliance 席預設由 Codex(`codex exec -s read-only`,雲端)擔任(使用者 2026-10-23 決定),
 可用 `--codex-seats` 覆寫;Codex 一律只用 read-only sandbox,prompt 由 stdin 傳入。
 
-送給各席的 CHG 會去除「## 審議」節(前輪判決),維持獨立階段不看他人判決的原則。
+送給各席的 CHG 會去除「## 審議」節(前輪判決),維持獨立階段不看他人判決的原則;
+送審 diff 中 `docs/changes/CHG-*.md` 的區塊一律以一行說明取代(CHG-20261022-03 T12),
+避免前輪判決經由 diff 帶進來(完整 CHG 已另附)。只影響送審內容,不影響留言。
 
 所有子程序呼叫集中在 `run_cmd()`(argv list,不經 shell),Ollama 呼叫集中在 `call_ollama()`,
 兩者都可被測試替換。唯一寫入的檔案是 Codex 席的 schema 與輸出暫存檔,放在
@@ -206,14 +208,21 @@ def read_doc(rel: str) -> str:
     return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
 
 
+CHG_DIFF_OMITTED = "(CHG 檔 diff 已省略:完整 CHG 已另附,且已去除「## 審議」節)"
+CHG_DIFF_RE = re.compile(r"^docs/changes/CHG-[^/]*\.md$")
+
+
 def filter_diff(diff: str) -> str:
-    """去掉 vendored `.ai-sdlc/` 的 diff 區塊(只計檔案數)。截斷由 fit_diff() 依各席預算處理。"""
+    """去掉 vendored `.ai-sdlc/` 的 diff 區塊(只計檔案數);`docs/changes/CHG-*.md` 的 diff 區塊
+    以一行說明取代(T12:避免「## 審議」節的前輪判決經由 diff 送審)。截斷由 fit_diff() 依各席預算處理。"""
     blocks = re.split(r"(?m)^(?=diff --git )", diff)
     kept, vend = [], []
     for b in blocks:
-        m = re.match(r"diff --git a/(\S+)", b)
+        m = re.match(r"diff --git a/(\S+) b/(\S+)", b)
         if m and m.group(1).startswith(".ai-sdlc/"):
             vend.append(m.group(1))
+        elif m and (CHG_DIFF_RE.match(m.group(1)) or CHG_DIFF_RE.match(m.group(2))):
+            kept.append("diff --git a/{} b/{}\n{}\n".format(m.group(1), m.group(2), CHG_DIFF_OMITTED))
         else:
             kept.append(b)
     out = "".join(kept)
