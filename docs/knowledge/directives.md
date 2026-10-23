@@ -37,7 +37,9 @@
   - `qwen3:8b`(think)→ fail,理由正確;`<model>` 欄填錯
   - `Qwen3.5-9B Aggressive`(think)→ fail,理由正確;`<model>` 欄填錯
   - `glm4:latest`(同一份 NFR 脈絡)→ **concern**,而且判決行格式壞掉(把模板佔位字原樣輸出);沒給 NFR 脈絡時 → **pass**
-- 每席逾時:27B 45 分鐘、其餘 15 分鐘;逾時 = 沒有回答,重派一次。審議一律**序列**執行,不並行(使用者指示 2026-10-22)。
+- 每席逾時:27B 30 分鐘;逾時改派 Codex(使用者 2026-10-23 規則,原話:「如果本地高階模型審議需要花超過30分鐘轉為codex」);其餘 15 分鐘、重派一次。審議一律**序列**執行,不並行(使用者指示 2026-10-22)。
+  - 27B 席某一階段逾時,或累計超過 30 分鐘仍沒有回答,不再用 27B 重派,該席該階段直接由 Codex(`-s read-only`、prompt 由 stdin)作答;Codex 也沒有回答時依第 9 條重派 Codex 一次,仍失敗記 `no-answer`。改派每席每階段各自判定:第一階段改派,互讀階段仍先試 27B。
+  - 改派後判決行與留言的 `<model>` 欄記 `codex-cli <版本>(27B 逾時 30 分鐘改派)`,留言說明欄列出改派的席位與階段。改派會把該席送審資料送往雲端,適用第 9 條的使用者明示例外。
 - 證據補充(2026-10-22 CHG-20261022-01 / -03 實審):`qwen3:8b` 在約 3 萬字的 CHG 上擔任 security 席,兩筆共 9 點發現全部與送審原文矛盾(例:稱未檢查 GET 的 Host,原文第 255 行明文規定);`Qwen3.8-27B` 擔任 risk 席的判決與原文相符、證據具體。使用者因此決定高風險 security 席改用 27B。
 - 證據補充(2026-10-23 PR #12 本機審議):security 席(27B,think)兩次都輸出截斷、沒有回答;compliance 席(8B)把送審 CHG 內的前輪審議紀錄當成本輪事實而判 fail。派發者以 `codex exec -s read-only --output-schema … -o …` 手動試跑:security 44 秒回 concern,證據指到 `.github/workflows/ci.yml` 的具體行號;compliance 回 pass。使用者因此指示「使用 codex 協助」,並決定 security、compliance 改由 Codex 擔任、送審 CHG 去除審議紀錄。
 - 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻;高風險 security 席 27B、第 9 條 Codex 席位為使用者決定)
