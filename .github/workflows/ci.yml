@@ -1,0 +1,192 @@
+# CI(CHG-20261022-03 T5):document / chg / program / review 四個 job。
+#
+# 信任模型(CHG-20261022-03 安全影響 security-boundary (a)(i)(k)(l)(n)(q)):
+#   - 每個 job 先把 PR head checkout 到 `pr/`,再把 base 分支(pull_request 事件取
+#     `pull_request.base.sha`;push 事件取 `github.sha`)checkout 到 `trusted/`。
+#   - 治理檢查(doc_integrity_check、secret_scan、commit_check、plan_check_changed、
+#     review_gate)一律執行 `trusted/` 的腳本,以 `--repo pr` 把 PR 內容只當資料讀取;
+#     PR 改掉 `pr/scripts/ci/` 不會影響檢查結果。
+#   - vendored 腳本的完整性(`.ai-sdlc/SHA256SUMS`)在 `trusted/` 內驗證。
+#   - 禁用 `pull_request_target`;頂層權限只有 `contents: read`,只有 `review` job 另加
+#     `pull-requests: read`;checkout 一律 `persist-credentials: false`。
+#   - 第三方 actions 一律以完整 40 位 commit SHA 釘選,行尾註解標版本。
+#
+# 已知殘留風險(安全影響 (q),GitHub 機制,本 workflow 無法自行消除):
+#   - `pull_request` 事件以 PR head 的 workflow 執行,PR 可改本檔的步驟、權限或建立同名 check。
+#   - `program` job 必然執行 PR 提供的程式碼(py_compile、ruff、check.sh、unittest);
+#     執行環境為 GitHub 代管 runner、唯讀 token、不注入任何秘密。
+#   - 補償控制:治理路徑需擁有者 `infra-approved` 留言((i))+ 程式變更一律由使用者核准
+#     merge((j))+ 治理檢查一律從 `trusted/` 執行。
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # pull_request:PR head / base 的 commit;push:兩者皆為該次 push 的 commit
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  document:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取 PR head 到 pr/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 取 base 到 trusted/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: 驗證 vendored 治理腳本完整性(trusted/.ai-sdlc/SHA256SUMS)
+        working-directory: trusted/.ai-sdlc
+        run: sha256sum --strict -c SHA256SUMS
+      - name: 文件完整性檢查(trusted 腳本,PR 內容只當資料)
+        run: python3 trusted/.ai-sdlc/skills/ai-sdlc-autopilot/scripts/doc_integrity_check.py --repo pr
+      - name: 全 repo 秘密掃描(trusted 腳本與 trusted 豁免清單)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 trusted/scripts/ci/secret_scan.py --repo pr \
+              --allowlist trusted/scripts/ci/secret_allowlist.txt \
+              --range "${BASE_SHA}..${HEAD_SHA}"
+          else
+            python3 trusted/scripts/ci/secret_scan.py --repo pr \
+              --allowlist trusted/scripts/ci/secret_allowlist.txt
+          fi
+      # push 到 main 時的 commit 引用檢查放在 document job(chg job 只在 pull_request 執行):
+      # 只檢查該次 push 的 head commit(squash commit)標題是否帶 CHG 編號。
+      - name: push 到 main 的 commit 引用檢查(僅 push)
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ -z "${BEFORE_SHA}" ] || [ "${BEFORE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+            echo "::error::無法取得 push 前的 commit(github.event.before),拒絕略過檢查"
+            exit 1
+          fi
+          python3 trusted/scripts/ci/commit_check.py --repo pr --mode push \
+            --range "${BEFORE_SHA}..${HEAD_SHA}"
+
+  chg:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取 PR head 到 pr/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 取 base 到 trusted/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: 驗證 vendored 治理腳本完整性(trusted/.ai-sdlc/SHA256SUMS)
+        working-directory: trusted/.ai-sdlc
+        run: sha256sum --strict -c SHA256SUMS
+      - name: commit 引用檢查(trusted 腳本)
+        run: python3 trusted/scripts/ci/commit_check.py --repo pr --range "${BASE_SHA}..${HEAD_SHA}"
+      - name: PR 改到的 CHG 做 plan-check(trusted 腳本與 trusted runner)
+        run: |
+          python3 trusted/scripts/ci/plan_check_changed.py --repo pr \
+            --range "${BASE_SHA}..${HEAD_SHA}" \
+            --runner trusted/.ai-sdlc/skills/ai-sdlc-autopilot/scripts/autopilot_runner.py
+
+  program:
+    # 本 job 必然執行 PR 提供的程式碼,屬安全影響 (q) 已接受的殘留風險:
+    # 代管 runner、唯讀 token(contents: read)、不注入任何秘密、checkout 不保留憑證。
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取 PR head 到 pr/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 取 base 到 trusted/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: 語法編譯全部 *.py(排除 vendored .ai-sdlc/)
+        working-directory: pr
+        run: |
+          find . -name '*.py' -not -path './.ai-sdlc/*' -not -path './.git/*' -print0 \
+            | xargs -0 python -m py_compile
+      - name: ruff check --select E9,F(版本釘死;排除 vendored .ai-sdlc/)
+        working-directory: pr
+        run: |
+          python -m pip install --disable-pip-version-check --no-input ruff==0.17.2
+          ruff check --select E9,F --extend-exclude .ai-sdlc --output-format github .
+      - name: scripts/check.sh(存在時才執行)
+        working-directory: pr
+        run: |
+          if [ -f scripts/check.sh ]; then
+            bash scripts/check.sh
+          else
+            echo "::notice::scripts/check.sh 不存在(CHG-20261022-01 T1 才建立),略過此步"
+          fi
+      - name: CI 腳本單元測試
+        working-directory: pr
+        run: python3 -m unittest discover -s tests/ci -v
+
+  review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: 取 PR head 到 pr/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 取 base 到 trusted/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: 審議閘(trusted 腳本;只採信擁有者留言)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 trusted/scripts/ci/review_gate.py --repo pr --pr "${PR_NUMBER}"
