@@ -320,6 +320,76 @@ class CollectSymlinkTest(unittest.TestCase):
         self.assertTrue(any(m.startswith("需要審議") and "讀不到" in m for m in msgs), msgs)
 
 
+class ParentSymlinkTest(unittest.TestCase):
+    """`docs` 或 `docs/changes` 是符號連結(指向另一個含低風險 CHG 的目錄)→ 兩條路徑皆讀不到 → 需要審議。"""
+
+    LOW = "# CHG\n\n- 風險分級:低\n\n## 動機\n"
+
+    def run_collect(self, repo):
+        def fake_get(url, token):
+            if url.endswith("/pulls/5"):
+                return {"head": {"sha": HEAD}}
+            if "/pulls/5/files" in url:
+                return [{"filename": CHG}]
+            if "/issues/5/comments" in url:
+                return []
+            if "/pulls/5/commits" in url:
+                return [{"commit": {"message": "CHG-20261022-03 文件"}}]
+            raise AssertionError(url)
+
+        orig = review_gate._get
+        review_gate._get = fake_get
+        try:
+            return review_gate.collect("https://api.example", "o/r", 5, "t", repo)
+        finally:
+            review_gate._get = orig
+
+    def assert_needs_review(self, result):
+        files, comments, head, risks, cited, cited_risks = result
+        self.assertEqual(risks, {CHG: None})
+        self.assertEqual(cited_risks, {"CHG-20261022-03": None})
+        ok, msgs = review_gate.evaluate(files, comments, head, risks, cited, cited_risks)
+        self.assertFalse(ok, msgs)
+        self.assertTrue(any(m.startswith("需要審議") and "讀不到" in m for m in msgs), msgs)
+
+    def test_docs_dir_symlink(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "elsewhere" / "changes").mkdir(parents=True)
+            (root / "elsewhere" / "changes" / "CHG-20261022-03.md").write_text(self.LOW, encoding="utf-8")
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "docs").symlink_to(root / "elsewhere")
+            self.assertEqual(review_gate.read_chg_risk(repo, CHG), (True, None))
+            self.assert_needs_review(self.run_collect(repo))
+
+    def test_changes_dir_symlink(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "elsewhere").mkdir()
+            (root / "elsewhere" / "CHG-20261022-03.md").write_text(self.LOW, encoding="utf-8")
+            repo = root / "repo"
+            (repo / "docs").mkdir(parents=True)
+            (repo / "docs" / "changes").symlink_to(root / "elsewhere")
+            self.assertEqual(review_gate.read_chg_risk(repo, CHG), (True, None))
+            self.assert_needs_review(self.run_collect(repo))
+
+    def test_normal_path_reads_risk(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / "docs" / "changes").mkdir(parents=True)
+            (repo / CHG).write_text(self.LOW, encoding="utf-8")
+            self.assertEqual(review_gate.read_chg_risk(repo, CHG), (True, "低"))
+            self.assertEqual(review_gate.read_chg_risk(repo, "docs/changes/CHG-20991231-99.md"),
+                             (False, None))
+            files, comments, head, risks, cited, cited_risks = self.run_collect(repo)
+            self.assertEqual(risks, {CHG: "低"})
+            self.assertEqual(cited_risks, {"CHG-20261022-03": "低"})
+
+
 class FakeEnv:
     """記錄 run_cmd 呼叫並回傳假的 gh / git 輸出。"""
 

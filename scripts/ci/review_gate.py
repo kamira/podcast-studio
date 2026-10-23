@@ -8,7 +8,8 @@ review_gate.py — CI 審議閘 / review gate
    `docs/`、`features/` 以外的位置,以及其中的 `*.py`、`*.sh`,一律從嚴視為程式路徑)
    **或** PR 改到的 CHG 風險分級為中 / 高
    **或** PR 內 commit 訊息引用的 CHG(在 head 的 `docs/changes/` 存在者)風險分級為中 / 高(T10)。
-   讀不到分級一律從嚴視為需要審議;CHG 檔是符號連結時不跟隨,視為讀不到。同一 CHG 既被改到又被
+   讀不到分級一律從嚴視為需要審議;CHG 檔路徑上任一層(含 `docs/`、`docs/changes/`)是符號連結,
+   或解析後不在 `docs/changes/` 底下,都視為讀不到。同一 CHG 既被改到又被
    commit 引用時取較嚴者(讀不到 > 高 > 中 > 低)。commit 引用但 `docs/changes/` 不存在的 CHG 不列入分級判定
    (該情況由 `plan_check_changed.py` 擋下)。訊息逐項寫出觸發原因;免審議時也如實寫出依據。
 3. 需要審議時,必須有擁有者留言含 `<!-- local-review CHG-YYYYMMDD-NN sha=<head> seats=<json> -->`,
@@ -155,13 +156,28 @@ def stricter(a: Optional[str], b: Optional[str]) -> Optional[str]:
     return a if _SEVERITY[a] >= _SEVERITY[b] else b
 
 
-def read_chg_risk(target: Path) -> Tuple[bool, Optional[str]]:
-    """讀 CHG 檔分級,不跟隨符號連結。回傳 (檔案是否存在, 分級);符號連結 → (True, None)。"""
-    if target.is_symlink():
+def read_chg_risk(repo: Path, rel: str) -> Tuple[bool, Optional[str]]:
+    """讀 PR checkout 內 CHG 檔(`docs/changes/<檔名>`)的分級,逐層拒絕符號連結。
+
+    回傳 (檔案是否存在, 分級)。從 repo 根到目標檔的任一路徑元件是符號連結、目標不是一般檔案,
+    或 `target.resolve()` 不等於 `repo.resolve() / "docs" / "changes" / <檔名>` → (True, None),
+    即記為讀不到分級(從嚴視為需要審議)。沒有符號連結且檔案不存在 → (False, None)。
+    """
+    if not CHG_FILE_RE.match(rel):
         return True, None
-    if target.is_file():
-        return True, read_risk(target.read_text(encoding="utf-8", errors="replace"))
-    return False, None
+    cur = repo
+    for part in Path(rel).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return True, None
+        if not os.path.lexists(cur):
+            return False, None
+    try:
+        if not cur.is_file() or cur.resolve() != repo.resolve() / "docs" / "changes" / cur.name:
+            return True, None
+        return True, read_risk(cur.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return True, None
 
 
 def review_command(pr: Optional[int] = None) -> str:
@@ -341,14 +357,14 @@ def collect(api: str, slug: str, pr: int, token: str, repo: Path):
                           for m in CHG_ID_RE.findall(((c.get("commit") or {}).get("message")) or "")})
     commit_chg_risks: Dict[str, Optional[str]] = {}
     for chg_id in commit_chgs:  # 符號連結不跟隨,記為讀不到
-        exists, risk = read_chg_risk(repo / _chg_path(chg_id))
+        exists, risk = read_chg_risk(repo, _chg_path(chg_id))
         if exists:
             commit_chg_risks[chg_id] = risk
     chg_risks: Dict[str, Optional[str]] = {}
     for path in sorted(set(files)):
         if not CHG_FILE_RE.match(path):
             continue
-        exists, risk = read_chg_risk(repo / path)  # 符號連結不跟隨,記為讀不到
+        exists, risk = read_chg_risk(repo, path)  # 逐層拒絕符號連結,記為讀不到
         if not exists:  # 刪除或改名前的舊路徑
             continue
         chg_risks[path] = risk
