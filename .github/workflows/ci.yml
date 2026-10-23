@@ -190,4 +190,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 trusted/scripts/ci/review_gate.py --repo pr --pr "${PR_NUMBER}"
-# 暫時驗證用註解(將 revert)
