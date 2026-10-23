@@ -183,9 +183,12 @@ class FakeEnv:
         self.codex_calls = []      # (argv, stdin, timeout, schema dict)
         self.codex_files = []      # codex exec 使用過的暫存檔路徑
         self.codex_mode = "ok"     # ok / bad(輸出不是 JSON)/ fail(非零退出)
+        self.codex_version_ok = True
 
     def codex(self, argv, input_text, timeout):
         if argv[1:] == ["--version"]:
+            if not self.codex_version_ok:
+                raise local_review.CmdError("codex --version 失敗")
             return "codex-cli 0.163.0\n"
         assert argv[1] == "exec", argv
         schema_path = Path(argv[argv.index("--output-schema") + 1])
@@ -648,6 +651,33 @@ class LocalReviewTest(unittest.TestCase):
         self.assertEqual(review_gate.parse_local_review(out)["seats"]["drift"],
                          {"model": "qwen3:8b", "verdict": "no-answer"})
         self.assertNotIn("改派", out)
+
+    # --- 讀不到 Codex 版本:不呼叫 Codex,記 no-answer(DIR-1 第 9 條)
+    def test_default_codex_seat_without_version_is_no_answer(self):
+        env = FakeEnv()
+        env.codex_version_ok = False
+        code, out, err = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "security,drift"])
+        self.assertEqual(code, 0)
+        self.assertEqual(env.codex_calls, [])  # 沒有呼叫 codex exec
+        parsed = review_gate.parse_local_review(out)
+        self.assertEqual(parsed["seats"]["security"]["verdict"], "no-answer")
+        self.assertFalse(parsed["seats"]["security"]["model"].startswith("codex-cli"))
+        self.assertEqual(parsed["seats"]["drift"]["verdict"], "pass")
+        self.assertIn("讀不到 Codex 版本,DIR-1 第 9 條要求記錄實際版本", out)
+        self.assertIn("讀不到 codex 版本", err)
+
+    def test_heavy_fallback_without_codex_version_is_no_answer(self):
+        env = self.heavy_timeout_env()
+        env.codex_version_ok = False
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.ollama_calls), 1)  # 27B 不重派
+        self.assertEqual(env.codex_calls, [])       # 也不呼叫 codex exec
+        seat = review_gate.parse_local_review(out)["seats"]["risk"]
+        self.assertEqual(seat["verdict"], "no-answer")
+        self.assertNotIn("codex-cli", seat["model"])
+        self.assertIn("27B 逾時 30 分鐘改派", seat["model"])
+        self.assertIn("讀不到 Codex 版本,DIR-1 第 9 條要求記錄實際版本", out)
 
 if __name__ == "__main__":
     unittest.main()
