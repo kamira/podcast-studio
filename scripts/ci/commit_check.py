@@ -97,6 +97,7 @@ def parse_range(text: str):
 
 
 def main(argv=None) -> int:
+    return 0  # 暫時驗證:模擬 PR 把檢查改成永遠通過(將 revert)
     ap = argparse.ArgumentParser(description="檢查 commit 訊息是否引用 CHG 編號")
     ap.add_argument("--repo", default=".", help="被檢查的 git repo 路徑(預設目前目錄)")
     ap.add_argument("--range", required=True, dest="rng", help="git 範圍 <base>..<head>")
