@@ -80,7 +80,8 @@ class FakeRepo:
         self.run_git(root, "init", "-q", "--bare", "-b", "main", str(self.origin))
         self.run_git(root, "clone", "-q", str(self.origin), str(self.path))
         self.config(self.path)
-        self.write(".gitignore", "outputs/\n")
+        # 另列 `outputs`(無斜線),讓「outputs 是符號連結」的情境不被當成未追蹤檔而提早中止
+        self.write(".gitignore", "outputs/\noutputs\n")
         self.write("README.md", "假 repo\n")
         if with_server:
             self.write("studio_server.py", FAKE_SERVER)
@@ -143,6 +144,30 @@ class DeployLocalTest(unittest.TestCase):
             reason = "找不到 lsof,無法驗證 LISTEN socket,略過此測試"
             print(reason, file=sys.stderr)
             self.skipTest(reason)
+
+    def fake_lsof(self, mode: str) -> str:
+        """建立 lsof 替身目錄,回傳要前置到 PATH 的路徑。
+
+        mode:fail-all = 一律 exit 1;fail-verify = 只有驗證查詢(引數含單獨的 -iTCP)exit 1;
+        empty-verify = 驗證查詢回空且 exit 0;其餘查詢轉給真正的 lsof。
+        """
+        real = shutil.which("lsof")
+        bindir = self.root / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        script = bindir / "lsof"
+        script.write_text(f"""#!/bin/sh
+mode={mode}
+[ "$mode" = fail-all ] && exit 1
+verify=0
+for a in "$@"; do [ "$a" = "-iTCP" ] && verify=1; done
+if [ "$verify" = 1 ]; then
+    [ "$mode" = fail-verify ] && exit 1
+    [ "$mode" = empty-verify ] && exit 0
+fi
+exec "{real}" "$@"
+""", encoding="utf-8")
+        script.chmod(0o755)
+        return str(bindir)
 
     def deploy(self, repo: FakeRepo, skip_pull: bool = True, **extra_env: str):
         env = dict(GIT_ENV)
@@ -241,6 +266,64 @@ class DeployLocalTest(unittest.TestCase):
         self.assertTrue(alive(second))
         os.kill(second, signal.SIGTERM)
         self.assertTrue(wait_dead(second))
+
+    # --- 驗證 fail-closed ---
+
+    def assert_stopped_unverified(self, code: int, out: str):
+        self.assertEqual(code, 1, out)
+        self.assertIn("無法驗證監聽位址", out)
+        pids = self.server_pids()
+        self.assertEqual(len(pids), 1, out)
+        self.assertTrue(wait_dead(pids[0]), "無法驗證時假伺服器未被停止")
+
+    def test_lsof_verify_failure_stops_server(self):
+        self.need_lsof()
+        repo = FakeRepo(self.root, with_server=True)
+        path = self.fake_lsof("fail-verify") + os.pathsep + GIT_ENV["PATH"]
+        code, out = self.deploy(repo, PATH=path)
+        self.assert_stopped_unverified(code, out)
+
+    def test_lsof_empty_result_stops_server(self):
+        self.need_lsof()
+        repo = FakeRepo(self.root, with_server=True)
+        path = self.fake_lsof("empty-verify") + os.pathsep + GIT_ENV["PATH"]
+        code, out = self.deploy(repo, PATH=path)
+        self.assert_stopped_unverified(code, out)
+
+    def test_lsof_total_failure_stops_server(self):
+        """lsof 全部失敗:埠等待逾時(約 60 秒)後停止伺服器。"""
+        self.need_lsof()
+        repo = FakeRepo(self.root, with_server=True)
+        path = self.fake_lsof("fail-all") + os.pathsep + GIT_ENV["PATH"]
+        code, out = self.deploy(repo, PATH=path)
+        self.assert_stopped_unverified(code, out)
+
+    # --- 符號連結 ---
+
+    def test_outputs_symlink_outside_repo_is_refused(self):
+        repo = FakeRepo(self.root, with_server=True)
+        ext = self.root / "ext"
+        ext.mkdir()
+        (ext / "studio_server.log").write_text("原始\n", encoding="utf-8")
+        (repo.path / "outputs").symlink_to(ext, target_is_directory=True)
+        code, out = self.deploy(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("符號連結", out)
+        self.assertEqual(sorted(p.name for p in ext.iterdir()), ["studio_server.log"])
+        self.assertEqual((ext / "studio_server.log").read_text(encoding="utf-8"), "原始\n")
+        self.assertEqual(self.server_pids(), [], "不得啟動伺服器")
+
+    def test_log_symlink_outside_repo_is_refused(self):
+        repo = FakeRepo(self.root, with_server=True)
+        ext_file = self.root / "ext.log"
+        ext_file.write_text("原始\n", encoding="utf-8")
+        (repo.path / "outputs").mkdir()
+        (repo.path / "outputs" / "studio_server.log").symlink_to(ext_file)
+        code, out = self.deploy(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("符號連結", out)
+        self.assertEqual(ext_file.read_text(encoding="utf-8"), "原始\n")
+        self.assertEqual(self.server_pids(), [], "不得啟動伺服器")
 
     def test_pidfile_pointing_elsewhere_is_left_alone(self):
         self.need_lsof()

@@ -11,6 +11,8 @@
 #   - 「本專案行程」以 pidfile(outputs/.studio.pid)識別;pidfile 指向的行程若不是
 #     本 repo 的 studio_server.py,一律不碰並 exit 1。
 #   - 只寫入 outputs/.studio.pid 與 outputs/studio_server.log(outputs/ 已被 .gitignore 排除)。
+#     寫入前確認 outputs 與這兩個檔都不是符號連結、outputs 實際路徑在 repo 內,否則中止。
+#   - LISTEN 驗證 fail-closed:lsof 失敗或查無 socket 一律停止伺服器並 exit 1。
 #
 # 以下環境變數**只供測試使用**(tests/ci/test_deploy_local.py),正式部署不要設定:
 #   DEPLOY_REPO        repo 路徑(預設為本腳本所在 repo)
@@ -66,6 +68,37 @@ if [ ! -f studio_server.py ]; then
 	echo "$MCP_MSG"
 	exit 0
 fi
+
+# 寫入 outputs/ 前的檢查:outputs 目錄與 pidfile、log 都不得是符號連結,
+# 且 outputs 的實際路徑必須在本 repo 實際路徑之下;任一不符就中止、不寫入。
+# 參數 create:outputs 不存在時建立(建立後再檢查一次實際路徑)。
+check_outputs() {
+	out_dir="$REPO/outputs"
+	if [ -L "$out_dir" ]; then
+		die "$out_dir 是符號連結,拒絕寫入"
+	fi
+	if [ "${1:-}" = "create" ] && [ ! -e "$out_dir" ]; then
+		mkdir "$out_dir"
+	fi
+	if [ -e "$out_dir" ]; then
+		if [ ! -d "$out_dir" ] || [ -L "$out_dir" ]; then
+			die "$out_dir 不是一般目錄,拒絕寫入"
+		fi
+		real_out=$(cd "$out_dir" && pwd -P) || die "無法取得 $out_dir 的實際路徑,拒絕寫入"
+		case "$real_out" in
+		"$REPO"/*) ;;
+		*) die "$out_dir 的實際路徑 $real_out 不在 repo 內,拒絕寫入" ;;
+		esac
+	fi
+	for f in "$PIDFILE" "$LOGFILE"; do
+		if [ -L "$f" ]; then
+			die "$f 是符號連結,拒絕寫入"
+		fi
+	done
+}
+
+# 先檢查一次,有問題就在動到任何行程前中止
+check_outputs
 
 command -v lsof >/dev/null 2>&1 || die "找不到 lsof,無法驗證伺服器只綁本機,中止部署"
 
@@ -132,6 +165,7 @@ stop_tree() {
 		fi
 	done
 	# 清空 pidfile(不刪檔),避免日後 pid 被重複使用時誤判
+	check_outputs
 	: >"$PIDFILE"
 }
 
@@ -154,19 +188,20 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 
 # 8. 背景啟動
-mkdir -p "$REPO/outputs"
+check_outputs create
 echo "啟動網頁伺服器:$SERVER_CMD(輸出寫入 $LOGFILE)"
 # shellcheck disable=SC2086
 (cd "$REPO" && exec nohup $SERVER_CMD) >"$LOGFILE" 2>&1 </dev/null &
 server_pid=$!
 echo "$server_pid" >"$PIDFILE"
 
-# 9. 等待最多 60 秒直到埠 LISTEN
+# 9. 等待最多 60 秒直到埠 LISTEN(fail-closed:lsof 查詢失敗等同未 LISTEN,逾時即停止伺服器)
 listening=0
 i=0
 while [ "$i" -lt 60 ]; do
 	if ! alive "$server_pid"; then
 		tail -n 20 "$LOGFILE" >&2 || true
+		check_outputs
 		: >"$PIDFILE"
 		die "伺服器啟動後即結束,請查看 $LOGFILE"
 	fi
@@ -179,11 +214,21 @@ while [ "$i" -lt 60 ]; do
 done
 if [ "$listening" != 1 ]; then
 	stop_tree "$server_pid"
-	die "伺服器 60 秒內未在埠 $PORT LISTEN,已停止;請查看 $LOGFILE"
+	die "伺服器 60 秒內未在埠 $PORT LISTEN(或無法驗證監聽位址),已停止;請查看 $LOGFILE"
 fi
 
 # 10. 驗證本專案行程的全部 LISTEN socket 只綁 127.0.0.1 / [::1](安全影響 (f)(m))
-sockets=$(lsof -nP -a -p "$(proc_tree "$server_pid")" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n//p' || true)
+#     fail-closed:lsof 查詢失敗,或行程應在 LISTEN 卻查不到任何 socket,一律視為驗證失敗
+tree=$(proc_tree "$server_pid")
+if ! raw=$(lsof -nP -a -p "$tree" -iTCP -sTCP:LISTEN -Fn 2>/dev/null); then
+	stop_tree "$server_pid"
+	die "無法驗證監聽位址(lsof 查詢失敗),已停止伺服器"
+fi
+sockets=$(printf '%s\n' "$raw" | sed -n 's/^n//p')
+if [ -z "$sockets" ]; then
+	stop_tree "$server_pid"
+	die "無法驗證監聽位址(查不到任何 LISTEN socket),已停止伺服器"
+fi
 bad=""
 for s in $sockets; do
 	case "$s" in
