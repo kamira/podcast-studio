@@ -122,3 +122,4 @@ def make_video(image_path, audio_path, script=""):
             "-c:a", "aac", "-b:a", "192k", "-shortest", str(path)]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return path
+# 驗收探測:此行僅供 CI 驗收,PR 關閉不 merge
