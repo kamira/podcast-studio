@@ -37,12 +37,8 @@ def reason(prompt: str, think: bool = True, heavy: bool = False) -> str:
     heavy: 改用 Qwen3.8 27B,較準但約慢 3 倍;配合 think 可能超過 10 分鐘。
     """
     with busy():
-        model = tai.HEAVY_REASON if heavy else tai.MODELS["reason"]
-        prev, tai.MODELS["reason"] = tai.MODELS["reason"], model
-        try:
-            out = tai.chat("reason", prompt, system=f"你是嚴謹的助理。{tai.TW}", think=think)
-        finally:
-            tai.MODELS["reason"] = prev
+        role = "reason_heavy" if heavy else "reason"
+        out = tai.chat(role, prompt, system=f"你是嚴謹的助理。{tai.TW}", think=think)
     if not out:
         raise RuntimeError("模型沒有產生回答(思考過長),請縮小問題或設 think=false")
     return tai.to_tw(out)
@@ -99,9 +95,10 @@ def list_models() -> str:
         have = {m["name"] for m in json.load(r)["models"]}
     with urllib.request.urlopen(f"{tai.OLLAMA}/api/ps", timeout=10) as r:
         loaded = [m["name"] for m in json.load(r)["models"]]
-    # code 角色只給 CLI 用;MCP 的程式需求由 reason 兼任
-    rows = {role: {"model": m, "downloaded": m in have} for role, m in tai.MODELS.items() if role != "code"}
-    rows["reason_heavy"] = {"model": tai.HEAVY_REASON, "downloaded": tai.HEAVY_REASON in have}
+    rows = {}
+    for role in ("reason", "taiwan", "reason_heavy"):
+        m = tai.model(role)
+        rows[role] = {"model": m, "downloaded": m in have}
     rows["image"] = {"model": tai.FLUX, "tool": str(tai.MFLUX), "installed": tai.MFLUX.exists()}
     rows["speech"] = {"model": "BreezyVoice-300M", "installed": (tai.BREEZY / ".venv").exists()}
     return json.dumps({"roles": rows, "loaded_now": loaded, "outputs": str(tai.OUT)}, ensure_ascii=False, indent=2)
