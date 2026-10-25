@@ -23,7 +23,8 @@ security、compliance 席預設由 Codex(`codex exec -s read-only`,雲端)擔任
 可用 `--codex-seats` 覆寫;Codex 一律只用 read-only sandbox,prompt 由 stdin 傳入。
 
 送給各席的 CHG 會去除「## 審議」節(前輪判決),維持獨立階段不看他人判決的原則;
-送審 diff 中 `docs/changes/CHG-*.md` 的區塊一律以一行說明取代(CHG-20261022-03 T12),
+送審 diff 中兩側皆為 `docs/changes/CHG-*.md` 的區塊以一行說明取代(CHG-20261022-03 T12;
+CHG 檔與非 CHG 檔之間的重新命名或複製則原樣保留並加注意行),
 避免前輪判決經由 diff 帶進來(完整 CHG 已另附)。只影響送審內容,不影響留言。
 
 所有子程序呼叫集中在 `run_cmd()`(argv list,不經 shell),Ollama 呼叫集中在 `call_ollama()`,
@@ -210,21 +211,57 @@ def read_doc(rel: str) -> str:
 
 CHG_DIFF_OMITTED = "(CHG 檔 diff 已省略:完整 CHG 已另附,且已去除「## 審議」節)"
 CHG_DIFF_RE = re.compile(r"^docs/changes/CHG-[^/]*\.md$")
+CHG_DIFF_MIXED = "注意:此段為 CHG 檔與非 CHG 檔之間的重新命名或複製,未省略"
+_DIFF_HEADER_PATH_RE = re.compile(
+    r"^(?:--- (?:a/)?|\+\+\+ (?:b/)?|rename from |rename to |copy from |copy to )(.+)$")
+
+
+def chg_block_kind(block: str):
+    """判斷 diff 區塊與 CHG 檔的關係,回傳 (kind, a, b)。
+
+    kind:`chg`(所有路徑皆為 CHG 檔,可省略)、`mixed`(CHG 與非 CHG 之間的重新命名或複製,
+    必須原樣保留)、`other`(與 CHG 無關)。路徑取自 `diff --git` 行與 hunk 之前的
+    `---`/`+++`/`rename`/`copy` 行;`/dev/null` 視為與另一側同類。`diff --git` 行無法嚴格
+    解析(例如路徑含空白或加引號)時一律不省略。
+    """
+    lines = block.split("\n")
+    m = re.fullmatch(r"diff --git a/(\S+) b/(\S+)", lines[0]) if lines else None
+    paths = [m.group(1), m.group(2)] if m else []
+    for line in lines[1:]:
+        if line.startswith("@@") or line.startswith("Binary files "):
+            break
+        hm = _DIFF_HEADER_PATH_RE.match(line)
+        if hm:
+            paths.append(hm.group(1))
+    paths = [x for x in paths if x != "/dev/null"]
+    is_chg = [bool(CHG_DIFF_RE.match(x)) for x in paths]
+    a, b = (m.group(1), m.group(2)) if m else (None, None)
+    if not any(is_chg):
+        return "other", a, b
+    if m and all(is_chg):
+        return "chg", a, b
+    return "mixed", a, b
 
 
 def filter_diff(diff: str) -> str:
-    """去掉 vendored `.ai-sdlc/` 的 diff 區塊(只計檔案數);`docs/changes/CHG-*.md` 的 diff 區塊
-    以一行說明取代(T12:避免「## 審議」節的前輪判決經由 diff 送審)。截斷由 fit_diff() 依各席預算處理。"""
+    """去掉 vendored `.ai-sdlc/` 的 diff 區塊(只計檔案數);兩側皆為 `docs/changes/CHG-*.md` 的
+    diff 區塊以一行說明取代(T12:避免「## 審議」節的前輪判決經由 diff 送審)。CHG 檔與非 CHG 檔
+    之間的重新命名或複製整段原樣保留,並在前面加注意行,以免程式內容被隱藏。
+    截斷由 fit_diff() 依各席預算處理。"""
     blocks = re.split(r"(?m)^(?=diff --git )", diff)
     kept, vend = [], []
     for b in blocks:
         m = re.match(r"diff --git a/(\S+) b/(\S+)", b)
         if m and m.group(1).startswith(".ai-sdlc/"):
             vend.append(m.group(1))
-        elif m and (CHG_DIFF_RE.match(m.group(1)) or CHG_DIFF_RE.match(m.group(2))):
-            kept.append("diff --git a/{} b/{}\n{}\n".format(m.group(1), m.group(2), CHG_DIFF_OMITTED))
         else:
-            kept.append(b)
+            kind, a, bp = chg_block_kind(b)
+            if kind == "chg":
+                kept.append("diff --git a/{} b/{}\n{}\n".format(a, bp, CHG_DIFF_OMITTED))
+            elif kind == "mixed":
+                kept.append(CHG_DIFF_MIXED + "\n" + b)
+            else:
+                kept.append(b)
     out = "".join(kept)
     if vend:
         out += "\n(vendored 檔案 {} 個,不送內容)\n".format(len(vend))
