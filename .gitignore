@@ -3,3 +3,9 @@ tools/
 __pycache__/
 .venv/
 .claude/worktrees/
+
+# 設定資料庫與一次性匯入來源屬使用者資料,不入 git(CHG-20261022-01 T3,修訂 2)
+config/studio.db
+config/studio.db-wal
+config/studio.db-shm
+config/models.json
