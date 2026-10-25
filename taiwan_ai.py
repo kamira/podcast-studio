@@ -1,49 +1,44 @@
-#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
 # dependencies = ["opencc-python-reimplemented"]
 # ///
-"""台灣在地多模型串接工具。
+"""台灣在地多模型串接函式庫(網頁與 MCP 共用;CHG-20261022-01 T2 起不再提供 CLI)。
 
-角色:
-  reason  邏輯推理   Qwen3.5 9B Uncensored HauhauCS Aggressive(去審查)
-  taiwan  台灣用語   Llama-Breeze2 8B(聯發科)
-  code    程式       Qwen2.5-Coder 7B
-  image   生圖       FLUX.1-schnell 4-bit(mflux)
-  speak   文字轉語音 BreezyVoice(台灣華語)
+角色(模型名稱一律讀 `config/models.json`,見 settings.py):
+  reason        邏輯推理(預設 Qwen3.5 9B 去審查)
+  reason_heavy  重型推理(預設 Qwen3.8 27B,較準、較慢)
+  taiwan        台灣用語(預設 Llama-Breeze2 8B)
+  speak         文字轉語音 BreezyVoice(台灣華語)
 
-用法:
-  ./taiwan_ai.py ask   "問題"            推理 → 台灣用語潤飾
-  ./taiwan_ai.py ask   "問題" --speak    同上,再念出來
-  ./taiwan_ai.py code  "需求"            寫程式,說明用繁中
-  ./taiwan_ai.py image "中文描述"        中文描述 → 英文 prompt → 生圖
-  ./taiwan_ai.py speak "要念的文字"
-  ./taiwan_ai.py auto  "任何需求"        自動判斷交給哪個角色
-  加 --heavy                             推理改用 Qwen3.8 27B(較準、較慢)
-  加 --no-think                          關閉思考模式(快很多)
+介面:
+  model(role) -> str      每次呼叫重讀設定,回傳該角色的模型名稱;未知角色丟 KeyError
+  chat(role, prompt, system="", think=None) -> str
+  unload_llms()           卸載 Ollama `/api/ps` 列出的全部模型(ADP-1)
+  stamp() -> str          輸出檔名用時間戳:YYYYMMDD-HHMMSS-毫秒-4 碼隨機(ADP-8)
+  reserve(prefix, suffix, also=()) -> Path
+                          在 OUT 下排他建立 `<prefix>-<stamp()><suffix>` 空佔位檔,撞名重取;
+                          輸出檔一律先佔位再寫入,不覆寫既有檔案
+  speak(text) -> Path
 """
-import argparse
 import json
+import os
 import re
+import secrets
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
 
 from opencc import OpenCC
 
+import settings
+
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs"
 OLLAMA = "http://localhost:11434"
 
-MODELS = {
-    "reason": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M",
-    "taiwan": "hf.co/mradermacher/Llama-Breeze2-8B-Instruct-text-only-GGUF:Q4_K_M",
-    "code": "qwen2.5-coder:7b",
-}
-# --heavy:推理改用 27B(約 13GB),較準但較慢,不能和生圖同時載入
-HEAVY_REASON = "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M"
 FLUX = "mflux-community/flux-1-schnell-mflux-q4"
 MFLUX = Path.home() / ".local/bin/mflux-generate"
 BREEZY = ROOT / "tools/BreezyVoice"
@@ -55,9 +50,24 @@ TW = "一律使用繁體中文與台灣慣用語(例如:軟體、網路、資訊
 to_tw = OpenCC("s2twp").convert  # 簡體/大陸用語 → 台灣繁體與用語
 
 
+def _role(role):
+    """回傳設定中該角色的設定(dict);未知角色(例如已移除的 code)丟 KeyError。"""
+    roles = settings.load()["roles"]
+    if role not in roles or not isinstance(roles[role], dict) or "model" not in roles[role]:
+        raise KeyError(f"未知的模型角色:{role}")
+    return roles[role]
+
+
+def model(role):
+    """回傳角色的模型名稱;每次呼叫重讀 config/models.json。"""
+    return _role(role)["model"]
+
+
 def chat(role, prompt, system="", think=None):
     # 思考模式會吃掉大量 token,預設 4096 的 context 會讓正式回答變成空白
-    body = {"model": MODELS[role], "stream": False, "keep_alive": "10m", "options": {"num_ctx": 16384},
+    conf = _role(role)
+    body = {"model": conf["model"], "stream": False, "keep_alive": "10m",
+            "options": {"num_ctx": conf.get("num_ctx", 16384)},
             "messages": ([{"role": "system", "content": system}] if system else [])
             + [{"role": "user", "content": prompt}]}
     if think is not None:
@@ -71,8 +81,19 @@ def chat(role, prompt, system="", think=None):
 
 
 def unload_llms():
-    """生圖前釋放 Ollama 佔用的記憶體(FLUX 峰值約 14GB)。"""
-    for m in MODELS.values():
+    """生圖前釋放 Ollama 佔用的記憶體(FLUX 峰值約 14GB)。
+
+    卸載 `/api/ps` 列出的全部模型,不只設定中的角色——heavy 推理或其他程式載入的模型也一併釋放(ADP-1)。
+    Ollama 連不上或單一模型卸載失敗都不丟例外。
+    """
+    try:
+        with urllib.request.urlopen(f"{OLLAMA}/api/ps", timeout=10) as r:
+            loaded = [m.get("model") or m.get("name") for m in json.load(r).get("models", [])]
+    except Exception:
+        return
+    for m in loaded:
+        if not m:
+            continue
         body = json.dumps({"model": m, "keep_alive": 0}).encode()
         try:
             urllib.request.urlopen(urllib.request.Request(
@@ -81,91 +102,96 @@ def unload_llms():
             pass
 
 
+_STAMP_CHARS = "0123456789abcdefghijklmnopqrstuvwxyz"
+_stamp_lock = threading.Lock()
+_stamp_ms = None
+_stamp_used: set[str] = set()
+
+
 def stamp():
+    """輸出檔名用的時間戳:`YYYYMMDD-HHMMSS-毫秒-4 碼隨機`(ADP-8)。
+
+    同一行程同一毫秒內保證不重複;不同行程之間靠 36^4 種隨機碼降低碰撞機率。
+    """
+    global _stamp_ms
     OUT.mkdir(exist_ok=True)
-    return time.strftime("%Y%m%d-%H%M%S")
+    t = time.time()
+    base = f"{time.strftime('%Y%m%d-%H%M%S', time.localtime(t))}-{int(t * 1000) % 1000:03d}"
+    with _stamp_lock:
+        if base != _stamp_ms:  # 換了一毫秒,舊的隨機碼不會再撞
+            _stamp_ms = base
+            _stamp_used.clear()
+        while True:
+            rnd = "".join(secrets.choice(_STAMP_CHARS) for _ in range(4))
+            if rnd not in _stamp_used:
+                _stamp_used.add(rnd)
+                return f"{base}-{rnd}"
 
 
-def ask(q, speak_it=False, think=True):
-    print(f"▶ 推理中({MODELS['reason'].split('/')[-1]})…", file=sys.stderr)
-    draft = chat("reason", q, system=f"你是嚴謹的推理助理,先想清楚再回答。{TW}", think=think)
-    if not draft:
-        sys.exit("推理模型沒有產生回答(可能是思考過長),請把問題拆小一點再試。")
-    print("▶ 台灣用語潤飾(Breeze2)…", file=sys.stderr)
-    final = chat("taiwan", f"請把以下內容改寫成自然的台灣繁體中文,保留所有事實、數字與結構,不要增刪內容,只輸出改寫結果:\n\n{draft}",
-                 system=TW)
-    final = to_tw(final)
-    print(final)
-    if speak_it:
-        speak(final)
-    return final
+RESERVE_TRIES = 20
 
 
-def code(req):
-    print("▶ 寫程式中(Qwen2.5-Coder)…", file=sys.stderr)
-    out = to_tw(chat("code", req, system=f"你是資深工程師。程式碼註解與說明{TW}"))
-    print(out)
-    return out
+def _create_exclusive(path):
+    """排他建立空檔;已存在(含符號連結,即使指向不存在的目標)丟 FileExistsError,不跟隨連結。"""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    os.close(fd)
 
 
-def image(desc):
-    print("▶ 轉成英文 prompt(Qwen3)…", file=sys.stderr)
-    prompt = chat("reason", desc, think=False, system=(
-        "Rewrite the user's image request as one detailed English prompt for an image model "
-        "(subject, setting, style, lighting, camera). If it mentions Taiwan, keep Taiwanese details. "
-        "Output only the prompt."))
-    print(f"  prompt: {prompt}", file=sys.stderr)
-    unload_llms()
-    path = OUT / f"image-{stamp()}.png"
-    print("▶ 生圖中(FLUX.1-schnell)…", file=sys.stderr)
-    subprocess.run([str(MFLUX), "--model", FLUX, "--base-model", "schnell", "--steps", "4",
-                    "--width", "1024", "--height", "768", "--prompt", prompt,
-                    "--output", str(path)], check=True, stdout=subprocess.DEVNULL)
-    print(path)
-    return path
+def reserve(prefix, suffix, also=()):
+    """在 OUT 下排他建立 `<prefix>-<stamp()><suffix>` 空佔位檔並回傳路徑(不覆寫既有檔案)。
+
+    also:同一主檔名還要一併佔下的其他副檔名(例如影片的 `.srt`),全部佔到才算成功。
+    撞名就重取 stamp(),最多 RESERVE_TRIES 次;仍失敗丟 FileExistsError。
+    外部程序(BreezyVoice、ffmpeg、PIL)之後寫入的是這個佔位檔。
+    """
+    for _ in range(RESERVE_TRIES):
+        stem = OUT / f"{prefix}-{stamp()}"
+        made = []
+        try:
+            for suf in (suffix, *also):
+                path = stem.with_name(stem.name + suf)
+                _create_exclusive(path)
+                made.append(path)
+        except FileExistsError:
+            for m in made:  # 只清掉這一輪自己建立的佔位檔
+                m.unlink(missing_ok=True)
+            continue
+        return made[0]
+    raise FileExistsError(f"連續 {RESERVE_TRIES} 次撞名,無法在 {OUT} 建立 {prefix}-*{suffix}")
+
+
+class discard_on_error:
+    """包住寫入佔位檔的步驟;發生例外時刪掉佔位檔(不留下空檔),再把例外往外丟。"""
+
+    def __init__(self, *paths):
+        self.paths = paths
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            for p in self.paths:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return False
 
 
 def speak(text):
     # BreezyVoice 讀 Markdown 符號會念錯,先清掉
     text = re.sub(r"[#*`>|_\-]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    path = OUT / f"speech-{stamp()}.wav"
+    path = reserve("speech", ".wav")
     print("▶ 語音合成中(BreezyVoice,CPU 較慢)…", file=sys.stderr)
-    subprocess.run([str(BREEZY / ".venv/bin/python"), "single_inference.py",
-                    "--content_to_synthesize", text,
-                    "--speaker_prompt_audio_path", str(VOICE_WAV),
-                    "--speaker_prompt_text_transcription", VOICE_TEXT,
-                    "--output_path", str(path)],
-                   cwd=BREEZY, check=True, env={"PYTHONUTF8": "1", "PATH": "/usr/bin:/bin"},
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with discard_on_error(path):
+        subprocess.run([str(BREEZY / ".venv/bin/python"), "single_inference.py",
+                        "--content_to_synthesize", text,
+                        "--speaker_prompt_audio_path", str(VOICE_WAV),
+                        "--speaker_prompt_text_transcription", VOICE_TEXT,
+                        "--output_path", str(path)],
+                       cwd=BREEZY, check=True, env={"PYTHONUTF8": "1", "PATH": "/usr/bin:/bin"},
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(path)
     return path
-
-
-def auto(req):
-    route = chat("reason", req, think=False, system=(
-        "Classify the request into exactly one word: code (programming), image (draw/generate a picture), "
-        "speak (read text aloud), ask (everything else). Output only that word.")).lower()
-    route = next((r for r in ("code", "image", "speak") if r in route), "ask")
-    print(f"▶ 自動分派 → {route}", file=sys.stderr)
-    return {"ask": ask, "code": code, "image": image, "speak": speak}[route](req)
-
-
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mode", choices=["ask", "code", "image", "speak", "auto"])
-    p.add_argument("text")
-    p.add_argument("--speak", action="store_true", help="ask 模式:回答完再念出來")
-    p.add_argument("--heavy", action="store_true", help="推理改用 Qwen3.8 27B")
-    p.add_argument("--no-think", action="store_true", help="ask 模式:關閉思考,快很多但較不嚴謹")
-    a = p.parse_args()
-    if a.heavy:
-        MODELS["reason"] = HEAVY_REASON
-    if a.mode == "ask":
-        ask(a.text, a.speak, think=not a.no_think)
-    else:
-        {"code": code, "image": image, "speak": speak, "auto": auto}[a.mode](a.text)
-
-
-if __name__ == "__main__":
-    main()
