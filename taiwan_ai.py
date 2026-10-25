@@ -4,7 +4,7 @@
 # ///
 """台灣在地多模型串接函式庫(網頁與 MCP 共用;CHG-20261022-01 T2 起不再提供 CLI)。
 
-角色(模型名稱一律讀 `config/models.json`,見 settings.py):
+角色(模型名稱一律經 `settings.load()` 讀設定資料庫 `config/studio.db`,見 settings.py):
   reason        邏輯推理(預設 Qwen3.5 9B 去審查)
   reason_heavy  重型推理(預設 Qwen3.8 27B,較準、較慢)
   taiwan        台灣用語(預設 Llama-Breeze2 8B)
@@ -18,7 +18,8 @@
   reserve(prefix, suffix, also=()) -> Path
                           在 OUT 下排他建立 `<prefix>-<stamp()><suffix>` 空佔位檔,撞名重取;
                           輸出檔一律先佔位再寫入,不覆寫既有檔案
-  speak(text) -> Path
+  speak(text) -> Path     BreezyVoice 子程序環境含 HF_HUB_OFFLINE、TRANSFORMERS_OFFLINE(ADP-12),
+                          模型快取不存在時失敗、不下載;呼叫端須在 heavy_lock() 內呼叫(ADP-2)
 """
 import json
 import os
@@ -59,7 +60,7 @@ def _role(role):
 
 
 def model(role):
-    """回傳角色的模型名稱;每次呼叫重讀 config/models.json。"""
+    """回傳角色的模型名稱;每次呼叫經 settings.load() 重讀設定資料庫 config/studio.db。"""
     return _role(role)["model"]
 
 
