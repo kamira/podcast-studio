@@ -43,6 +43,7 @@ import copy
 import json
 import os
 import sqlite3
+import stat
 import sys
 import time
 from datetime import datetime, timezone
@@ -395,23 +396,67 @@ def _open_rw(db: Path) -> sqlite3.Connection:
         delay = min(delay * 2, 0.2)
 
 
-def _create_db_file(db: Path) -> bool:
-    """以排他方式建立空的資料庫檔(權限 0600,不跟隨符號連結);已存在回 False。"""
+def _create_db_file(db: Path) -> tuple[int, int] | None:
+    """以排他方式建立空的資料庫檔(權限 0600,不跟隨符號連結)。
+
+    回傳新檔的身分 `(st_dev, st_ino)`,供 `_discard()` 確認要刪的仍是這一個檔;已存在回 None。
+    """
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(db, flags, 0o600)
     except FileExistsError:
-        return False
+        return None
     try:
         os.fchmod(fd, 0o600)
+        st = os.fstat(fd)
     finally:
         os.close(fd)
-    return True
+    return st.st_dev, st.st_ino
 
 
-def _discard(db: Path) -> None:
-    """移除本次呼叫建立、但交易失敗的資料庫檔與其 -wal、-shm(下次 load() 再試)。"""
-    for p in (db, *_sidecars(db)):
+def _same_file(db: Path, ident: tuple[int, int]) -> bool:
+    """db 目前是一般檔案(不是符號連結),且身分等於 ident。"""
+    try:
+        st = os.lstat(db)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == ident
+
+
+def _discard(db: Path, ident: tuple[int, int]) -> None:
+    """移除本次呼叫建立、但交易失敗的資料庫檔與其 -wal、-shm(下次 load() 再試)。
+
+    只在「路徑上的檔案仍是本次建立的那一個(st_dev、st_ino 相同),且仍沒有任何資料表
+    (沒有 meta、沒有匯入的資料)」時才刪;另一行程已在同一個檔完成匯入、檔案已被換掉,
+    或無法確認時一律保留(依 PR #36 審議修正)。
+
+    確認與刪除在同一個 `BEGIN IMMEDIATE` 寫入鎖內進行,期間其他行程無法提交匯入。
+    殘餘情況:另一行程若已開啟連線、但尚未開始交易,刪除後它會匯入到已刪除的檔,
+    接著 `_load_known()` 開不到資料庫而回預設值並帶警告;下一次 `load()` 會重新匯入。
+    """
+    if not _same_file(db, ident):
+        return
+    removed = False
+    try:
+        con = _open_rw(db)
+    except (_DbError, sqlite3.Error):
+        return
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            if _same_file(db, ident) and _schema_state(con) == _NEW:
+                db.unlink()
+                removed = True
+        finally:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+    except (_DbError, sqlite3.Error, OSError):
+        pass
+    finally:
+        con.close()
+    if not removed or db.exists():
+        return  # 沒刪,或已有其他行程重新建立:不動 -wal、-shm
+    for p in _sidecars(db):
         try:
             p.unlink()
         except FileNotFoundError:
@@ -550,10 +595,10 @@ def load() -> dict:
             return _fallback(warning)
         if src is None:
             return copy.deepcopy(DEFAULTS)  # 不建立資料庫
-        created = False
+        created = None
         if not db.exists():
             created = _create_db_file(db)
-            if not created:
+            if created is None:
                 continue  # 另一行程剛建立,重新判斷
         try:
             con = _open_rw(db)
@@ -562,12 +607,12 @@ def load() -> dict:
             finally:
                 con.close()
         except _DbError as e:
-            if created:
-                _discard(db)
+            if created is not None:
+                _discard(db, created)
             return _fallback(e.args[0])
         except Exception:
-            if created:
-                _discard(db)
+            if created is not None:
+                _discard(db, created)
             return _fallback(WARN_DB_UNREADABLE)
         return _load_known(db)
     return _fallback(WARN_DB_UNREADABLE)
@@ -590,7 +635,7 @@ def save(cfg) -> None:
     if msg:
         raise ValueError([msg])
     for _ in range(2):
-        created = False
+        created = None
         if db.exists():
             try:
                 _probe(db)  # 非 SQLite、損壞或版本不明 → 不寫入、不覆寫、不重建
@@ -598,7 +643,7 @@ def save(cfg) -> None:
                 raise ValueError([e.args[0]]) from None
         else:
             created = _create_db_file(db)
-            if not created:
+            if created is None:
                 continue  # 另一行程剛建立,重新判斷
         try:
             con = _open_rw(db)
@@ -607,12 +652,12 @@ def save(cfg) -> None:
             finally:
                 con.close()
         except _DbError as e:
-            if created:
-                _discard(db)
+            if created is not None:
+                _discard(db, created)
             raise ValueError([e.args[0]]) from None
         except BaseException:
-            if created:
-                _discard(db)
+            if created is not None:
+                _discard(db, created)
             raise
         return
     raise ValueError([WARN_DB_UNREADABLE])

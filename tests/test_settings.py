@@ -680,3 +680,96 @@ def test_一行程連續save200次另一行程load200次皆成功且完整(env):
         assert "database is locked" not in err
         assert "[settings]" not in err  # 沒有任何回退警告
     assert settings.load() == b  # 最後一次 save 是 configs[199 % 2]
+
+
+# ---- _discard 只刪本次建立且仍是空的資料庫檔(依 PR #36 審議修正) ----
+
+def _fail_first_open(monkeypatch, before_fail):
+    """第一次 _open_rw(建立者自己的匯入或 save)先執行 before_fail(),再模擬失敗;之後照常。"""
+    real = settings._open_rw
+    calls = []
+
+    def fake(path):
+        calls.append(path)
+        if len(calls) == 1:
+            before_fail()
+            raise sqlite3.OperationalError("database is locked(模擬)")
+        return real(path)
+    monkeypatch.setattr(settings, "_open_rw", fake)
+    return real
+
+
+def test_建立者匯入失敗前另一行程已在同一檔完成匯入_不刪除且load回其資料(env, monkeypatch):
+    c = changed()
+    write_json(env, c)
+    (env / "go").write_text("go")
+    seen = {}
+
+    def other_process_imports():
+        assert db(env).exists() and db(env).stat().st_size == 0  # 建立者剛建立的空檔
+        r = subprocess.run([sys.executable, "-c",
+                            CHILD_LOAD_ONCE.format(repo=str(REPO), root=str(env))],
+                           cwd=env, text=True, capture_output=True, timeout=120,
+                           env=dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1"))
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == c
+        st = db(env).stat()
+        seen["ident"] = (st.st_dev, st.st_ino)
+        seen["meta"] = query(env, "SELECT key, value FROM meta ORDER BY key")
+        seen["rows"] = table_rows(env)
+
+    _fail_first_open(monkeypatch, other_process_imports)
+    got = settings.load()  # 建立者自己的匯入失敗 → 本次回預設值
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    st = db(env).stat()
+    assert (st.st_dev, st.st_ino) == seen["ident"]  # 另一行程的資料庫檔仍在、未被換掉
+    assert query(env, "SELECT key, value FROM meta ORDER BY key") == seen["meta"]
+    assert table_rows(env) == seen["rows"]
+    assert len(query(env, "SELECT value FROM meta WHERE key = ?", ("imported_at",))) == 1
+    assert settings.load() == c
+
+
+def test_建立者失敗時檔案已被換成另一個檔_不刪除(env, monkeypatch):
+    write_json(env, changed())
+    replacement = env / "config" / "replacement"
+
+    def swap():
+        replacement.write_bytes(b"")
+        os.replace(replacement, db(env))  # 同一路徑換成另一個 inode
+
+    _fail_first_open(monkeypatch, swap)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    assert db(env).exists()  # 不是本次建立的那一個檔,保留
+    assert db(env).stat().st_size == 0
+
+
+def test_建立者失敗且檔案仍是自己建立的空檔_照舊刪除(env, monkeypatch):
+    write_json(env, changed())
+    real = _fail_first_open(monkeypatch, lambda: None)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    assert not db(env).exists()
+    assert not any(p.exists() for p in sidecars(env))
+    monkeypatch.setattr(settings, "_open_rw", real)
+    assert settings.load() == changed()  # 下次 load() 再試
+
+
+def test_save建立者失敗前另一行程已存入_不刪除(env, monkeypatch):
+    other = changed(reason="glm4:latest")
+
+    def other_process_saves():
+        code = CHILD_PRELUDE.format(repo=str(REPO), root=str(env)) + (
+            f"settings.save(json.loads({json.dumps(json.dumps(other))}))\nprint('ok')\n")
+        (env / "go").write_text("go")
+        r = subprocess.run([sys.executable, "-c", code], cwd=env, text=True,
+                           capture_output=True, timeout=120,
+                           env=dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1"))
+        assert r.returncode == 0, r.stderr
+
+    real = _fail_first_open(monkeypatch, other_process_saves)
+    with pytest.raises(sqlite3.OperationalError):
+        settings.save(changed())
+    assert db(env).exists()
+    monkeypatch.setattr(settings, "_open_rw", real)
+    assert settings.load() == other
