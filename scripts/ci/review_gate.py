@@ -2,16 +2,21 @@
 """
 review_gate.py — CI 審議閘 / review gate
 
-規則(CHG-20261022-03 T4;安全影響 (b)(c)(i)(n)):
+規則(CHG-20261022-03 T4、T10、T11;安全影響 (b)(c)(i)(n)):
 1. 只採信 `author_association == OWNER` 的留言;其他人貼的標記一律忽略。
-2. 需要審議 = PR 改到的 CHG 風險分級為中 / 高(讀不到分級視同需要)**或** PR 改到程式路徑
-   (`*.py`、`*.sh`、`static/`、`.github/`、`scripts/`、`.ai-sdlc/`)。只改 `docs/`、`features/`
-   (且不含 `*.py`、`*.sh`)才可免審議;其餘位置一律從嚴視為需要審議。
+2. 需要審議 = PR 改到程式路徑(`*.py`、`*.sh`、`static/`、`.github/`、`scripts/`、`.ai-sdlc/`;
+   `docs/`、`features/` 以外的位置,以及其中的 `*.py`、`*.sh`,一律從嚴視為程式路徑)
+   **或** PR 改到的 CHG 風險分級為中 / 高
+   **或** PR 內 commit 訊息引用的 CHG(在 head 的 `docs/changes/` 存在者)風險分級為中 / 高(T10)。
+   讀不到分級一律從嚴視為需要審議;CHG 檔路徑上任一層(含 `docs/`、`docs/changes/`)是符號連結,
+   或解析後不在 `docs/changes/` 底下,都視為讀不到。同一 CHG 既被改到又被
+   commit 引用時取較嚴者(讀不到 > 高 > 中 > 低)。commit 引用但 `docs/changes/` 不存在的 CHG 不列入分級判定
+   (該情況由 `plan_check_changed.py` 擋下)。訊息逐項寫出觸發原因;免審議時也如實寫出依據。
 3. 需要審議時,必須有擁有者留言含 `<!-- local-review CHG-YYYYMMDD-NN sha=<head> seats=<json> -->`,
    且 sha 等於目前 head;標記中的 CHG 必須是該 PR 改到的 CHG 之一(PR 沒改到任何 CHG 時,
    必須是 PR 內 commit 訊息引用的 CHG 之一);多則符合時取最後一則。同一則留言含兩個以上 local-review 標記視為可疑、忽略。
    判決須含 DIR-1 六席;否決席(risk、security、compliance)任一 `fail`,或任何席位 `no-answer`
-   → 失敗。
+   → 失敗。缺少審議留言時,訊息提示執行 `scripts/local_review.py` 的方式(T11)。
 4. PR 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、
    `scripts/local_review.py`、`scripts/deploy_local.sh`)時,另需擁有者留言
    `<!-- infra-approved sha=<head> -->`(sha 必須是目前 head)。
@@ -20,7 +25,8 @@ review_gate.py — CI 審議閘 / review gate
 
 結構:純函式 `evaluate()`(測試全打這層,不碰網路)+ CLI 層(`urllib` 呼叫 GitHub REST)。
 CLI 的 token 取自環境變數 `GITHUB_TOKEN`;CHG 分級從 `--repo`(PR 資料的 checkout,只當資料)
-讀取該 PR 改到的 `docs/changes/CHG-*.md` 標頭「風險分級:」那一行。本腳本不寫入任何檔案。
+讀取該 PR 改到的 `docs/changes/CHG-*.md`,以及 commit 訊息引用的 CHG 檔的標頭「風險分級:」那一行。
+本腳本不寫入任何檔案。
 
 用法 / usage:
   GITHUB_TOKEN=… python3 scripts/ci/review_gate.py --repo pr --pr <編號> [--github-repo <owner/name>]
@@ -136,19 +142,71 @@ def allowed_chgs(files: Iterable[str], commit_chgs: Iterable[str]) -> List[str]:
     return changed or sorted(set(commit_chgs))
 
 
+def _chg_path(chg_id: str) -> str:
+    return "docs/changes/{}.md".format(chg_id)
+
+
+_SEVERITY = {"低": 0, "中": 1, "高": 2, None: 3}
+
+
+def stricter(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """取較嚴的分級:讀不到 > 高 > 中 > 低;不認得的值視同讀不到。"""
+    a = a if a in _SEVERITY else None
+    b = b if b in _SEVERITY else None
+    return a if _SEVERITY[a] >= _SEVERITY[b] else b
+
+
+def read_chg_risk(repo: Path, rel: str) -> Tuple[bool, Optional[str]]:
+    """讀 PR checkout 內 CHG 檔(`docs/changes/<檔名>`)的分級,逐層拒絕符號連結。
+
+    回傳 (檔案是否存在, 分級)。從 repo 根到目標檔的任一路徑元件是符號連結、目標不是一般檔案,
+    或 `target.resolve()` 不等於 `repo.resolve() / "docs" / "changes" / <檔名>` → (True, None),
+    即記為讀不到分級(從嚴視為需要審議)。沒有符號連結且檔案不存在 → (False, None)。
+    """
+    if not CHG_FILE_RE.match(rel):
+        return True, None
+    cur = repo
+    for part in Path(rel).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return True, None
+        if not os.path.lexists(cur):
+            return False, None
+    try:
+        if not cur.is_file() or cur.resolve() != repo.resolve() / "docs" / "changes" / cur.name:
+            return True, None
+        return True, read_risk(cur.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return True, None
+
+
+def review_command(pr: Optional[int] = None) -> str:
+    """缺審議留言時提示的執行方式(T11)。"""
+    return ("請執行 `python3 scripts/local_review.py --pr {}`"
+            "(暫停 27B 期間加 `--codex-seats risk,security,compliance`)").format(
+                pr if pr is not None else "<編號>")
+
+
 def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
              chg_risks: Dict[str, Optional[str]],
-             commit_chgs: Iterable[str] = ()) -> Tuple[bool, List[str]]:
+             commit_chgs: Iterable[str] = (),
+             commit_chg_risks: Optional[Dict[str, Optional[str]]] = None,
+             pr: Optional[int] = None) -> Tuple[bool, List[str]]:
     """審議閘判定。
 
     files:PR 改到的路徑(改名者新舊路徑都要列入);
     comments:GitHub issue comments(至少含 `author_association`、`body`),依時間先後排列;
     head_sha:目前 PR head 的完整 sha;
     chg_risks:PR 改到的 CHG 路徑 → 風險分級(「低」「中」「高」或 None = 讀不到);
-    commit_chgs:PR 內 commit 訊息引用的 CHG 編號(PR 沒改到 CHG 時用來比對標記)。
+    commit_chgs:PR 內 commit 訊息引用的 CHG 編號(PR 沒改到 CHG 時用來比對標記);
+    commit_chg_risks:commit 引用且在 head 的 `docs/changes/` 存在的 CHG 編號 → 風險分級
+        (「低」「中」「高」或 None = 讀不到);不存在的 CHG 不放進來;
+    pr:PR 編號,只用於提示訊息。
     回傳 (是否通過, 訊息清單)。
     """
     files = list(files)
+    commit_chgs = sorted(set(commit_chgs))
+    commit_chg_risks = dict(commit_chg_risks or {})
     comments = list(comments)
     msgs: List[str] = []
     ok = True
@@ -171,15 +229,39 @@ def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
     if program:
         reasons.append("改到程式或非 docs/features 路徑:{}".format(", ".join(program[:10])
                                                               + (" …" if len(program) > 10 else "")))
-    for path, risk in sorted(chg_risks.items()):
+    basis = []  # 免審議時如實列出的依據
+    cited_by_path = {_chg_path(c): r for c, r in commit_chg_risks.items()}
+    for path, own in sorted(chg_risks.items()):
+        # 同一 CHG 也被 commit 引用時取較嚴者(CI 的兩條讀取路徑理應一致;不一致時從嚴)
+        risk = stricter(own, cited_by_path[path]) if path in cited_by_path else own
         if risk in ("中", "高"):
-            reasons.append("{} 風險分級為{}".format(path, risk))
+            reasons.append("PR 改到 {},其風險分級為{}".format(path, risk))
         elif risk is None:
-            reasons.append("{} 讀不到風險分級(從嚴視為需要審議)".format(path))
+            reasons.append("PR 改到 {},讀不到其風險分級(從嚴視為需要審議)".format(path))
+        else:
+            basis.append("PR 改到 {},其風險分級為{}".format(path, risk))
+    for chg_id, risk in sorted(commit_chg_risks.items()):
+        if _chg_path(chg_id) in chg_risks:  # 已以「PR 改到」判過,不重複
+            continue
+        if risk in ("中", "高"):
+            reasons.append("commit 引用 {},其風險分級為{}".format(chg_id, risk))
+        elif risk is None:
+            reasons.append("commit 引用 {},讀不到其風險分級(從嚴視為需要審議)".format(chg_id))
+        else:
+            basis.append("commit 引用 {},其風險分級為{}".format(chg_id, risk))
+    missing_chgs = [c for c in commit_chgs if c not in commit_chg_risks]
+    for chg_id in missing_chgs:
+        basis.append("commit 引用 {},但 docs/changes/ 沒有該檔,不列入分級判定"
+                     "(由 plan_check_changed 檢查)".format(chg_id))
     if not reasons:
-        msgs.append("免審議:只改 docs/、features/ 且 CHG 分級為低")
+        if not chg_risks:
+            basis.insert(0, "未改到 CHG 檔")
+        if not commit_chgs:
+            basis.append("commit 未引用 CHG")
+        msgs.append("免審議:只改 docs/、features/;" + ";".join(basis))
         return ok, msgs
-    msgs.append("需要審議:" + ";".join(reasons))
+    for r in reasons:
+        msgs.append("需要審議:" + r)
 
     # 3. 找對應目前 head、CHG 相符的擁有者 local-review 留言(取最後一則)
     allowed = allowed_chgs(files, commit_chgs)
@@ -204,7 +286,8 @@ def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
             continue
         chosen = parsed
     if chosen is None:
-        msgs.append("缺少擁有者對應目前 head({})的 local-review 審議留言".format(head_sha[:12]))
+        msgs.append("缺少擁有者對應目前 head({})的 local-review 審議留言;{}".format(
+            head_sha[:12], review_command(pr)))
         return False, msgs
 
     seats = chosen["seats"]
@@ -272,15 +355,20 @@ def collect(api: str, slug: str, pr: int, token: str, repo: Path):
     comments = _get_all("{}/issues/{}/comments".format(base, pr), token)
     commit_chgs = sorted({m for c in _get_all("{}/pulls/{}/commits".format(base, pr), token)
                           for m in CHG_ID_RE.findall(((c.get("commit") or {}).get("message")) or "")})
+    commit_chg_risks: Dict[str, Optional[str]] = {}
+    for chg_id in commit_chgs:  # 符號連結不跟隨,記為讀不到
+        exists, risk = read_chg_risk(repo, _chg_path(chg_id))
+        if exists:
+            commit_chg_risks[chg_id] = risk
     chg_risks: Dict[str, Optional[str]] = {}
     for path in sorted(set(files)):
         if not CHG_FILE_RE.match(path):
             continue
-        target = repo / path
-        if not target.is_file():  # 刪除或改名前的舊路徑
+        exists, risk = read_chg_risk(repo, path)  # 逐層拒絕符號連結,記為讀不到
+        if not exists:  # 刪除或改名前的舊路徑
             continue
-        chg_risks[path] = read_risk(target.read_text(encoding="utf-8", errors="replace"))
-    return files, comments, head_sha, chg_risks, commit_chgs
+        chg_risks[path] = risk
+    return files, comments, head_sha, chg_risks, commit_chgs, commit_chg_risks
 
 
 def main(argv=None) -> int:
@@ -303,12 +391,13 @@ def main(argv=None) -> int:
         return 2
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
     try:
-        files, comments, head_sha, chg_risks, commit_chgs = collect(api, args.github_repo, args.pr, token, args.repo)
+        files, comments, head_sha, chg_risks, commit_chgs, commit_chg_risks = collect(
+            api, args.github_repo, args.pr, token, args.repo)
     except (ApiError, KeyError, TypeError) as e:
         print("錯誤:{}".format(e), file=sys.stderr)
         return 2
 
-    ok, msgs = evaluate(files, comments, head_sha, chg_risks, commit_chgs)
+    ok, msgs = evaluate(files, comments, head_sha, chg_risks, commit_chgs, commit_chg_risks, args.pr)
     for m in msgs:
         print("- " + m)
     print("review gate:{}".format("通過" if ok else "不通過"))

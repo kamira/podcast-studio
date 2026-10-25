@@ -49,7 +49,9 @@ podcast-studio/
 │       └── assets/            # 政策與基準 JSON
 ├── .github/
 │   └── workflows/ci.yml       # CI:document / chg / program / review
-├── .claude/launch.json        # Claude 桌面 app 啟動網頁
+├── .claude/
+│   ├── launch.json            # Claude 桌面 app 啟動網頁
+│   └── worktrees/             # agent worktree(ignored,CHG-20261022-03 T9)
 ├── .gitignore
 ├── outputs/                   # 產出物(ignored)
 └── tools/BreezyVoice/         # 第三方 repo + .venv(ignored,由腳本重建)
@@ -64,7 +66,7 @@ podcast-studio/
 | `docs/` | 治理帳本 | 落點宣告在 Guideline 表頭 | 〔觀察〕 |
 | `outputs/` | 產出檔 | `.gitignore` | 〔觀察〕 |
 | `tools/` | 第三方工具與 venv(約 1.9 GB) | `.gitignore`;無 `.git` | 〔觀察〕 |
-| `.claude/` | Claude 桌面 app 設定(追蹤檔只有 `launch.json`) | `launch.json` 用 `uv` 絕對路徑 | 〔觀察〕 |
+| `.claude/` | Claude 桌面 app 設定(追蹤檔只有 `launch.json`) | `launch.json` 用 `uv` 絕對路徑;`.claude/worktrees/` 是 Claude 桌面 app 為派發施工建立的 agent worktree,列入 `.gitignore`,避免主工作副本被判為不乾淨而讓 `scripts/deploy_local.sh` 中止(CHG-20261022-03 T9) | 〔觀察〕 |
 | `docs/knowledge/` | 使用者教過的規則:`INDEX.md`、`directives.md`(DIR-n)、`patterns.md`、`vocabulary.json` | 只改本目錄的 commit 免引用 CHG 編號(CHG-20261022-03) | 〔觀察〕 |
 | `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `features/ci.feature` 屬 CHG-20261022-03;其餘屬 CHG-20261022-01 / 04,對應功能不在 main 上 | 〔觀察〕 |
 | `scripts/ci/` | CI 治理檢查:`commit_check.py`、`plan_check_changed.py`、`review_gate.py`、`secret_scan.py`、`secret_allowlist.txt` | 只用 Python 標準函式庫;CI 一律從 base 分支的 trusted/ 副本(CI 執行期目錄,不在 repo 內)執行 | 〔觀察〕 |
