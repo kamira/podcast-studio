@@ -1,0 +1,35 @@
+{
+  "roles": {
+    "reason": {
+      "model": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M",
+      "think": true,
+      "num_ctx": 16384
+    },
+    "reason_heavy": {
+      "model": "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M",
+      "think": true,
+      "num_ctx": 16384
+    },
+    "taiwan": {
+      "model": "hf.co/mradermacher/Llama-Breeze2-8B-Instruct-text-only-GGUF:Q4_K_M",
+      "think": null,
+      "num_ctx": 16384
+    },
+    "image": {
+      "model": "mflux-community/flux-1-schnell-mflux-q4",
+      "steps": 4
+    },
+    "voice": {
+      "wav": "tools/BreezyVoice/data/example.wav",
+      "text": "在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。"
+    }
+  },
+  "review_seats": {
+    "risk": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M",
+    "impact": "glm4:latest",
+    "drift": "qwen3:8b",
+    "compliance": "codex",
+    "security": "codex",
+    "consistency": "glm4:latest"
+  }
+}
