@@ -1,12 +1,21 @@
-"""settings.py 的測試(CHG-20261022-01 T1)。
+"""settings.py 的測試(CHG-20261022-01 T1;T3 修訂 2 改寫為 SQLite 儲存層)。
 
-每個測試把 settings.ROOT / CONFIG_PATH 指到暫存目錄,不動 repo 內的 config/models.json。
+每個測試把 settings.ROOT / CONFIG_PATH 指到暫存目錄(`DB_PATH` 相對於 ROOT),
+不動 repo 內的 config/;跨行程測試以子行程執行同一份 settings.py。
 """
 from __future__ import annotations
 
+import ast
 import copy
+import hashlib
 import json
 import os
+import sqlite3
+import stat
+import subprocess
+import sys
+import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -17,7 +26,7 @@ ALL = {
     settings.DEFAULTS["roles"][r]["model"] for r in settings.LLM_ROLES
 } | {v for v in settings.DEFAULTS["review_seats"].values() if v != settings.CODEX}
 
-REPO_CONFIG = Path(settings.__file__).resolve().parent / "config" / "models.json"
+REPO = Path(settings.__file__).resolve().parent
 
 
 @pytest.fixture
@@ -34,38 +43,43 @@ def cfg():
     return copy.deepcopy(settings.DEFAULTS)
 
 
-# ---- load ----
-
-def test_檔案不存在回預設值(env):
-    assert not settings.CONFIG_PATH.exists()
-    got = settings.load()
-    assert got == settings.DEFAULTS
-    assert "_warnings" not in got
-    got["roles"]["reason"]["model"] = "x"  # 回傳的是副本
-    assert settings.DEFAULTS["roles"]["reason"]["model"] != "x"
+def db(root: Path) -> Path:
+    return root / "config" / "studio.db"
 
 
-def test_壞JSON回預設值並帶警告(env, capsys):
-    settings.CONFIG_PATH.parent.mkdir(parents=True)
-    settings.CONFIG_PATH.write_text("{ 不是 JSON", encoding="utf-8")
-    got = settings.load()
-    warnings = got.pop("_warnings")
-    assert warnings == [settings.WARN_BAD_JSON] == ["設定檔無法解析,已使用預設值"]
-    assert got == settings.DEFAULTS
-    assert "設定檔無法解析" in capsys.readouterr().err
+def sidecars(root: Path) -> list[Path]:
+    return [root / "config" / "studio.db-wal", root / "config" / "studio.db-shm"]
 
 
-def test_結構不合法的檔案回預設值並帶警告(env):
-    settings.CONFIG_PATH.parent.mkdir(parents=True)
-    bad = cfg()
-    bad["roles"]["image"]["steps"] = 99
-    settings.CONFIG_PATH.write_text(json.dumps(bad), encoding="utf-8")
-    got = settings.load()
-    assert got.pop("_warnings") == [settings.WARN_INVALID]
-    assert got == settings.DEFAULTS
+def write_json(root: Path, c) -> None:
+    (root / "config").mkdir(exist_ok=True)
+    settings.CONFIG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ---- validate ----
+def query(root: Path, sql: str, params=()) -> list[tuple]:
+    con = sqlite3.connect(db(root))
+    try:
+        return con.execute(sql, params).fetchall()
+    finally:
+        con.close()
+
+
+def table_rows(root: Path) -> tuple[list, list]:
+    return (query(root, "SELECT role, config FROM roles ORDER BY role"),
+            query(root, "SELECT seat, model FROM review_seats ORDER BY seat"))
+
+
+def sha(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def changed(**kw) -> dict:
+    c = cfg()
+    c["roles"]["reason"]["model"] = kw.get("reason", "qwen3:8b")
+    return c
+
+
+# ---- validate(T1,不變) ----
 
 def test_預設值在模型都已下載時合格(env):
     assert settings.validate(cfg(), ALL) == []
@@ -135,13 +149,9 @@ def test_允許目錄內的聲線路徑合格(env):
 def test_符號連結逐層拒絕(env, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside").resolve()
     (outside / "x.wav").write_bytes(b"RIFF")
-    # 允許目錄內的檔案是指向外部的連結
     (env / "outputs/uploads/evil.wav").symlink_to(outside / "x.wav")
-    # 允許目錄內的子目錄是連結
     (env / "outputs/uploads/sub").symlink_to(outside)
-    # 繞道:允許目錄外的連結指回允許目錄
     (env / "outputs/alias").symlink_to(env / "outputs/uploads")
-    # 允許目錄內指向允許目錄內的連結也拒絕(逐層一律不接受連結)
     (env / "outputs/uploads/ok.wav").write_bytes(b"RIFF")
     (env / "outputs/uploads/link.wav").symlink_to(env / "outputs/uploads/ok.wav")
     for wav in ("outputs/uploads/evil.wav", "outputs/uploads/sub/x.wav",
@@ -203,74 +213,6 @@ def test_非物件回錯誤(env):
     assert settings.validate({"roles": [], "review_seats": {}}, ALL)
 
 
-# ---- save ----
-
-def test_save後load相等(env):
-    c = cfg()
-    c["roles"]["reason"]["model"] = "qwen3:8b"
-    c["roles"]["image"]["steps"] = 2
-    settings.save(c)
-    assert settings.load() == c
-    assert json.loads(settings.CONFIG_PATH.read_text(encoding="utf-8")) == c
-
-
-def test_save去除警告鍵(env):
-    c = cfg()
-    c["_warnings"] = ["x"]
-    settings.save(c)
-    assert "_warnings" not in settings.load()
-
-
-def test_save拒絕結構不合格且不動原檔(env):
-    settings.save(cfg())
-    before = settings.CONFIG_PATH.read_bytes()
-    bad = cfg()
-    bad["roles"]["image"]["steps"] = 100
-    with pytest.raises(ValueError):
-        settings.save(bad)
-    assert settings.CONFIG_PATH.read_bytes() == before
-
-
-def test_save中斷不留半個檔(env, monkeypatch):
-    settings.save(cfg())
-    before = settings.CONFIG_PATH.read_bytes()
-
-    def boom(*a, **k):
-        raise OSError("模擬寫到一半中斷")
-
-    monkeypatch.setattr(settings.os, "replace", boom)
-    c = cfg()
-    c["roles"]["reason"]["model"] = "qwen3:8b"
-    with pytest.raises(OSError):
-        settings.save(c)
-    assert settings.CONFIG_PATH.read_bytes() == before
-    assert os.listdir(settings.CONFIG_PATH.parent) == ["models.json"]
-
-
-def test_save中斷且原本無檔時不產生檔案(env, monkeypatch):
-    real_fsync = os.fsync
-
-    def boom(fd):
-        real_fsync(fd)
-        raise OSError("模擬寫入後當機")
-
-    monkeypatch.setattr(settings.os, "fsync", boom)
-    with pytest.raises(OSError):
-        settings.save(cfg())
-    assert not settings.CONFIG_PATH.exists()
-    assert os.listdir(settings.CONFIG_PATH.parent) == []
-
-
-# ---- repo 內的設定檔 ----
-
-def test_repo內config等於DEFAULTS():
-    text = REPO_CONFIG.read_text(encoding="utf-8")
-    assert json.loads(text) == settings.DEFAULTS
-    assert text == json.dumps(settings.DEFAULTS, ensure_ascii=False, indent=2) + "\n"
-
-
-# ---- 依審議修正:暫停中的 27B 不得擔任審議席位(DIR-1 第 10 條) ----
-
 HEAVY = "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M"
 
 
@@ -290,55 +232,129 @@ def test_DEFAULTS仍通過且reason_heavy不受影響(env):
     assert settings.validate(cfg(), None) == []
 
 
-# ---- 依審議修正:設定檔讀寫逐層拒絕符號連結 ----
+# ---- 介面常數 ----
 
-def _outside_with_config(tmp_path_factory, name):
-    outside = tmp_path_factory.mktemp(name).resolve()
-    c = cfg()
-    c["roles"]["reason"]["model"] = "外部檔案的值"
-    (outside / "models.json").write_text(json.dumps(c, ensure_ascii=False), encoding="utf-8")
-    return outside
+def test_資料庫路徑與新警告常數():
+    assert Path(settings.DB_PATH) == Path("config") / "studio.db"
+    assert settings.WARN_DB_UNREADABLE == "設定資料庫無法讀取,已使用預設值"
+    assert settings.WARN_DB_VERSION == "設定資料庫版本不明,已使用預設值"
 
 
-def test_config目錄是符號連結時不讀不寫外部(env, tmp_path_factory):
-    outside = _outside_with_config(tmp_path_factory, "outside_cfg")
-    before = sorted(os.listdir(outside))
-    original = (outside / "models.json").read_bytes()
-    (env / "config").symlink_to(outside)
+# ---- load:資料庫與 JSON 都不存在 / 一次性匯入 ----
+
+def test_資料庫與JSON都不存在回預設值且不建立資料庫(env):
     got = settings.load()
-    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
     assert got == settings.DEFAULTS
-    with pytest.raises(ValueError):
-        settings.save(cfg())
-    assert sorted(os.listdir(outside)) == before  # 沒有暫存檔
-    assert (outside / "models.json").read_bytes() == original
+    assert "_warnings" not in got
+    got["roles"]["reason"]["model"] = "x"  # 回傳的是副本
+    assert settings.DEFAULTS["roles"]["reason"]["model"] != "x"
+    assert not db(env).exists()
+    assert not any(p.exists() for p in sidecars(env))
 
 
-def test_models_json是符號連結時不讀不寫外部(env, tmp_path_factory):
-    outside = _outside_with_config(tmp_path_factory, "outside_file")
-    before = sorted(os.listdir(outside))
-    original = (outside / "models.json").read_bytes()
+def test_只有合法JSON時第一次load匯入且之後只讀資料庫(env):
+    c = changed()
+    write_json(env, c)
+    json_before = settings.CONFIG_PATH.read_bytes()
+    got = settings.load()
+    assert got == c and "_warnings" not in got
+    assert db(env).is_file()
+    meta = dict(query(env, "SELECT key, value FROM meta"))
+    assert meta["schema_version"] == "1"
+    assert meta["imported_from"] == "config/models.json"
+    assert meta["imported_at"]
+    assert settings.CONFIG_PATH.read_bytes() == json_before  # 原檔不刪不改
+    # 之後改 JSON 不影響 load()
+    write_json(env, changed(reason="glm4:latest"))
+    assert settings.load() == c
+    assert dict(query(env, "SELECT key, value FROM meta"))["imported_at"] == meta["imported_at"]
+
+
+@pytest.mark.parametrize("content,warning", [
+    ("{ 不是 JSON", "WARN_BAD_JSON"),
+    ("INVALID", "WARN_INVALID"),
+])
+def test_壞JSON回預設值帶警告且不建立資料庫(env, capsys, content, warning):
     (env / "config").mkdir()
-    settings.CONFIG_PATH.symlink_to(outside / "models.json")
+    if content == "INVALID":
+        bad = cfg()
+        bad["roles"]["image"]["steps"] = 99
+        content = json.dumps(bad)
+    settings.CONFIG_PATH.write_text(content, encoding="utf-8")
+    before = settings.CONFIG_PATH.read_bytes()
     got = settings.load()
-    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got.pop("_warnings") == [getattr(settings, warning)]
     assert got == settings.DEFAULTS
-    with pytest.raises(ValueError):
-        settings.save(cfg())
-    assert os.listdir(env / "config") == ["models.json"]  # 沒有暫存檔
-    assert settings.CONFIG_PATH.is_symlink()
-    assert sorted(os.listdir(outside)) == before
-    assert (outside / "models.json").read_bytes() == original
+    assert getattr(settings, warning) in capsys.readouterr().err
+    assert not db(env).exists()
+    assert not any(p.exists() for p in sidecars(env))
+    assert settings.CONFIG_PATH.read_bytes() == before
 
 
-def test_CONFIG_PATH不在repo內時拒絕(env, monkeypatch, tmp_path_factory):
-    outside = _outside_with_config(tmp_path_factory, "outside_path")
-    monkeypatch.setattr(settings, "CONFIG_PATH", outside / "models.json")
+def test_匯入交易失敗時rollback且不留資料庫檔(env, monkeypatch):
+    write_json(env, changed())
+    original = settings._seat_rows
+
+    def boom(c):
+        raise RuntimeError("模擬匯入中途失敗")
+
+    monkeypatch.setattr(settings, "_seat_rows", boom)
     got = settings.load()
-    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    assert got == settings.DEFAULTS
+    assert not db(env).exists()
+    assert not any(p.exists() for p in sidecars(env))
+    monkeypatch.setattr(settings, "_seat_rows", original)
+    assert settings.load() == changed()  # 下次 load() 再試
+
+
+# ---- save ----
+
+def test_save後load相等(env):
+    c = changed()
+    c["roles"]["image"]["steps"] = 2
+    c["roles"]["taiwan"]["think"] = False
+    settings.save(c)
+    assert settings.load() == c
+    assert not settings.CONFIG_PATH.exists()  # 不寫 JSON
+    c2 = changed(reason="glm4:latest")
+    settings.save(c2)
+    assert settings.load() == c2
+
+
+def test_save去除警告鍵(env):
+    c = cfg()
+    c["_warnings"] = ["x"]
+    settings.save(c)
+    assert "_warnings" not in settings.load()
+
+
+def test_save拒絕結構不合格且不動資料庫(env):
+    settings.save(cfg())
+    before = table_rows(env)
+    bad = cfg()
+    bad["roles"]["image"]["steps"] = 100
     with pytest.raises(ValueError):
-        settings.save(cfg())
-    assert sorted(os.listdir(outside)) == ["models.json"]
+        settings.save(bad)
+    assert table_rows(env) == before
+
+
+def test_save交易中途丟例外時兩表都不變(env, monkeypatch):
+    settings.save(cfg())
+    before = table_rows(env)
+    calls = []
+
+    def boom(c):
+        calls.append(1)
+        raise RuntimeError("模擬寫到一半中斷")
+
+    # roles 已在交易內刪除並重寫之後,review_seats 寫入前丟例外
+    monkeypatch.setattr(settings, "_seat_rows", boom)
+    with pytest.raises(RuntimeError):
+        settings.save(changed())
+    assert calls
+    assert table_rows(env) == before
+    assert settings.load() == settings.DEFAULTS
 
 
 def test_config目錄不存在時save在repo內建立(env):
@@ -346,3 +362,321 @@ def test_config目錄不存在時save在repo內建立(env):
     settings.save(cfg())
     assert (env / "config").is_dir() and not (env / "config").is_symlink()
     assert settings.load() == settings.DEFAULTS
+
+
+def test_新建資料庫權限0600且journal_mode為wal(env):
+    settings.save(cfg())
+    assert stat.S_IMODE(db(env).stat().st_mode) == 0o600
+    assert query(env, "PRAGMA journal_mode") == [("wal",)]
+
+
+def test_匯入建立的資料庫權限0600且journal_mode為wal(env):
+    write_json(env, changed())
+    settings.load()
+    assert stat.S_IMODE(db(env).stat().st_mode) == 0o600
+    assert query(env, "PRAGMA journal_mode") == [("wal",)]
+
+
+def test_版本已知但以rollback_journal建立的資料庫開啟後改為wal(env):
+    settings.save(changed())
+    con = sqlite3.connect(db(env))
+    con.execute("PRAGMA journal_mode=DELETE")
+    con.close()
+    assert query(env, "PRAGMA journal_mode") == [("delete",)]
+    assert settings.load() == changed()
+    assert query(env, "PRAGMA journal_mode") == [("wal",)]
+
+
+# ---- 資料庫內容被改寫:讀出的值一律再經 validate ----
+
+def test_資料庫否決席被改成glm4時回預設值(env, capsys):
+    settings.save(changed())
+    con = sqlite3.connect(db(env))
+    with con:
+        con.execute("UPDATE review_seats SET model = ? WHERE seat = ?", ("glm4:latest", "security"))
+    con.close()
+    before = table_rows(env)
+    got = settings.load()
+    assert got.pop("_warnings")
+    assert got == settings.DEFAULTS
+    assert table_rows(env) == before  # 不修改資料庫
+
+
+def test_資料庫聲線路徑指向允許目錄外時回預設值(env):
+    settings.save(changed())
+    voice = dict(cfg()["roles"]["voice"], wav="/etc/passwd")
+    con = sqlite3.connect(db(env))
+    with con:
+        con.execute("UPDATE roles SET config = ? WHERE role = ?",
+                    (json.dumps(voice, ensure_ascii=False), "voice"))
+    con.close()
+    got = settings.load()
+    assert got.pop("_warnings")
+    assert got == settings.DEFAULTS
+
+
+def test_資料庫角色設定不是JSON時回預設值(env):
+    settings.save(changed())
+    con = sqlite3.connect(db(env))
+    with con:
+        con.execute("UPDATE roles SET config = ? WHERE role = ?", ("{壞掉", "reason"))
+    con.close()
+    got = settings.load()
+    assert got.pop("_warnings")
+    assert got == settings.DEFAULTS
+
+
+# ---- 版本不明與非 SQLite:不讀、不寫、位元組不變 ----
+
+def _rollback_journal_db(path: Path, version: str) -> None:
+    path.parent.mkdir(exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA journal_mode=DELETE")
+    with con:
+        con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        con.execute("INSERT INTO meta (key, value) VALUES (?, ?)", ("schema_version", version))
+        con.execute("CREATE TABLE roles (role TEXT PRIMARY KEY, config TEXT NOT NULL)")
+        con.execute("CREATE TABLE review_seats (seat TEXT PRIMARY KEY, model TEXT NOT NULL)")
+    con.close()
+
+
+def test_版本不明時load回預設值_save丟錯_檔案不變(env, capsys):
+    _rollback_journal_db(db(env), "99")
+    before_bytes, before_sha = db(env).read_bytes(), sha(db(env))
+    write_json(env, changed())  # 有 JSON 也不得匯入
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_VERSION]
+    assert got == settings.DEFAULTS
+    assert settings.WARN_DB_VERSION in capsys.readouterr().err
+    with pytest.raises(ValueError):
+        settings.save(changed())
+    assert db(env).read_bytes() == before_bytes
+    assert sha(db(env)) == before_sha
+    assert not any(p.exists() for p in sidecars(env))
+    assert not (env / "config" / "studio.db-journal").exists()
+
+
+def test_有表但沒有meta表視為版本不明(env):
+    db(env).parent.mkdir()
+    con = sqlite3.connect(db(env))
+    con.execute("PRAGMA journal_mode=DELETE")
+    with con:
+        con.execute("CREATE TABLE other (x)")
+    con.close()
+    before = sha(db(env))
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_VERSION]
+    with pytest.raises(ValueError):
+        settings.save(cfg())
+    assert sha(db(env)) == before
+    assert not any(p.exists() for p in sidecars(env))
+
+
+@pytest.mark.parametrize("content", [
+    b"this is not a sqlite database at all " * 200,
+    b"SQLite format 3\x00" + b"\xff" * 4000,
+], ids=["純文字", "檔頭正確但內容損壞"])
+def test_非SQLite內容時load回預設值_save丟錯不覆寫不重建(env, capsys, content):
+    db(env).parent.mkdir()
+    db(env).write_bytes(content)
+    before_sha = sha(db(env))
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    assert got == settings.DEFAULTS
+    assert settings.WARN_DB_UNREADABLE in capsys.readouterr().err
+    with pytest.raises(ValueError):
+        settings.save(cfg())
+    assert db(env).read_bytes() == content
+    assert sha(db(env)) == before_sha
+    assert not any(p.exists() for p in sidecars(env))
+
+
+# ---- 路徑規則:符號連結與 repo 外 ----
+
+def _outside_db(tmp_path_factory, name) -> tuple[Path, Path]:
+    outside = tmp_path_factory.mktemp(name).resolve()
+    target = outside / "studio.db"
+    con = sqlite3.connect(target)
+    con.execute("PRAGMA journal_mode=DELETE")
+    with con:
+        con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        con.execute("INSERT INTO meta (key, value) VALUES (?, ?)", ("schema_version", "1"))
+    con.close()
+    return outside, target
+
+
+def _assert_unsafe(env, outside, watched: dict) -> None:
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got == settings.DEFAULTS
+    with pytest.raises(ValueError):
+        settings.save(cfg())
+    for p, digest in watched.items():
+        assert sha(p) == digest, p
+    assert sorted(x.name for x in outside.iterdir()) == sorted(p.name for p in watched)
+
+
+def test_studio_db是符號連結時不讀不寫(env, tmp_path_factory):
+    outside, target = _outside_db(tmp_path_factory, "outside_db")
+    (env / "config").mkdir()
+    db(env).symlink_to(target)
+    _assert_unsafe(env, outside, {target: sha(target)})
+    assert db(env).is_symlink()
+
+
+def test_wal是符號連結時不讀不寫(env, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside_wal").resolve()
+    target = outside / "victim.txt"
+    target.write_bytes(b"do not touch")
+    settings.save(changed())
+    db_before = sha(db(env))
+    for p in sidecars(env):
+        if p.exists():
+            p.unlink()
+    (env / "config" / "studio.db-wal").symlink_to(target)
+    _assert_unsafe(env, outside, {target: sha(target)})
+    assert sha(db(env)) == db_before
+    assert (env / "config" / "studio.db-wal").is_symlink()
+
+
+def test_shm是符號連結時不讀不寫(env, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside_shm").resolve()
+    target = outside / "victim.txt"
+    target.write_bytes(b"do not touch")
+    (env / "config").mkdir()
+    (env / "config" / "studio.db-shm").symlink_to(target)
+    _assert_unsafe(env, outside, {target: sha(target)})
+    assert not db(env).exists()
+
+
+def test_config目錄是符號連結時不讀不寫(env, tmp_path_factory):
+    outside, target = _outside_db(tmp_path_factory, "outside_cfg")
+    (outside / "models.json").write_text(json.dumps(changed()), encoding="utf-8")
+    (env / "config").symlink_to(outside)
+    _assert_unsafe(env, outside, {target: sha(target),
+                                  outside / "models.json": sha(outside / "models.json")})
+
+
+def test_models_json是符號連結時不匯入(env, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside_json").resolve()
+    (outside / "models.json").write_text(json.dumps(changed()), encoding="utf-8")
+    (env / "config").mkdir()
+    settings.CONFIG_PATH.symlink_to(outside / "models.json")
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got == settings.DEFAULTS
+    assert not db(env).exists()
+
+
+def test_DB_PATH不在repo內時拒絕(env, monkeypatch, tmp_path_factory):
+    outside, target = _outside_db(tmp_path_factory, "outside_path")
+    monkeypatch.setattr(settings, "DB_PATH", target)
+    _assert_unsafe(env, outside, {target: sha(target)})
+
+
+# ---- 不以 f-string 組 SQL(CHG 的 ast 檢查) ----
+
+def test_settings不以fstring組SQL():
+    t = ast.parse((REPO / "settings.py").read_text(encoding="utf-8"))
+    assert not any(isinstance(n, ast.JoinedStr) and "SELECT" in ast.unparse(n).upper()
+                   for n in ast.walk(t))
+
+
+def test_config_models_json不在git追蹤內():
+    if not (REPO / ".git").exists():
+        pytest.skip("不在 git 工作樹內")
+    out = subprocess.run(["git", "ls-files", "config/models.json"], cwd=REPO,
+                         capture_output=True, text=True, check=True).stdout
+    assert out == ""
+
+
+# ---- 跨行程:兩個子行程同時操作同一個資料庫 ----
+
+CHILD_PRELUDE = textwrap.dedent("""
+    import json, sys, time
+    from pathlib import Path
+    sys.path.insert(0, {repo!r})
+    import settings
+    root = Path({root!r})
+    settings.ROOT = root
+    settings.CONFIG_PATH = root / "config" / "models.json"
+    go = root / "go"
+    deadline = time.time() + 30
+    while not go.exists():
+        if time.time() > deadline:
+            sys.exit("等不到開始訊號")
+        time.sleep(0.001)
+""")
+
+CHILD_LOAD_ONCE = CHILD_PRELUDE + textwrap.dedent("""
+    print(json.dumps(settings.load(), ensure_ascii=False))
+""")
+
+CHILD_SAVE_MANY = CHILD_PRELUDE + textwrap.dedent("""
+    configs = json.loads({configs!r})
+    for i in range(200):
+        settings.save(configs[i % 2])
+    print("ok")
+""")
+
+CHILD_LOAD_MANY = CHILD_PRELUDE + textwrap.dedent("""
+    configs = json.loads({configs!r})
+    bad = []
+    for i in range(200):
+        got = settings.load()
+        if got not in configs:
+            bad.append(got)
+    print(json.dumps({{"bad": bad}}, ensure_ascii=False))
+""")
+
+
+def _spawn(code: str, cwd: Path) -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", code], cwd=cwd, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1"))
+
+
+def _run_pair(env: Path, codes: list[str]) -> list[tuple[int, str, str]]:
+    procs = [_spawn(c, env) for c in codes]
+    time.sleep(0.5)  # 讓兩個子行程都進入等待
+    (env / "go").write_text("go")
+    results = []
+    for p in procs:
+        out, err = p.communicate(timeout=180)
+        results.append((p.returncode, out, err))
+    return results
+
+
+@pytest.mark.parametrize("round_", range(3))
+def test_兩個子行程同時第一次load只匯入一次(env, round_):
+    c = changed()
+    write_json(env, c)
+    code = CHILD_LOAD_ONCE.format(repo=str(REPO), root=str(env))
+    results = _run_pair(env, [code, code])
+    for rc, out, err in results:
+        assert rc == 0, err
+        assert "database is locked" not in err
+        assert json.loads(out) == c  # 皆回相同設定,且沒有 _warnings
+    rows = query(env, "SELECT value FROM meta WHERE key = ?", ("imported_at",))
+    assert len(rows) == 1
+    assert query(env, "SELECT value FROM meta WHERE key = ?", ("imported_from",)) == [
+        ("config/models.json",)]
+
+
+def test_一行程連續save200次另一行程load200次皆成功且完整(env):
+    a, b = changed(reason="qwen3:8b"), changed(reason="glm4:latest")
+    b["review_seats"]["drift"] = "glm4:latest"
+    b["roles"]["image"]["steps"] = 2
+    settings.save(a)
+    configs = json.dumps([a, b], ensure_ascii=False)
+    saver = CHILD_SAVE_MANY.format(repo=str(REPO), root=str(env), configs=configs)
+    loader = CHILD_LOAD_MANY.format(repo=str(REPO), root=str(env), configs=configs)
+    (rc_s, out_s, err_s), (rc_l, out_l, err_l) = _run_pair(env, [saver, loader])
+    assert rc_s == 0, err_s
+    assert out_s.strip() == "ok"
+    assert rc_l == 0, err_l
+    assert json.loads(out_l) == {"bad": []}
+    for err in (err_s, err_l):
+        assert "database is locked" not in err
+        assert "[settings]" not in err  # 沒有任何回退警告
+    assert settings.load() == b  # 最後一次 save 是 configs[199 % 2]
