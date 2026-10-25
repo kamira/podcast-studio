@@ -7,7 +7,6 @@
 import contextlib
 import json
 import sys
-import threading
 import urllib.request
 from pathlib import Path
 
@@ -15,17 +14,34 @@ from mcp.server.mcpserver import MCPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import media  # noqa: E402
+import settings  # noqa: E402
 import taiwan_ai as tai  # noqa: E402
+from heavy_lock import heavy_lock  # noqa: E402
 
 mcp = MCPServer("local-models")
-# 24 GB 統一記憶體同時只撐得住一個重型工作,全部工具依序執行
-LOCK = threading.Lock()
+
+
+def _settings():
+    """每次工具呼叫重讀設定(網頁改了設定,MCP 下一次呼叫就生效)。
+
+    設定不合法時 settings.load() 回預設值並把警告寫到 stderr(安全影響 (c));這裡不另外處理。
+    """
+    return settings.load()
+
+
+def _waiting():
+    print("[local-models] 另一個重型工作執行中(網頁或其他 MCP 呼叫),等待中…", file=sys.stderr)
 
 
 @contextlib.contextmanager
 def busy():
-    """取得鎖,並把 print 導到 stderr——stdout 是 MCP 協定通道,taiwan_ai 的 print 會弄壞它。"""
-    with LOCK, contextlib.redirect_stdout(sys.stderr):
+    """重讀設定、取得跨行程重型鎖(ADP-2,與網頁共用 outputs/.heavy.lock),並把 print 導到 stderr。
+
+    stdout 是 MCP 協定通道,taiwan_ai 的 print 會弄壞它。24 GB 統一記憶體同時只撐得住一個重型工作,
+    全部重型工具依序執行。
+    """
+    _settings()
+    with heavy_lock(on_wait=_waiting), contextlib.redirect_stdout(sys.stderr):
         yield
 
 
@@ -95,9 +111,10 @@ def list_models() -> str:
         have = {m["name"] for m in json.load(r)["models"]}
     with urllib.request.urlopen(f"{tai.OLLAMA}/api/ps", timeout=10) as r:
         loaded = [m["name"] for m in json.load(r)["models"]]
+    roles = _settings()["roles"]  # 同一次呼叫內用同一份設定
     rows = {}
     for role in ("reason", "taiwan", "reason_heavy"):
-        m = tai.model(role)
+        m = roles[role]["model"]
         rows[role] = {"model": m, "downloaded": m in have}
     rows["image"] = {"model": tai.FLUX, "tool": str(tai.MFLUX), "installed": tai.MFLUX.exists()}
     rows["speech"] = {"model": "BreezyVoice-300M", "installed": (tai.BREEZY / ".venv").exists()}

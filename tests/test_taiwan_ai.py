@@ -318,3 +318,42 @@ def test_結構不合法回退預設模型(cfg_file, ollama, capsys):
     assert settings.WARN_INVALID in capsys.readouterr().err
     tai.chat("reason", "問題")
     assert ollama.bodies("/api/chat")[-1]["model"] == LIGHT
+
+
+# ---- speak 子程序離線環境(T4,ADP-12) ----
+
+def test_speak子程序環境含離線變數_其餘不變(out, monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        Path(cmd[cmd.index("--output_path") + 1]).write_bytes(b"RIFF")
+    monkeypatch.setattr(tai.subprocess, "run", fake_run)
+    p = tai.speak("測試")
+    env = seen["kw"]["env"]
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["TRANSFORMERS_OFFLINE"] == "1"
+    # 修訂前的兩個變數維持原值;ADP-9 的 HOME 不在本 task 處理
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert set(env) == {"PYTHONUTF8", "PATH", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"}
+    # argv 與其他參數不變
+    assert seen["cmd"] == [str(tai.BREEZY / ".venv/bin/python"), "single_inference.py",
+                           "--content_to_synthesize", "測試",
+                           "--speaker_prompt_audio_path", str(tai.VOICE_WAV),
+                           "--speaker_prompt_text_transcription", tai.VOICE_TEXT,
+                           "--output_path", str(p)]
+    assert seen["kw"]["cwd"] == tai.BREEZY
+    assert seen["kw"]["check"] is True
+    assert seen["kw"]["stdout"] is tai.subprocess.DEVNULL
+    assert seen["kw"]["stderr"] is tai.subprocess.DEVNULL
+    assert p.read_bytes() == b"RIFF"
+
+
+def test_speak失敗時提示不自動下載(out, monkeypatch, capsys):
+    def boom(cmd, **kw):
+        raise tai.subprocess.CalledProcessError(1, cmd)
+    monkeypatch.setattr(tai.subprocess, "run", boom)
+    with pytest.raises(tai.subprocess.CalledProcessError):
+        tai.speak("測試")
+    assert "不連網下載" in capsys.readouterr().err

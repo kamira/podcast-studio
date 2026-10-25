@@ -179,6 +179,14 @@ class discard_on_error:
         return False
 
 
+# BreezyVoice 子程序環境(ADP-12):HF_HUB_OFFLINE、TRANSFORMERS_OFFLINE 讓 snapshot_download 與
+# BertTokenizer.from_pretrained 只讀本機快取、不連線 Hugging Face;快取不存在時直接失敗,不自動下載。
+BREEZY_ENV = {"PYTHONUTF8": "1", "PATH": "/usr/bin:/bin",
+              "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+SPEAK_FAILED_HINT = ("✗ 語音合成失敗。執行期不連網下載模型(HF_HUB_OFFLINE=1);若 BreezyVoice 或"
+                     " bert-base-chinese 的 Hugging Face 模型快取不存在,需在建置期(允許連網)先下載一次再試。")
+
+
 def speak(text):
     # BreezyVoice 讀 Markdown 符號會念錯,先清掉
     text = re.sub(r"[#*`>|_\-]+", " ", text)
@@ -186,12 +194,16 @@ def speak(text):
     path = reserve("speech", ".wav")
     print("▶ 語音合成中(BreezyVoice,CPU 較慢)…", file=sys.stderr)
     with discard_on_error(path):
-        subprocess.run([str(BREEZY / ".venv/bin/python"), "single_inference.py",
-                        "--content_to_synthesize", text,
-                        "--speaker_prompt_audio_path", str(VOICE_WAV),
-                        "--speaker_prompt_text_transcription", VOICE_TEXT,
-                        "--output_path", str(path)],
-                       cwd=BREEZY, check=True, env={"PYTHONUTF8": "1", "PATH": "/usr/bin:/bin"},
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run([str(BREEZY / ".venv/bin/python"), "single_inference.py",
+                            "--content_to_synthesize", text,
+                            "--speaker_prompt_audio_path", str(VOICE_WAV),
+                            "--speaker_prompt_text_transcription", VOICE_TEXT,
+                            "--output_path", str(path)],
+                           cwd=BREEZY, check=True, env=BREEZY_ENV,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            print(SPEAK_FAILED_HINT, file=sys.stderr)
+            raise
     print(path)
     return path
