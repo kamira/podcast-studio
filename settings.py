@@ -3,12 +3,15 @@
 介面:
   DEFAULTS                       程式內預設值(取自 taiwan_ai.py 現有常數與 DIR-1 席位表)
   load() -> dict                 讀設定;檔案不存在 → DEFAULTS 的副本;
-                                 壞 JSON / 讀取失敗 / 結構不合法 → DEFAULTS 的副本,
+                                 壞 JSON / 讀取失敗 / 結構不合法 / 路徑不安全
+                                 (config/ 或 models.json 是符號連結、不在 repo 內,此時不讀檔)
+                                 → DEFAULTS 的副本,
                                  並在回傳的 dict 加上 `_warnings: list[str]`(同時寫 stderr)。
                                  正常讀取時回傳中**沒有** `_warnings` 鍵。
   save(cfg) -> None              先做結構檢查(不含模型是否已下載),不合格丟 ValueError
                                  (args[0] 為錯誤清單);合格才以「同目錄暫存檔 + os.replace」
                                  原子寫入。cfg 若帶 `_warnings` 會先移除再檢查。
+                                 路徑不安全時丟 ValueError,不寫入、不建立暫存檔。
   validate(cfg, available_models) -> list[str]
                                  回傳逐欄的繁體中文錯誤訊息;空清單代表合格。
                                  available_models 為 Ollama 已下載的模型名稱集合;
@@ -33,6 +36,11 @@ CONFIG_PATH = ROOT / "config" / "models.json"
 VOICE_DIRS = ("tools/BreezyVoice/data", "outputs/uploads")
 
 CODEX = "codex"  # 審議席位由 Codex(codex-cli)擔任的代號,見 DIR-1 第 9、10 條
+# 暫停用於審議席位的模型(DIR-1 第 10 條「目前先暫不使用27B模型審議」);
+# 使用者明示恢復時移除。只限 review_seats,不影響 roles.reason_heavy(產品功能)。
+PAUSED_REVIEW_MODELS = frozenset({
+    "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M",
+})
 VETO_SEATS = ("risk", "security", "compliance")
 SEATS = ("risk", "impact", "drift", "compliance", "security", "consistency")
 LLM_ROLES = ("reason", "reason_heavy", "taiwan")
@@ -45,6 +53,7 @@ MAX_TEXT_LEN = 20000
 WARN_BAD_JSON = "設定檔無法解析,已使用預設值"
 WARN_UNREADABLE = "設定檔無法讀取,已使用預設值"
 WARN_INVALID = "設定檔內容不合法,已使用預設值"
+WARN_UNSAFE_PATH = "設定檔路徑不安全(符號連結或位於 repo 外),已使用預設值"
 
 # 值取自 taiwan_ai.py:MODELS、HEAVY_REASON、FLUX、VOICE_WAV、VOICE_TEXT;
 # chat() 的 num_ctx 16384;生圖 --steps 4;ask 預設 think=True、潤飾不帶 think(None)。
@@ -209,6 +218,8 @@ def validate(cfg, available_models) -> list[str]:
                 if seat not in VETO_SEATS:
                     errors.append(f"{where}:只有否決席(risk、security、compliance)可由 Codex 擔任")
                 continue
+            if v in PAUSED_REVIEW_MODELS:
+                errors.append(f"{where}:模型「{v}」暫停用於審議席位(DIR-1 第 10 條)")
             if seat in VETO_SEATS and v.startswith("glm4:"):
                 errors.append(f"{where}:否決席不得使用 glm4(DIR-1 第 6 條)")
             if avail is not None and v not in avail:
@@ -223,8 +234,29 @@ def _fallback(warning: str) -> dict:
     return cfg
 
 
+def _config_path_error() -> str | None:
+    """設定檔路徑必須是 repo 內的 config/models.json,且 config/ 與 models.json 逐層都不是符號連結。
+
+    不存在的層不算錯(save 會在檢查後於 repo 內建立 config/)。回傳錯誤訊息或 None。
+    """
+    root = ROOT.resolve()
+    expected = root / "config" / "models.json"
+    cfg_dir = root / "config"
+    for layer in (cfg_dir, expected):
+        if layer.is_symlink():
+            return f"「{layer.relative_to(root)}」是符號連結,不接受"
+    try:
+        if CONFIG_PATH.resolve() != expected:
+            return f"設定檔路徑必須是 {expected}"
+    except (OSError, RuntimeError):
+        return "設定檔路徑無法解析"
+    return None
+
+
 def load() -> dict:
-    """讀取 config/models.json;不存在回預設值,壞掉回預設值並帶 `_warnings`。"""
+    """讀取 config/models.json;不存在回預設值,壞掉或路徑不安全回預設值並帶 `_warnings`。"""
+    if _config_path_error():
+        return _fallback(WARN_UNSAFE_PATH)
     try:
         raw = CONFIG_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -248,7 +280,14 @@ def save(cfg) -> None:
     if errors:
         raise ValueError(errors)
     data = json.dumps(cfg, ensure_ascii=False, indent=2) + "\n"
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 建立 config/ 前後都檢查:不經符號連結、不越出 repo
+    msg = _config_path_error()
+    if msg:
+        raise ValueError([msg])
+    CONFIG_PATH.parent.mkdir(exist_ok=True)
+    msg = _config_path_error()
+    if msg:
+        raise ValueError([msg])
     fd, tmp = tempfile.mkstemp(dir=CONFIG_PATH.parent, prefix=".models.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

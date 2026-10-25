@@ -267,3 +267,82 @@ def test_repo內config等於DEFAULTS():
     text = REPO_CONFIG.read_text(encoding="utf-8")
     assert json.loads(text) == settings.DEFAULTS
     assert text == json.dumps(settings.DEFAULTS, ensure_ascii=False, indent=2) + "\n"
+
+
+# ---- 依審議修正:暫停中的 27B 不得擔任審議席位(DIR-1 第 10 條) ----
+
+HEAVY = "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M"
+
+
+@pytest.mark.parametrize("seat", settings.SEATS)
+def test_任一席位設27B回錯誤(env, seat):
+    assert HEAVY in settings.PAUSED_REVIEW_MODELS
+    c = cfg()
+    c["review_seats"][seat] = HEAVY
+    for avail in (ALL | {HEAVY}, None):
+        errs = settings.validate(c, avail)
+        assert any(e.startswith(f"review_seats.{seat}") and "DIR-1 第 10 條" in e for e in errs), errs
+
+
+def test_DEFAULTS仍通過且reason_heavy不受影響(env):
+    assert settings.DEFAULTS["roles"]["reason_heavy"]["model"] == HEAVY
+    assert settings.validate(cfg(), ALL) == []
+    assert settings.validate(cfg(), None) == []
+
+
+# ---- 依審議修正:設定檔讀寫逐層拒絕符號連結 ----
+
+def _outside_with_config(tmp_path_factory, name):
+    outside = tmp_path_factory.mktemp(name).resolve()
+    c = cfg()
+    c["roles"]["reason"]["model"] = "外部檔案的值"
+    (outside / "models.json").write_text(json.dumps(c, ensure_ascii=False), encoding="utf-8")
+    return outside
+
+
+def test_config目錄是符號連結時不讀不寫外部(env, tmp_path_factory):
+    outside = _outside_with_config(tmp_path_factory, "outside_cfg")
+    before = sorted(os.listdir(outside))
+    original = (outside / "models.json").read_bytes()
+    (env / "config").symlink_to(outside)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got == settings.DEFAULTS
+    with pytest.raises(ValueError):
+        settings.save(cfg())
+    assert sorted(os.listdir(outside)) == before  # 沒有暫存檔
+    assert (outside / "models.json").read_bytes() == original
+
+
+def test_models_json是符號連結時不讀不寫外部(env, tmp_path_factory):
+    outside = _outside_with_config(tmp_path_factory, "outside_file")
+    before = sorted(os.listdir(outside))
+    original = (outside / "models.json").read_bytes()
+    (env / "config").mkdir()
+    settings.CONFIG_PATH.symlink_to(outside / "models.json")
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got == settings.DEFAULTS
+    with pytest.raises(ValueError):
+        settings.save(cfg())
+    assert os.listdir(env / "config") == ["models.json"]  # 沒有暫存檔
+    assert settings.CONFIG_PATH.is_symlink()
+    assert sorted(os.listdir(outside)) == before
+    assert (outside / "models.json").read_bytes() == original
+
+
+def test_CONFIG_PATH不在repo內時拒絕(env, monkeypatch, tmp_path_factory):
+    outside = _outside_with_config(tmp_path_factory, "outside_path")
+    monkeypatch.setattr(settings, "CONFIG_PATH", outside / "models.json")
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    with pytest.raises(ValueError):
+        settings.save(cfg())
+    assert sorted(os.listdir(outside)) == ["models.json"]
+
+
+def test_config目錄不存在時save在repo內建立(env):
+    assert not (env / "config").exists()
+    settings.save(cfg())
+    assert (env / "config").is_dir() and not (env / "config").is_symlink()
+    assert settings.load() == settings.DEFAULTS
