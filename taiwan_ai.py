@@ -15,9 +15,13 @@
   chat(role, prompt, system="", think=None) -> str
   unload_llms()           卸載 Ollama `/api/ps` 列出的全部模型(ADP-1)
   stamp() -> str          輸出檔名用時間戳:YYYYMMDD-HHMMSS-毫秒-4 碼隨機(ADP-8)
+  reserve(prefix, suffix, also=()) -> Path
+                          在 OUT 下排他建立 `<prefix>-<stamp()><suffix>` 空佔位檔,撞名重取;
+                          輸出檔一律先佔位再寫入,不覆寫既有檔案
   speak(text) -> Path
 """
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -124,18 +128,70 @@ def stamp():
                 return f"{base}-{rnd}"
 
 
+RESERVE_TRIES = 20
+
+
+def _create_exclusive(path):
+    """排他建立空檔;已存在(含符號連結,即使指向不存在的目標)丟 FileExistsError,不跟隨連結。"""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    os.close(fd)
+
+
+def reserve(prefix, suffix, also=()):
+    """在 OUT 下排他建立 `<prefix>-<stamp()><suffix>` 空佔位檔並回傳路徑(不覆寫既有檔案)。
+
+    also:同一主檔名還要一併佔下的其他副檔名(例如影片的 `.srt`),全部佔到才算成功。
+    撞名就重取 stamp(),最多 RESERVE_TRIES 次;仍失敗丟 FileExistsError。
+    外部程序(BreezyVoice、ffmpeg、PIL)之後寫入的是這個佔位檔。
+    """
+    for _ in range(RESERVE_TRIES):
+        stem = OUT / f"{prefix}-{stamp()}"
+        made = []
+        try:
+            for suf in (suffix, *also):
+                path = stem.with_name(stem.name + suf)
+                _create_exclusive(path)
+                made.append(path)
+        except FileExistsError:
+            for m in made:  # 只清掉這一輪自己建立的佔位檔
+                m.unlink(missing_ok=True)
+            continue
+        return made[0]
+    raise FileExistsError(f"連續 {RESERVE_TRIES} 次撞名,無法在 {OUT} 建立 {prefix}-*{suffix}")
+
+
+class discard_on_error:
+    """包住寫入佔位檔的步驟;發生例外時刪掉佔位檔(不留下空檔),再把例外往外丟。"""
+
+    def __init__(self, *paths):
+        self.paths = paths
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            for p in self.paths:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return False
+
+
 def speak(text):
     # BreezyVoice 讀 Markdown 符號會念錯,先清掉
     text = re.sub(r"[#*`>|_\-]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    path = OUT / f"speech-{stamp()}.wav"
+    path = reserve("speech", ".wav")
     print("▶ 語音合成中(BreezyVoice,CPU 較慢)…", file=sys.stderr)
-    subprocess.run([str(BREEZY / ".venv/bin/python"), "single_inference.py",
-                    "--content_to_synthesize", text,
-                    "--speaker_prompt_audio_path", str(VOICE_WAV),
-                    "--speaker_prompt_text_transcription", VOICE_TEXT,
-                    "--output_path", str(path)],
-                   cwd=BREEZY, check=True, env={"PYTHONUTF8": "1", "PATH": "/usr/bin:/bin"},
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with discard_on_error(path):
+        subprocess.run([str(BREEZY / ".venv/bin/python"), "single_inference.py",
+                        "--content_to_synthesize", text,
+                        "--speaker_prompt_audio_path", str(VOICE_WAV),
+                        "--speaker_prompt_text_transcription", VOICE_TEXT,
+                        "--output_path", str(path)],
+                       cwd=BREEZY, check=True, env={"PYTHONUTF8": "1", "PATH": "/usr/bin:/bin"},
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(path)
     return path

@@ -188,3 +188,133 @@ def test_stamp格式(monkeypatch, tmp_path):
     assert len(clock) == 6 and clock.isdigit()
     assert ms == "042"
     assert len(rnd) == 4 and rnd.isalnum() and rnd == rnd.lower()
+
+
+# ---- reserve:輸出檔排他建立,不覆寫 ----
+
+@pytest.fixture
+def out(monkeypatch, tmp_path):
+    d = tmp_path / "outputs"
+    monkeypatch.setattr(tai, "OUT", d)
+    return d
+
+
+def _fixed_stamps(monkeypatch, values):
+    it = iter(values)
+    monkeypatch.setattr(tai, "stamp", lambda: next(it))
+
+
+def test_reserve建立空佔位檔(out):
+    p = tai.reserve("speech", ".wav")
+    assert p.parent == out and p.name.startswith("speech-") and p.suffix == ".wav"
+    assert p.is_file() and not p.is_symlink() and p.stat().st_size == 0
+
+
+def test_reserve不覆寫同名檔並回傳另一個名稱(out, monkeypatch):
+    out.mkdir()
+    old = out / "image-A.png"
+    old.write_bytes(b"old")
+    _fixed_stamps(monkeypatch, ["A", "B"])
+    p = tai.reserve("image", ".png")
+    assert p == out / "image-B.png"
+    assert old.read_bytes() == b"old"
+
+
+def test_reserve前兩次撞名第三次成功(out, monkeypatch):
+    out.mkdir()
+    for s in ("A", "B"):
+        (out / f"cover-{s}.png").write_bytes(s.encode())
+    calls = []
+
+    def fake():
+        calls.append(1)
+        return "ABC"[len(calls) - 1]
+    monkeypatch.setattr(tai, "stamp", fake)
+    assert tai.reserve("cover", ".png") == out / "cover-C.png"
+    assert len(calls) == 3
+    assert (out / "cover-A.png").read_bytes() == b"A"
+    assert (out / "cover-B.png").read_bytes() == b"B"
+
+
+def test_reserve一律撞名丟例外(out, monkeypatch):
+    out.mkdir()
+    (out / "speech-X.wav").write_bytes(b"x")
+    monkeypatch.setattr(tai, "stamp", lambda: "X")
+    with pytest.raises(FileExistsError):
+        tai.reserve("speech", ".wav")
+    assert (out / "speech-X.wav").read_bytes() == b"x"
+
+
+def test_reserve不跟隨符號連結(out, monkeypatch, tmp_path):
+    out.mkdir()
+    target = tmp_path / "target.png"
+    target.write_bytes(b"secret")
+    dangling = tmp_path / "nowhere.png"
+    (out / "image-A.png").symlink_to(target)
+    (out / "image-B.png").symlink_to(dangling)
+    _fixed_stamps(monkeypatch, ["A", "B", "C"])
+    p = tai.reserve("image", ".png")
+    assert p == out / "image-C.png" and not p.is_symlink()
+    assert target.read_bytes() == b"secret"
+    assert not dangling.exists()
+
+
+def test_reserve_also一起佔位_撞名時清掉本輪佔位(out, monkeypatch):
+    out.mkdir()
+    (out / "podcast-A.srt").write_text("舊字幕", encoding="utf-8")
+    _fixed_stamps(monkeypatch, ["A", "B"])
+    p = tai.reserve("podcast", ".mp4", also=(".srt",))
+    assert p == out / "podcast-B.mp4"
+    assert (out / "podcast-B.srt").is_file()
+    assert not (out / "podcast-A.mp4").exists()
+    assert (out / "podcast-A.srt").read_text(encoding="utf-8") == "舊字幕"
+
+
+def test_speak寫入佔位檔_失敗時刪除佔位(out, monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kw):
+        path = Path(cmd[cmd.index("--output_path") + 1])
+        seen.append(path)
+        assert path.is_file()  # 已先佔位
+        path.write_bytes(b"RIFF")
+    monkeypatch.setattr(tai.subprocess, "run", fake_run)
+    p = tai.speak("你好")
+    assert p == seen[0] and p.read_bytes() == b"RIFF"
+
+    def boom(cmd, **kw):
+        seen.append(Path(cmd[cmd.index("--output_path") + 1]))
+        raise tai.subprocess.CalledProcessError(1, cmd)
+    monkeypatch.setattr(tai.subprocess, "run", boom)
+    with pytest.raises(tai.subprocess.CalledProcessError):
+        tai.speak("你好")
+    assert not seen[-1].exists()
+
+
+# ---- 設定不合法時回退預設值 ----
+
+@pytest.fixture
+def cfg_file(monkeypatch, tmp_path):
+    root = tmp_path.resolve()
+    monkeypatch.setattr(settings, "ROOT", root)
+    monkeypatch.setattr(settings, "CONFIG_PATH", root / "config" / "models.json")
+    (root / "config").mkdir()
+    return settings.CONFIG_PATH
+
+
+def test_壞JSON回退預設模型(cfg_file, ollama, capsys):
+    cfg_file.write_text("{壞掉", encoding="utf-8")
+    assert tai.model("reason") == LIGHT
+    assert settings.WARN_BAD_JSON in capsys.readouterr().err
+    tai.chat("reason", "問題")
+    assert ollama.bodies("/api/chat")[-1]["model"] == LIGHT
+
+
+def test_結構不合法回退預設模型(cfg_file, ollama, capsys):
+    bad = copy.deepcopy(settings.DEFAULTS)
+    bad["roles"]["reason"]["model"] = ""
+    cfg_file.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+    assert tai.model("reason") == LIGHT
+    assert settings.WARN_INVALID in capsys.readouterr().err
+    tai.chat("reason", "問題")
+    assert ollama.bodies("/api/chat")[-1]["model"] == LIGHT
