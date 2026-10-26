@@ -23,7 +23,7 @@
 ## 執行
 
 ```bash
-uv run --script podcast_studio.py      # 網頁 http://127.0.0.1:7860
+uv run --script studio_server.py       # 網頁 http://127.0.0.1:7860(設定存 config/studio.db,不入 git)
 uv run --script local_models_mcp.py    # MCP 伺服器(stdio)
 ./setup_breezyvoice.sh                 # 重建 tools/BreezyVoice
 ```

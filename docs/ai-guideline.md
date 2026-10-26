@@ -2,7 +2,7 @@
 
 - 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
 - 分支(Branch):main
-- 版本:v1.5(變更歷程見 §11)
+- 版本:v1.6(變更歷程見 §11)
 - 日期:2026-10-22
 - 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24;v1.5 修改 FR-21、FR-25、FR-31、FR-34 並新增 ADP-12,待 CHG-20261022-01/04 修訂 2 確認閘)
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
@@ -170,14 +170,20 @@
 
 ## 7. 驗收條件
 
-> 導入**不是**驗收(治理基準點第 6 條)。以下條件**全部未驗證**,狀態以 `docs/acceptance/` 的 ACC 為準;導入時沒有任何 ACC。
+> 導入**不是**驗收(治理基準點第 6 條)。以下條件**全部未驗證**,狀態以 `docs/acceptance/` 的 ACC 為準。
+> v1.6(2026-10-26,CHG-20261022-01 結構文件更新):網頁由 Gradio 四分頁改為 `studio_server.py`(首頁右上角 ⚙ → 設定 › 進階流程的節點畫布),驗收條件改寫為新介面;FR-1~7 的功能要求不變。
 
-- [ ] FR-1/2:網頁產生 2 分鐘稿,字數落在 500 ± 20%,全文無簡體字(OpenCC 反向檢查)
-- [ ] FR-3/11:合成語音產出可播放 WAV,長度 > 0
+- [ ] FR-1/2/17/20:`uv run --script studio_server.py` 後從首頁 ⚙ 進入「設定 › 進階流程」,載入預設範本,填主題與標題按「執行」;2 分鐘稿字數落在 500 ± 20%,全文無簡體字(OpenCC 反向檢查);在文字節點上編輯輸出後該節點標為釘住,重跑時不重新產生、下游使用編輯值
+- [ ] FR-3/11:合成語音產出可播放 WAV,長度 > 0;語音合成期間 BreezyVoice 子程序對外連線數為 0(ADP-12)
 - [ ] FR-4/10:封面為 1920×1080 PNG,標題完整落在底部帶狀區(含長標題,見 ADP-3)
 - [ ] FR-5/6/12:MP4 為 1920×1080 H.264/AAC,含一條 mov_text 字幕軌,另存 `.srt` 且最後一段結束時間 = 音檔長度(±0.5 秒)
+- [ ] FR-16:從節點清單拖出節點並連線;型別不符的連線被移除並提示;不合法的流程圖送出執行時回 400 並指出節點與埠;每個節點顯示狀態與預覽,失敗節點的下游標「略過:上游失敗」
+- [ ] FR-18:流程可存檔 / 載入;同名存檔須確認才覆寫
+- [ ] FR-19:把 `.txt` 文稿拖到畫布空白處建立檔案輸入節點、拖到節點輸入口取代該輸入;白名單外的副檔名被拒;超過 200 MB 回 413
+- [ ] FR-21/23:設定頁改推理模型並儲存後,MCP `list_models` 反映新值;`config/studio.db` 存在且 `git status --porcelain` 無輸出;否決席不能存成 `glm4:*`
 - [ ] FR-8~13:MCP stdio client 列出 6 個工具,逐一呼叫成功,stdout 只有 JSON-RPC
-- [ ] NFR 記憶體:`reason(heavy=true)` 之後立即 `generate_image` 不 OOM(見 ADP-1)
+- [ ] NFR 記憶體與互斥:網頁重型節點執行期間呼叫 MCP `generate_image` 會等待,兩個重型工作的執行區間不重疊;`reason(heavy=true)` 之後立即 `generate_image` 不 OOM(見 ADP-1、ADP-2)
+- [ ] NFR 安全:錯誤 `Host` 的請求(含 GET)、缺 `X-Studio-Token` 或錯誤 `Origin` 的改變狀態請求一律 403;`/files/` 取不到 `outputs/` 以外的檔案
 - [ ] FR-15:乾淨環境執行 `setup_breezyvoice.sh` 成功,正規化測試輸出含「兩千零二十六年」
 
 ## 8. AI 開發約定
@@ -208,18 +214,18 @@
 
 | 編號 | 項目 | 證據 | 等級 | 影響 |
 |------|------|------|------|------|
-| ADP-1 | `unload_llms()` 只卸載 `MODELS.values()`;MCP `reason(heavy=true)` 在 `finally` 把 `MODELS["reason"]` 還原,於是 27B 模型(約 13 GB,`keep_alive` 10 分鐘)不在卸載清單 | `taiwan_ai.py:73-81`、`local_models_mcp.py:40-45`、`taiwan_ai.py:60` | 〔觀察〕路徑;〔推論〕OOM 未重現 | heavy 推理後 10 分鐘內呼叫 `generate_image`,27B + FLUX 14–16 GB 可能超過 24 GB |
-| ADP-2 | 網頁沒有跨事件的鎖:文案(LLM)、語音(BreezyVoice)、封面(FLUX)三個事件各自排隊,可能同時執行;網頁與 MCP 兩個行程之間也沒有共用鎖 | `podcast_studio.py:104-110,114`(`queue()` 無全域 concurrency 設定);MCP 的鎖只在自己行程內 `local_models_mcp.py:22` | 〔觀察〕無鎖;〔推論〕Gradio 預設每個事件 concurrency 1、不同事件可並行 | 封面與文案同時跑時 LLM 未卸載 → 記憶體超量 |
+| ADP-1 | **由 CHG-20261022-01 處理**(T2:`unload_llms()` 改卸載 `/api/ps` 列出的全部模型;結案以 ACC 為準)。`unload_llms()` 只卸載 `MODELS.values()`;MCP `reason(heavy=true)` 在 `finally` 把 `MODELS["reason"]` 還原,於是 27B 模型(約 13 GB,`keep_alive` 10 分鐘)不在卸載清單 | `taiwan_ai.py:73-81`、`local_models_mcp.py:40-45`、`taiwan_ai.py:60` | 〔觀察〕路徑;〔推論〕OOM 未重現 | heavy 推理後 10 分鐘內呼叫 `generate_image`,27B + FLUX 14–16 GB 可能超過 24 GB |
+| ADP-2 | **由 CHG-20261022-01 處理**(T4:跨行程 `heavy_lock()`,網頁與 MCP 共用 `outputs/.heavy.lock`;結案以 ACC 為準)。網頁沒有跨事件的鎖:文案(LLM)、語音(BreezyVoice)、封面(FLUX)三個事件各自排隊,可能同時執行;網頁與 MCP 兩個行程之間也沒有共用鎖 | `podcast_studio.py:104-110,114`(`queue()` 無全域 concurrency 設定);MCP 的鎖只在自己行程內 `local_models_mcp.py:22` | 〔觀察〕無鎖;〔推論〕Gradio 預設每個事件 concurrency 1、不同事件可並行 | 封面與文案同時跑時 LLM 未卸載 → 記憶體超量 |
 | ADP-3 | `add_title()` 字級降到 48 仍超過 2 行時,迴圈結束但沿用 >2 行排版 | `media.py:42-52` | 〔觀察〕 | 長標題超出底部帶狀區或畫面 |
 | ADP-4 | `speak()` 清 Markdown 的 regex 也刪掉 `-`、`_`、`|`(換成空白) | `taiwan_ai.py:130` | 〔觀察〕轉換;〔推論〕念法改變未重現 | 「2026-10-22」「COVID-19」被拆開,數字正規化結果改變 |
 | ADP-5 | `setup_breezyvoice.sh` 以 `--depth 1` clone 上游 HEAD,未釘 commit | `setup_breezyvoice.sh:11` | 〔觀察〕 | 上游改版後 patches 可能失效,重建不可重現 |
 | ADP-6 | **沒有任何自動化測試**;`PODCAST_STUDIO.md §11` 自述:網頁與 `media.py` 從未執行,MCP 的 `generate_image` / `speak` / `make_video` 未經 MCP 實測 | repo 內無 test 檔;`PODCAST_STUDIO.md §11` | 〔觀察〕 | §7 驗收條件全部無證據 |
 | ADP-7 | MCP `make_video` 接受任意 `audio_path`,但帶 `script` 時以 `wave` 模組讀長度 | `media.py:74-76,116`、`local_models_mcp.py:83` | 〔觀察〕 | 傳入 MP3 / M4A 並附 script → `wave.Error`,工具失敗 |
-| ADP-8 | 輸出檔名以秒為單位的時間戳;同一秒內同前綴的兩次呼叫會覆寫 | `taiwan_ai.py:84-86` | 〔觀察〕;〔推論〕單人使用機率低 | 網頁與 MCP 同時 `speak` 時可能互蓋 |
+| ADP-8 | **由 CHG-20261022-01 處理**(T2:`stamp()` 加毫秒與隨機碼,輸出檔以 `reserve()` 排他建立;結案以 ACC 為準)。輸出檔名以秒為單位的時間戳;同一秒內同前綴的兩次呼叫會覆寫 | `taiwan_ai.py:84-86` | 〔觀察〕;〔推論〕單人使用機率低 | 網頁與 MCP 同時 `speak` 時可能互蓋 |
 | ADP-9 | `speak()` 子程序環境只給 `PYTHONUTF8`、`PATH`,沒有 `HOME` | `taiwan_ai.py:139` | 〔觀察〕;〔未知〕是否影響(文件稱 CLI 曾成功) | 依賴 `HOME` 的快取路徑(HF / matplotlib)可能寫到非預期位置或失敗 |
-| ADP-10 | 網頁勾選框變數名 `burn_subs`(燒錄),實作是軟字幕 mov_text;行為與 `PODCAST_STUDIO.md §8 #3` 一致,只是命名誤導 | `podcast_studio.py:62,99` | 〔觀察〕 | 後續修改者可能誤以為是硬字幕 |
+| ADP-10 | **已失效**:`podcast_studio.py` 已隨 CHG-20261022-01 T13 刪除,新版 `make-video` 節點的參數名為 `subtitles`。原內容:網頁勾選框變數名 `burn_subs`(燒錄),實作是軟字幕 mov_text;行為與 `PODCAST_STUDIO.md §8 #3` 一致,只是命名誤導 | `podcast_studio.py:62,99` | 〔觀察〕 | 後續修改者可能誤以為是硬字幕 |
 | ADP-11 | `PODCAST_STUDIO.md` 標示「MCP 伺服器已實作並測試」等狀態——是**自述**,導入時未重驗 | `PODCAST_STUDIO.md` 開頭與 §11 | 〔觀察〕 | 不得當作驗收證據;已盤點 ≠ 已驗收 |
-| ADP-12 | BreezyVoice 每次載入模型都呼叫 `snapshot_download`(預設 `--model_path` 是 Hugging Face repo id `MediaTek-Research/BreezyVoice-300M`,不是本機路徑);G2PW 以 `BertTokenizer.from_pretrained('bert-base-chinese')` 載入分詞器;`speak()` 的子程序環境沒有 `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` | `tools/BreezyVoice/single_inference.py:207`(呼叫)、`:400`(預設值);`tools/BreezyVoice/cosyvoice/cli/cosyvoice.py:27`;`tools/BreezyVoice/.venv/lib/python3.10/site-packages/g2pw/api.py:84`;`taiwan_ai.py:194`(env 只有 `PYTHONUTF8`、`PATH`) | 〔觀察〕路徑;〔推論〕執行期實際連線未以封包觀察重現(2026-10-26 新增,非導入時盤點) | 每次語音合成都可能連線 Hugging Face 查詢模型版本,與 §5「不送資料出本機」衝突;修正規劃:CHG-20261022-01 T4(`speak()`)、CHG-20261022-04 T1(`breezy_worker`)設定兩個離線變數 |
+| ADP-12 | **由 CHG-20261022-01 處理**(T4:`taiwan_ai.speak()` 子程序環境加入 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`;CHG-20261022-04 的 `breezy_worker` 另行處理;結案以 ACC 為準)。BreezyVoice 每次載入模型都呼叫 `snapshot_download`(預設 `--model_path` 是 Hugging Face repo id `MediaTek-Research/BreezyVoice-300M`,不是本機路徑);G2PW 以 `BertTokenizer.from_pretrained('bert-base-chinese')` 載入分詞器;`speak()` 的子程序環境沒有 `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` | `tools/BreezyVoice/single_inference.py:207`(呼叫)、`:400`(預設值);`tools/BreezyVoice/cosyvoice/cli/cosyvoice.py:27`;`tools/BreezyVoice/.venv/lib/python3.10/site-packages/g2pw/api.py:84`;`taiwan_ai.py:194`(env 只有 `PYTHONUTF8`、`PATH`) | 〔觀察〕路徑;〔推論〕執行期實際連線未以封包觀察重現(2026-10-26 新增,非導入時盤點) | 每次語音合成都可能連線 Hugging Face 查詢模型版本,與 §5「不送資料出本機」衝突;修正規劃:CHG-20261022-01 T4(`speak()`)、CHG-20261022-04 T1(`breezy_worker`)設定兩個離線變數 |
 
 ## 10. 導入記錄(治理基準點)
 
@@ -243,3 +249,4 @@
 | v1.2 | 2026-10-22 | 新增 FR-24~30(影片編輯器時間軸、逐句合成、停頓長度、聲調標註、實際長度字幕、多圖畫面軌、匯出與專案存檔);FR-16 節點畫布改為「生成流程」分頁 | 使用者指示;CHG-20261022-04 |
 | v1.5 | 2026-10-26 | 修改 FR-21(設定改存 SQLite)、FR-25(逐句合成定案 B2)、FR-31(首頁雙卡片 + 設定圖示,取代三分頁)、FR-34(免責說明改為連結);新增 FR-35(完整模式);§9 新增 ADP-12(BreezyVoice 可能連線 Hugging Face) | 使用者指示;2026-10-26 實測與查證;CHG-20261022-01、CHG-20261022-04 修訂 2 |
 | v1.4 | 2026-10-23 | §5 新增「merge 前 CI 全綠」;§8 新增 CI/CD 約定(每步驟 PR、四項檢查、程式變更使用者核准、infra-approved、只允許 squash、暫停 27B 期間的 `--codex-seats`) | CHG-20261022-03 結構文件更新;DIR-1、DIR-2 |
+| v1.6 | 2026-10-26 | §7 驗收條件改寫為新介面(`studio_server.py`、設定 › 進階流程、檔案拖放、設定資料庫);§9 ADP-1、ADP-2、ADP-8、ADP-12 標「由 CHG-20261022-01 處理」(結案以 ACC 為準),ADP-10 隨 Gradio 版刪除失效 | CHG-20261022-01 結構文件更新 |
