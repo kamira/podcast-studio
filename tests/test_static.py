@@ -195,3 +195,160 @@ def test_served_static_assets(client):
         assert r.headers["content-security-policy"] == ss.CSP
     assert "javascript" in client.get("/static/app.js").headers["content-type"]
     assert "text/css" in client.get("/static/style.css").headers["content-type"]
+
+
+# ---------- T11:檔案拖放與工作流程存取 ----------
+
+def _app_js() -> str:
+    return APP_JS.read_text(encoding="utf-8")
+
+
+def _js_const(name: str, pattern: str) -> str:
+    m = re.search(r"const " + name + r" = " + pattern + ";", _app_js())
+    assert m, f"app.js 必須宣告 const {name}"
+    return m.group(1)
+
+
+def _js_upload_kinds() -> dict[str, str]:
+    return json.loads(_js_const("UPLOAD_KINDS", r"(\{[^}]*\})"))
+
+
+def _js_name_pattern() -> re.Pattern:
+    """把 app.js 的 WORKFLOW_NAME_RE(JS 正規式,無旗標)轉成 Python 的 fullmatch 樣式。
+
+    只用到字元類別、量詞與 \\uXXXX 跳脫,Python re 與 JS 語意相同;去掉 ^ $ 改用 fullmatch,
+    避免 Python 的 `$` 會吃掉結尾換行。
+    """
+    return re.compile(_js_const("WORKFLOW_NAME_RE", r"/\^(.*)\$/"))
+
+
+def _js_matches(name: str) -> bool:
+    return _js_name_pattern().fullmatch(name) is not None
+
+
+def _server_accepts(name: str) -> bool:
+    return ss._normalize_name(name) is not None
+
+
+def test_app_js_upload_whitelist_matches_server():
+    assert _js_upload_kinds() == ss.UPLOAD_KINDS
+    assert _js_upload_kinds() == {ext: k for k, exts in nodes.FILE_KINDS.items() for ext in exts}
+
+
+def test_app_js_upload_limits_match_server():
+    assert int(_js_const("MAX_UPLOAD_MB", r"(\d+)")) * 1024 * 1024 == ss.MAX_UPLOAD
+    assert int(_js_const("MAX_UPLOAD_NAME", r"(\d+)")) == ss.MAX_UPLOAD_NAME
+
+
+def test_app_js_upload_kinds_are_port_types():
+    assert set(_js_upload_kinds().values()) <= set(_app_port_types())
+
+
+def test_app_js_upload_request_shape():
+    js = _app_js()
+    # 與 T8 契約一致:原始位元組、檔名放查詢參數、帶權杖(不是 multipart)
+    assert '"/api/upload?name=" + encodeURIComponent(file.name)' in js
+    assert re.search(r'method: "POST", body: file\b', js)
+    assert re.search(r'headers: \{ "X-Studio-Token": TOKEN \}', js)
+    assert "FormData" not in js
+
+
+def test_app_js_rejects_before_upload():
+    js = _app_js()
+    # 拖到畫布:先 checkFile 再 uploadFile;拖到輸入口:型別不符就提示、不上傳
+    drop = js[js.index("async onFileDrop("):js.index("addFileNode(up, name, x, y) {")]
+    assert drop.index("checkFile(f)") < drop.index("uploadFile(f)")
+    port = js[js.index("async dropOnPort("):js.index("canvasPoint(clientX, clientY) {")]
+    assert port.index("checkFile(file)") < port.index("c.kind !== port.type") < port.index("uploadFile(file)")
+    assert "型別不符" in port
+    assert "不支援此檔案類型" in js
+
+
+@pytest.mark.parametrize("name", [
+    "夜市流程", "ポッドキャスト", "ラーメン", "Flow", "default", "my_flow-2",
+    "々", "ー", "㐀", "鿿", "一", "ぁ", "ゖ", "ァ", "ヺ",
+    "한국어", "café", "ＡＢＣ", "・", "", "a" * 64, "a" * 65, "夜" * 64, "夜" * 65,
+    "a b", "a.b", "a/b", "..", "abc\n", "​", "ガ", "ガ", "Ⅻ", "１", "😀", "𠀀",
+    "ゝ", "ヽ", "〇", "－", "＿",
+])
+def test_workflow_name_rule_agrees_with_server(name):
+    assert _js_matches(name) == _server_accepts(name), repr(name)
+
+
+def test_workflow_name_rule_sample_expectations():
+    accepted = ["夜市流程", "ポッドキャスト", "ラーメン", "Flow", "a" * 64]
+    rejected = ["한국어", "café", "ＡＢＣ", "・", "", "a" * 65]
+    assert all(_js_matches(n) and _server_accepts(n) for n in accepted)
+    assert not any(_js_matches(n) or _server_accepts(n) for n in rejected)
+
+
+def test_workflow_name_rule_agrees_on_every_bmp_char():
+    pat = _js_name_pattern()
+    diff = [hex(cp) for cp in range(0x10000)
+            if not 0xD800 <= cp <= 0xDFFF
+            and (pat.fullmatch(chr(cp)) is not None) != _server_accepts(chr(cp))]
+    assert diff == []
+
+
+def test_app_js_workflow_name_hint_matches_server():
+    assert _js_const("WORKFLOW_NAME_HINT", r'"([^"]*)"') == ss.WORKFLOW_NAME_HINT
+
+
+@pytest.fixture
+def wf_client(tmp_path):
+    app = ss.create_app(runner=lambda g, e, c=None: None, token=TOKEN,
+                        static_dir=STATIC, root=tmp_path)
+    return TestClient(app, base_url="http://127.0.0.1:7860")
+
+
+def _put(client, name, graph, overwrite=None):
+    body = {"graph": graph}
+    if overwrite is not None:
+        body["overwrite"] = overwrite
+    return client.put("/api/workflows/" + name, json=body,
+                      headers={"Origin": "http://127.0.0.1:7860", "X-Studio-Token": TOKEN})
+
+
+SMALL_GRAPH = {"nodes": [{"id": "1", "kind": "text-input", "params": {"text": "台灣夜市文化"},
+                          "pos": {"x": 40, "y": 60}}], "edges": []}
+
+
+def test_case_collision_mark_tells_409_kinds_apart(wf_client):
+    mark = _js_const("CASE_COLLISION_MARK", r'"([^"]*)"')
+    assert _put(wf_client, "Flow", SMALL_GRAPH).status_code == 200
+    same = _put(wf_client, "Flow", SMALL_GRAPH)
+    assert same.status_code == 409
+    assert mark not in same.json()["error"]          # 同名:前端詢問是否覆寫
+    case = _put(wf_client, "flow", SMALL_GRAPH, overwrite=True)
+    assert case.status_code == 409
+    assert mark in case.json()["error"]               # 只差大小寫:只顯示伺服器訊息
+
+
+def test_app_js_save_dialog_flow():
+    js = _app_js()
+    save = js[js.index("async save(name, overwrite) {"):js.index("async load(name) {")]
+    assert '"/api/workflows/" + encodeURIComponent(name)' in save
+    assert "{ graph: graph, overwrite: overwrite }" in save
+    assert "r.status === 409" in save and "CASE_COLLISION_MARK" in save
+    assert 'showValidationErrors(r.data.errors, "未存檔")' in save
+    assert "this.submit(true)" in js                  # 覆寫只在使用者按「覆寫」後送出
+    load = js[js.index("async load(name) {"):]
+    assert "r.status === 404" in load and "找不到這個流程" in load
+    assert "WORKFLOW_NAME_RE.test(name)" in js
+
+
+def test_index_has_workflow_dialog():
+    html = _index_text()
+    for needed in ('<dialog id="wf-dialog"', 'id="wf-form"', 'id="wf-name"', 'id="wf-error"',
+                   'id="wf-confirm"', 'id="wf-overwrite"', 'id="wf-cancel"', 'id="wf-submit"',
+                   "已有同名流程,要覆寫嗎?", 'id="btn-save"', 'id="btn-load"'):
+        assert needed in html, needed
+    assert "建置中)" not in html
+
+
+def test_saved_graph_keeps_positions_round_trip(wf_client):
+    assert _put(wf_client, "夜市流程", SMALL_GRAPH).status_code == 200
+    r = wf_client.get("/api/workflows/夜市流程")
+    assert r.status_code == 200
+    assert r.json() == {"name": "夜市流程", "graph": SMALL_GRAPH}
+    assert wf_client.get("/api/workflows/沒有這個").status_code == 404

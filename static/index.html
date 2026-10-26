@@ -51,8 +51,8 @@
   <div class="subpage flow-page" data-sub="flow" hidden>
     <div class="flow-toolbar">
       <span class="flow-name" id="flow-name">流程:預設</span>
-      <button type="button" class="btn" id="btn-load" disabled title="載入流程(建置中)">載入</button>
-      <button type="button" class="btn" id="btn-save" disabled title="存檔(建置中)">存檔</button>
+      <button type="button" class="btn" id="btn-load" disabled title="載入流程">載入</button>
+      <button type="button" class="btn" id="btn-save" disabled title="存檔">存檔</button>
       <span class="spacer"></span>
       <button type="button" class="btn btn-primary" id="btn-run">▶ 執行</button>
       <button type="button" class="btn" id="btn-stop" disabled>■ 停止</button>
@@ -71,11 +71,33 @@
       </aside>
       <div class="canvas-wrap">
         <div id="drawflow" class="canvas"></div>
+        <p class="canvas-hint" aria-hidden="true">⇩ 把 .txt / 圖片 / 音檔拖到這裡,或拖到節點的輸入口取代它</p>
       </div>
     </div>
     <div class="statusbar" id="statusbar" role="status" aria-live="polite">尚未執行</div>
   </div>
 </section>
+
+<!-- 工作流程存檔 / 載入對話框(T11);沒有列出流程的端點,載入時輸入名稱 -->
+<dialog id="wf-dialog" class="dialog" aria-labelledby="wf-dialog-title">
+  <form id="wf-form" class="dialog-form" method="dialog" novalidate>
+    <h2 id="wf-dialog-title" class="dialog-title">存檔</h2>
+    <label class="dialog-field">
+      <span class="dialog-label">流程名稱</span>
+      <input id="wf-name" type="text" maxlength="64" autocomplete="off" spellcheck="false">
+    </label>
+    <p class="dialog-hint">可用中文、日文假名、英文字母、數字、底線、連字號,1 到 64 字</p>
+    <p class="dialog-error" id="wf-error" role="alert" hidden></p>
+    <div class="dialog-confirm" id="wf-confirm" hidden>
+      <span>已有同名流程,要覆寫嗎?</span>
+      <button type="button" class="btn btn-danger" id="wf-overwrite">覆寫</button>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="wf-cancel">取消</button>
+      <button type="submit" class="btn btn-primary" id="wf-submit">存檔</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="toast" class="toast" role="alert" hidden></div>
 

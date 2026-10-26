@@ -1,4 +1,5 @@
-// Podcast 工作室前端(CHG-20261022-01 T10):首頁 ⚙ 入口、設定頁子頁切換、「設定 › 進階流程」節點畫布。
+// Podcast 工作室前端(CHG-20261022-01 T10、T11):首頁 ⚙ 入口、設定頁子頁切換、「設定 › 進階流程」節點畫布、
+// 檔案拖放(T11)與工作流程存檔 / 載入對話框(T11)。
 //
 // 約束(CHG Global Constraints):
 //   - 原生 JS,不經建置;唯一第三方檔是 /static/vendor/drawflow.*;不從 CDN 載入任何資源。
@@ -7,7 +8,7 @@
 //   - 所有請求帶 X-Studio-Token(取自 <meta name="studio-token">)。
 //   - Drawflow 的數字 id 送到 API 前一律轉成字串。
 //
-// 檔案拖放與工作流程存檔 / 載入對話框屬 T11,設定頁表單屬 T12;這裡只留位置。
+// 設定頁表單屬 T12,這裡只留位置。
 "use strict";
 
 (function () {
@@ -35,6 +36,20 @@
     skipped: "略過",
     cancelled: "已取消",
   };
+
+  // 上傳副檔名白名單 → 檔案種類(埠型別):必須與 studio_server.UPLOAD_KINDS(= nodes.FILE_KINDS)
+  // 一致(tests/test_static.py 檢查)。前端先擋,伺服器仍會再檢查副檔名與內容。
+  const UPLOAD_KINDS = {".m4a": "audio", ".md": "text", ".jpeg": "image", ".jpg": "image", ".mp3": "audio", ".png": "image", ".txt": "text", ".wav": "audio", ".webp": "image"};
+  const MAX_UPLOAD_MB = 200;        // 同 studio_server.MAX_UPLOAD
+  const MAX_UPLOAD_NAME = 255;      // 同 studio_server.MAX_UPLOAD_NAME
+
+  // 工作流程名稱:與 studio_server._normalize_name 相同的中英日白名單(ASCII 英數、-、_、
+  // CJK 統一漢字 U+4E00–9FFF 與擴充 A U+3400–4DBF、平假名 U+3041–3096、片假名 U+30A1–30FA、
+  // 「ー」U+30FC、「々」U+3005),1~64 字,不做正規化(tests/test_static.py 比對兩邊結果)
+  const WORKFLOW_NAME_RE = /^[A-Za-z0-9_\-一-鿿㐀-䶿ぁ-ゖァ-ヺー々]{1,64}$/;
+  const WORKFLOW_NAME_HINT = "工作流程名稱只能用中文、日文假名、英文字母、數字、底線、連字號,長度 1 到 64 字";
+  // 伺服器 409 訊息含此字串時表示「只差大小寫」的衝突:不提供覆寫,只顯示伺服器訊息
+  const CASE_COLLISION_MARK = "只差大小寫";
 
   const TOKEN = (document.querySelector('meta[name="studio-token"]') || {}).content || "";
   const SUBPAGES = ["models", "seats", "voice", "flow"];
@@ -106,6 +121,83 @@
     return "/files/" + parts.map(encodeURIComponent).join("/");
   }
 
+  // ---------- 檔案(T11) ----------
+
+  // 原始檔名的副檔名(小寫);規則同 studio_server._upload_ext:只看最後一段、主檔名不可空白
+  function uploadExt(name) {
+    if (typeof name !== "string" || !name || name.length > MAX_UPLOAD_NAME || name.indexOf("\u0000") !== -1) return null;
+    const base = name.replace(/\\/g, "/").split("/").pop();
+    const dot = base.lastIndexOf(".");
+    if (dot <= 0) return null;
+    const ext = "." + base.slice(dot + 1).toLowerCase();
+    return Object.prototype.hasOwnProperty.call(UPLOAD_KINDS, ext) ? ext : null;
+  }
+
+  function supportedExts() {
+    return Object.keys(UPLOAD_KINDS).sort().join(" ");
+  }
+
+  // 前端先擋:不支援的副檔名與超過上限的檔案不上傳。合格回 {kind},否則回 {error}
+  function checkFile(file) {
+    const ext = uploadExt(file && file.name);
+    if (!ext) return { error: "不支援此檔案類型:「" + String(file && file.name) + "」(可用 " + supportedExts() + ")" };
+    if (typeof file.size === "number" && file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      return { error: "「" + file.name + "」超過 " + MAX_UPLOAD_MB + " MB 上限" };
+    }
+    return { kind: UPLOAD_KINDS[ext] };
+  }
+
+  function draggingFiles(e) {
+    return !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).indexOf("Files") !== -1);
+  }
+
+  // 拖曳經過時只拿得到 MIME 型別(拿不到檔名),僅用來預先標示可接受的輸入口;猜不到回 null
+  function guessDragKind(e) {
+    const items = e.dataTransfer && e.dataTransfer.items ? Array.from(e.dataTransfer.items) : [];
+    let kind = null;
+    for (const it of items) {
+      if (it.kind !== "file") continue;
+      const t = String(it.type || "");
+      const k = t === "text/plain" || t === "text/markdown" ? "text"
+        : /^image\/(png|jpeg|webp)$/.test(t) ? "image"
+          : /^audio\//.test(t) ? "audio" : null;
+      if (!k || (kind && kind !== k)) return null;
+      kind = k;
+    }
+    return kind;
+  }
+
+  // 以原始位元組上傳(同 T8 的 POST /api/upload?name=);失敗回 null 並提示
+  async function uploadFile(file) {
+    const mb = (file.size / (1024 * 1024)).toFixed(1);
+    setStatusBar("上傳中:「" + file.name + "」(" + mb + " MB)…");
+    let res;
+    try {
+      res = await fetch("/api/upload?name=" + encodeURIComponent(file.name), {
+        method: "POST", body: file, credentials: "same-origin", cache: "no-store",
+        headers: { "X-Studio-Token": TOKEN },
+      });
+    } catch (e) {
+      setStatusBar("上傳失敗:「" + file.name + "」");
+      toast("上傳失敗:「" + file.name + "」:無法連線到伺服器", true);
+      return null;
+    }
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (e) {
+      data = null;
+    }
+    const r = { ok: res.ok, status: res.status, data: data };
+    if (!r.ok || !data || typeof data.file_id !== "string" || PORT_TYPES.indexOf(data.kind) === -1) {
+      setStatusBar("上傳失敗:「" + file.name + "」");
+      toast("上傳失敗:「" + file.name + "」:" + (r.ok ? "伺服器回應格式不符" : errorText(r)), true);
+      return null;
+    }
+    setStatusBar("已上傳:「" + file.name + "」");
+    return data;
+  }
+
   // ---------- 頁面切換(hash 路由,不是網頁分頁) ----------
 
   function route() {
@@ -162,6 +254,7 @@
       this.buildPalette();
       document.getElementById("btn-run").addEventListener("click", () => this.run());
       document.getElementById("btn-stop").addEventListener("click", () => this.stop());
+      Workflows.init();
       await this.loadDefault();
     },
 
@@ -177,23 +270,166 @@
       editor.on("nodeRemoved", (id) => { this.nodes.delete(String(id)); });
       this.editor = editor;
 
-      // 從節點清單拖進畫布(檔案拖放屬 T11,這裡只接受節點種類)
+      // 從節點清單拖進畫布;或從檔案總管拖檔案進來(T11)
       container.addEventListener("dragover", (e) => {
+        if (draggingFiles(e)) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          container.classList.add("drop-target");
+          this.markDropPorts(guessDragKind(e), e.target);
+          return;
+        }
         if (e.dataTransfer && Array.from(e.dataTransfer.types).indexOf("application/x-studio-node") !== -1) {
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
           container.classList.add("drop-target");
         }
       });
-      container.addEventListener("dragleave", () => container.classList.remove("drop-target"));
+      container.addEventListener("dragleave", (e) => {
+        if (e.relatedTarget && container.contains(e.relatedTarget)) return;
+        container.classList.remove("drop-target");
+        this.clearDropPorts();
+      });
       container.addEventListener("drop", (e) => {
         container.classList.remove("drop-target");
+        this.clearDropPorts();
+        if (draggingFiles(e)) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.onFileDrop(Array.from(e.dataTransfer.files || []), e.target, e.clientX, e.clientY);
+          return;
+        }
         const kind = e.dataTransfer ? e.dataTransfer.getData("application/x-studio-node") : "";
         if (!kind || !this.specs[kind]) return;
         e.preventDefault();
         const p = this.canvasPoint(e.clientX, e.clientY);
         this.addNode(kind, p.x, p.y);
       });
+    },
+
+    // ---------- 檔案拖放(T11) ----------
+
+    // 由 DOM 元素找出節點輸入口:{st, index};不是輸入口回 null
+    inputPortAt(target) {
+      const portEl = target && target.closest ? target.closest(".drawflow-node .inputs > .input") : null;
+      if (!portEl) return null;
+      const nodeEl = portEl.closest(".drawflow-node");
+      const st = nodeEl ? this.nodes.get(String(nodeEl.id).replace(/^node-/, "")) : null;
+      const cls = Array.from(portEl.classList).find(function (c) { return /^input_\d+$/.test(c); });
+      const index = cls ? this.portIndex(cls) : -1;
+      if (!st || index < 0 || !st.inPorts[index]) return null;
+      return { st: st, index: index, el: portEl };
+    },
+
+    // 拖檔經過:可接受的輸入口高亮、不相符的變灰(猜不到檔案種類時只標示游標下的輸入口)
+    markDropPorts(kind, target) {
+      const container = this.editor.container;
+      if (this.dropKind !== kind || !this.dropMarked) {
+        this.clearDropPorts();
+        this.dropMarked = true;
+        this.dropKind = kind;
+        if (kind) {
+          this.nodes.forEach((st) => {
+            const node = this.nodeEl(st);
+            if (!node) return;
+            node.querySelectorAll(".inputs > .input").forEach(function (e, i) {
+              const p = st.inPorts[i];
+              if (p) e.classList.add(p.type === kind ? "port-accept" : "port-reject");
+            });
+          });
+        }
+      }
+      const hit = this.inputPortAt(target);
+      container.querySelectorAll(".port-hover").forEach(function (e) {
+        if (!hit || e !== hit.el) e.classList.remove("port-hover");
+      });
+      if (hit) hit.el.classList.add("port-hover");
+    },
+
+    clearDropPorts() {
+      this.dropMarked = false;
+      this.dropKind = null;
+      if (!this.editor) return;
+      this.editor.container.querySelectorAll(".port-accept, .port-reject, .port-hover").forEach(function (e) {
+        e.classList.remove("port-accept", "port-reject", "port-hover");
+      });
+    },
+
+    async onFileDrop(files, target, clientX, clientY) {
+      if (!files.length) return;
+      const hit = this.inputPortAt(target);
+      if (hit) {
+        if (files.length > 1) {
+          toast("拖到輸入口時一次只能放一個檔案", true);
+          return;
+        }
+        await this.dropOnPort(files[0], hit);
+        return;
+      }
+      if (target && target.closest && target.closest(".drawflow-node")) {
+        toast("請把檔案拖到畫布空白處(新建檔案節點),或拖到節點左側的輸入口(取代該輸入)", true);
+        return;
+      }
+      const p = this.canvasPoint(clientX, clientY);
+      const problems = [];
+      let placed = 0;
+      for (const f of files) {
+        const c = checkFile(f);
+        if (c.error) {
+          problems.push(c.error);
+          continue;
+        }
+        const up = await uploadFile(f);
+        if (!up) continue;
+        const st = this.addFileNode(up, f.name, p.x + placed * 30, p.y + placed * 30);
+        if (st) placed += 1;
+      }
+      if (problems.length) toast(problems.join("\n"), true);
+      if (placed) setStatusBar("已加入 " + placed + " 個檔案節點");
+    },
+
+    addFileNode(up, name, x, y) {
+      const st = this.addNode("file-input", x, y, { params: { file: up.file_id, kind: up.kind } });
+      if (st) this.setNodeStatus(st, "idle", "來源檔案:" + name, true);
+      return st;
+    },
+
+    // 拖到輸入口:型別相符才上傳,新建 file-input 節點接到這個輸入,原本的連線移除
+    async dropOnPort(file, hit) {
+      const st = hit.st;
+      const port = st.inPorts[hit.index];
+      const c = checkFile(file);
+      if (c.error) {
+        toast(c.error, true);
+        return;
+      }
+      const nodeName = st.spec.label || st.kind;
+      if (c.kind !== port.type) {
+        toast("型別不符:「" + file.name + "」是" + (PORT_LABELS[c.kind] || c.kind) + "檔,「" + nodeName +
+          "」的「" + port.label + "」輸入要" + (PORT_LABELS[port.type] || port.type) + ",輸入不變", true);
+        return;
+      }
+      const up = await uploadFile(file);
+      if (!up) return;
+      if (up.kind !== port.type) {
+        toast("型別不符:伺服器判定「" + file.name + "」是" + (PORT_LABELS[up.kind] || up.kind) + "檔,輸入不變", true);
+        return;
+      }
+      if (!this.nodes.has(st.id)) {
+        toast("目標節點已被移除,檔案改放到畫布上", true);
+      }
+      const data = this.editor.drawflow.drawflow[this.editor.module].data[st.id];
+      const inCls = "input_" + (hit.index + 1);
+      const x = data ? data.pos_x - 300 : 40;
+      const y = data ? data.pos_y + hit.index * 40 : 40;
+      const fresh = this.addFileNode(up, file.name, Math.max(0, x), Math.max(0, y));
+      if (!fresh || !data || !this.nodes.has(st.id)) return;
+      const conns = data.inputs[inCls] ? data.inputs[inCls].connections.slice() : [];
+      conns.forEach((cn) => {
+        this.editor.removeSingleConnection(cn.node, st.id, cn.input, inCls);
+      });
+      this.editor.addConnection(fresh.id, st.id, "output_1", inCls);
+      toast("「" + nodeName + "」的「" + port.label + "」輸入已改用「" + file.name + "」");
     },
 
     canvasPoint(clientX, clientY) {
@@ -605,7 +841,7 @@
       return graph;
     },
 
-    // 載入 executor 格式的流程圖(預設範本 workflows/default.json;存檔 / 載入對話框屬 T11)
+    // 載入 executor 格式的流程圖(預設範本 workflows/default.json,或載入對話框取得的流程)
     loadGraph(graph) {
       this.editor.clear();
       this.nodes.clear();
@@ -722,7 +958,10 @@
       };
     },
 
-    showValidationErrors(errors) {
+    // 伺服器 400 回來的錯誤顯示在對應節點上;action 為「未執行」或「未存檔」
+    showValidationErrors(errors, action) {
+      action = action || "未執行";
+      this.nodes.forEach((st) => this.setNodeStatus(st, "idle"));
       const general = [];
       errors.forEach((e) => {
         const msg = String((e && e.message) || "");
@@ -735,7 +974,7 @@
         }
       });
       const first = errors.length ? String(errors[0].message || "") : "";
-      setStatusBar("流程圖有 " + errors.length + " 個問題,未執行");
+      setStatusBar("流程圖有 " + errors.length + " 個問題," + action);
       toast("流程圖有 " + errors.length + " 個問題:" + (general[0] || first), true);
     },
 
@@ -817,11 +1056,181 @@
     },
   };
 
+  // ---------- 工作流程存檔 / 載入對話框(T11) ----------
+  //
+  // 伺服器沒有列出流程的端點(T8 規格),載入時請使用者輸入名稱。
+  // 存檔:名稱先以 WORKFLOW_NAME_RE 檢查;同名(409)先問「已有同名流程,要覆寫嗎?」,
+  // 確認後才帶 overwrite:true 重送;只差大小寫的 409 只顯示伺服器訊息,不提供覆寫。
+
+  const Workflows = {
+    mode: "save",
+    current: null,     // 目前畫布對應的流程名稱(載入或存檔成功後)
+    busy: false,
+    ready: false,
+
+    $(id) {
+      return document.getElementById(id);
+    },
+
+    init() {
+      if (this.ready) return;
+      this.ready = true;
+      this.$("btn-save").addEventListener("click", () => this.open("save"));
+      this.$("btn-load").addEventListener("click", () => this.open("load"));
+      this.$("wf-form").addEventListener("submit", (e) => {
+        e.preventDefault();
+        this.submit(false);
+      });
+      this.$("wf-overwrite").addEventListener("click", () => this.submit(true));
+      this.$("wf-cancel").addEventListener("click", () => this.close());
+      this.$("wf-name").addEventListener("input", () => this.reset());
+      ["btn-save", "btn-load"].forEach((id) => {
+        const b = this.$(id);
+        b.disabled = false;
+        b.title = id === "btn-save" ? "把目前的流程存檔" : "依名稱載入已存的流程";
+      });
+    },
+
+    open(mode) {
+      if (Flow.runId) {
+        toast("流程執行中,請等它結束或先停止", true);
+        return;
+      }
+      this.mode = mode;
+      const save = mode === "save";
+      this.$("wf-dialog-title").textContent = save ? "存檔" : "載入流程";
+      this.$("wf-submit").textContent = save ? "存檔" : "載入";
+      const input = this.$("wf-name");
+      input.value = save && this.current ? this.current : "";
+      this.reset();
+      const d = this.$("wf-dialog");
+      if (typeof d.showModal === "function") {
+        if (!d.open) d.showModal();
+      } else {
+        d.setAttribute("open", "");
+      }
+      input.focus();
+      input.select();
+    },
+
+    close() {
+      const d = this.$("wf-dialog");
+      if (typeof d.close === "function" && d.open) d.close();
+      else d.removeAttribute("open");
+    },
+
+    reset() {
+      this.$("wf-error").hidden = true;
+      this.$("wf-error").textContent = "";
+      this.$("wf-confirm").hidden = true;
+      this.$("wf-submit").disabled = false;
+    },
+
+    showError(message) {
+      const e = this.$("wf-error");
+      e.textContent = String(message);
+      e.hidden = false;
+      this.$("wf-confirm").hidden = true;
+    },
+
+    setBusy(on) {
+      this.busy = on;
+      ["wf-overwrite", "wf-name"].forEach((id) => { this.$(id).disabled = on; });
+      // 正在詢問是否覆寫時,「存檔」維持停用,只能按「覆寫」或「取消」(或改名稱)
+      this.$("wf-submit").disabled = on || !this.$("wf-confirm").hidden;
+    },
+
+    setCurrent(name) {
+      this.current = name;
+      this.$("flow-name").textContent = "流程:" + name;
+    },
+
+    async submit(overwrite) {
+      if (this.busy) return;
+      const name = this.$("wf-name").value;   // 不修剪、不正規化,與伺服器規則一致
+      if (!WORKFLOW_NAME_RE.test(name)) {
+        this.showError(WORKFLOW_NAME_HINT);
+        return;
+      }
+      this.setBusy(true);
+      try {
+        if (this.mode === "save") await this.save(name, overwrite === true);
+        else await this.load(name);
+      } finally {
+        this.setBusy(false);
+      }
+    },
+
+    async save(name, overwrite) {
+      const graph = Flow.buildGraph();
+      if (!graph.nodes.length) {
+        this.showError("畫布上沒有節點,無法存檔");
+        return;
+      }
+      const r = await api("PUT", "/api/workflows/" + encodeURIComponent(name), { graph: graph, overwrite: overwrite });
+      if (r.ok) {
+        this.close();
+        this.setCurrent(name);
+        setStatusBar("已存檔:「" + name + "」");
+        toast("已存檔:「" + name + "」");
+        return;
+      }
+      if (r.status === 409) {
+        const message = errorText(r);
+        if (message.indexOf(CASE_COLLISION_MARK) !== -1 || overwrite) {
+          this.showError(message);
+          return;
+        }
+        this.$("wf-error").hidden = true;
+        this.$("wf-confirm").hidden = false;
+        this.$("wf-submit").disabled = true;
+        this.$("wf-overwrite").focus();
+        return;
+      }
+      if (r.status === 400 && r.data && Array.isArray(r.data.errors)) {
+        const onNodes = r.data.errors.some(function (e) { return e && e.node_id !== null && e.node_id !== undefined; });
+        if (onNodes) {
+          this.close();
+          Flow.showValidationErrors(r.data.errors, "未存檔");
+          return;
+        }
+      }
+      this.showError("存檔失敗:" + errorText(r));
+    },
+
+    async load(name) {
+      const r = await api("GET", "/api/workflows/" + encodeURIComponent(name));
+      if (r.ok && r.data && r.data.graph && typeof r.data.graph === "object") {
+        this.close();
+        Flow.loadGraph(r.data.graph);
+        this.setCurrent(name);
+        setStatusBar("已載入:「" + name + "」");
+        return;
+      }
+      if (r.status === 404) {
+        this.showError("找不到這個流程");
+        return;
+      }
+      this.showError("載入失敗:" + errorText(r));
+    },
+  };
+
   // ---------- 啟動 ----------
 
   function start() {
     document.getElementById("open-settings").addEventListener("click", function () {
       location.hash = "#/settings";
+    });
+    // 檔案沒落在畫布上時不讓瀏覽器直接開啟該檔(會離開本頁)
+    document.addEventListener("dragover", function (e) {
+      if (!draggingFiles(e)) return;
+      const canvas = document.getElementById("drawflow");
+      if (canvas && canvas.contains(e.target)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "none";
+    });
+    document.addEventListener("drop", function (e) {
+      if (draggingFiles(e)) e.preventDefault();
     });
     window.addEventListener("hashchange", route);
     route();
