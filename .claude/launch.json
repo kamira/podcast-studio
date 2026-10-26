@@ -4,7 +4,7 @@
     {
       "name": "podcast-studio",
       "runtimeExecutable": "/Users/weiss/.local/bin/uv",
-      "runtimeArgs": ["run", "--script", "podcast_studio.py"],
+      "runtimeArgs": ["run", "--script", "studio_server.py"],
       "port": 7860
     }
   ]

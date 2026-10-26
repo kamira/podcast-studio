@@ -1,0 +1,33 @@
+{
+  "nodes": [
+    {"id": "topic", "kind": "text-input", "params": {"text": ""}, "pos": {"x": 40, "y": 40}},
+    {"id": "write-script", "kind": "write-script", "params": {"style": "輕鬆聊天", "minutes": 2, "notes": ""}, "pos": {"x": 340, "y": 40}},
+    {"id": "taiwanize", "kind": "taiwanize", "params": {}, "pos": {"x": 640, "y": 40}},
+    {"id": "speak", "kind": "speak", "params": {}, "pos": {"x": 940, "y": 40}},
+    {"id": "title", "kind": "text-input", "params": {"text": ""}, "pos": {"x": 40, "y": 380}},
+    {"id": "cover-prompt", "kind": "cover-prompt", "params": {"extra": ""}, "pos": {"x": 940, "y": 380}},
+    {"id": "generate-image", "kind": "generate-image", "params": {}, "pos": {"x": 1240, "y": 380}},
+    {"id": "add-title", "kind": "add-title", "params": {}, "pos": {"x": 1540, "y": 380}},
+    {"id": "make-video", "kind": "make-video", "params": {"subtitles": true}, "pos": {"x": 1840, "y": 40}}
+  ],
+  "edges": [
+    {"from": {"node": "topic", "port": "text"}, "to": {"node": "write-script", "port": "topic"}},
+    {"from": {"node": "write-script", "port": "text"}, "to": {"node": "taiwanize", "port": "text"}},
+    {"from": {"node": "taiwanize", "port": "text"}, "to": {"node": "speak", "port": "text"}},
+    {"from": {"node": "title", "port": "text"}, "to": {"node": "cover-prompt", "port": "title"}},
+    {"from": {"node": "taiwanize", "port": "text"}, "to": {"node": "cover-prompt", "port": "script"}},
+    {"from": {"node": "cover-prompt", "port": "text"}, "to": {"node": "generate-image", "port": "prompt"}},
+    {"from": {"node": "generate-image", "port": "image"}, "to": {"node": "add-title", "port": "image"}},
+    {"from": {"node": "title", "port": "text"}, "to": {"node": "add-title", "port": "title"}},
+    {"from": {"node": "add-title", "port": "image"}, "to": {"node": "make-video", "port": "image"}},
+    {"from": {"node": "speak", "port": "audio"}, "to": {"node": "make-video", "port": "audio"}},
+    {"from": {"node": "taiwanize", "port": "text"}, "to": {"node": "make-video", "port": "script"}}
+  ],
+  "steps": [
+    {"id": "script", "label": "文稿", "nodes": ["topic", "write-script", "taiwanize"]},
+    {"id": "voice", "label": "語音", "nodes": ["speak"]},
+    {"id": "cover", "label": "封面", "nodes": ["title", "cover-prompt", "generate-image", "add-title"]},
+    {"id": "edit", "label": "剪輯", "nodes": [], "note": "時間軸剪輯由 CHG-20261022-04 提供,本範本沒有對應節點"},
+    {"id": "export", "label": "匯出", "nodes": ["make-video"]}
+  ]
+}

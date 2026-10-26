@@ -1,5 +1,7 @@
 # Podcast 工作室 — 設計文件
 
+> **現行規格以 `docs/` 為準**(需求見 `docs/ai-guideline.md`,結構見 `docs/structure/`,變更見 `docs/changes/`)。本文件是導入治理前的人寫設計文件,保留作背景參考;CHG-20261022-01 起網頁改為 `studio_server.py`(FastAPI + 原生 JS,節點畫布),Gradio 版 `podcast_studio.py` 與 `taiwan_ai.py` 的 CLI 已移除,§2~§4、§9、§11 中與舊網頁有關的內容已過時。
+
 > 狀態(2026-10-22):規格已確認(§8、§10.5)。**MCP 伺服器已實作並測試**;Podcast 工作室已寫程式但**暫停,尚未端到端測試**。詳見 §11。
 
 ## 1. 目標
@@ -28,6 +30,8 @@
 
 ## 3. 架構
 
+> 下圖為 Gradio 版(已移除);現行架構見 `docs/structure/logical.md`。
+
 ```
 podcast_studio.py (Gradio 網頁, :7860)
   │
@@ -48,7 +52,7 @@ podcast_studio.py (Gradio 網頁, :7860)
 
 | 檔案 | 說明 |
 |---|---|
-| `podcast_studio.py` | 網頁介面與流程 |
+| ~~`podcast_studio.py`~~ | 網頁介面與流程(已刪除,CHG-20261022-01;改為 `studio_server.py`,見 `docs/structure/directory.md`) |
 | `media.py` | 封面標題、字幕、影片合成(網頁與 MCP 共用) |
 | `local_models_mcp.py` | MCP 伺服器 |
 | `patches/breezyvoice-mac/`、`setup_breezyvoice.sh` | BreezyVoice Mac 調整與重建腳本 |
@@ -107,8 +111,8 @@ uv tool install --python 3.13 mflux --with 'pillow<13'
 ## 9. 啟動方式
 
 ```bash
-uv run --script podcast_studio.py
-# 開啟 http://localhost:7860
+uv run --script studio_server.py
+# 開啟 http://127.0.0.1:7860(只綁本機;設定由網頁右上角 ⚙ 開啟,存在 config/studio.db)
 ```
 
 ## 10. MCP 伺服器
@@ -186,7 +190,7 @@ tool_timeout_sec = 1800
 | MCP 伺服器 `local_models_mcp.py` | ✅ 完成 | stdio client 實測:列出 6 個工具;`list_models` 正確;`taiwanize`「软件/网络/视频」→「軟體/網路/影片」;`reason` 17×23=391 |
 | MCP `generate_image` / `speak` / `make_video` | ⚠️ 未經 MCP 實測 | 底層函式曾在 CLI 測過(生圖 21 秒、語音 7 秒音檔約 1 分鐘);`make_video` 與字幕尚未執行過 |
 | MCP 註冊(Claude Code / Codex) | ✅ 完成 | `claude mcp list` 顯示 ✔ Connected;`codex mcp list` 顯示 enabled(Codex 尚未登入,未實際呼叫) |
-| Podcast 工作室 `podcast_studio.py` | ⏸ 暫停 | 程式已寫(16:9、字幕),未端到端測試 |
+| Podcast 工作室 `podcast_studio.py` | 已刪除 | CHG-20261022-01 改為 `studio_server.py`;驗收狀態以 `docs/acceptance/` 為準 |
 | `media.py`(封面、字幕、影片) | ⏸ 暫停 | 程式已寫,未執行 |
 | `patches/breezyvoice-mac/` + `setup_breezyvoice.sh` | ✅ 完成 | 在新 repo 位置實際重跑成功(venv 未隨搬移複製,已重建) |
 | `.gitignore` | ✅ | 排除 `outputs/`、`tools/`、`__pycache__/`、`.venv/` |
