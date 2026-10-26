@@ -7,7 +7,6 @@
 import contextlib
 import json
 import sys
-import urllib.request
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -107,9 +106,9 @@ def make_video(image_path: str, audio_path: str, script: str = "") -> str:
 @mcp.tool()
 def list_models() -> str:
     """列出各角色使用的本機模型、是否已下載,以及目前載入記憶體的模型。"""
-    with urllib.request.urlopen(f"{tai.OLLAMA}/api/tags", timeout=10) as r:
+    with tai.local_open(f"{tai.OLLAMA}/api/tags", timeout=10) as r:
         have = {m["name"] for m in json.load(r)["models"]}
-    with urllib.request.urlopen(f"{tai.OLLAMA}/api/ps", timeout=10) as r:
+    with tai.local_open(f"{tai.OLLAMA}/api/ps", timeout=10) as r:
         loaded = [m["name"] for m in json.load(r)["models"]]
     roles = _settings()["roles"]  # 同一次呼叫內用同一份設定
     rows = {}

@@ -343,7 +343,7 @@ def _fake_ollama(have, loaded):
 
 
 def test_list_models每次重讀設定且輸出結構不變(mcp_mod, cfg, monkeypatch):
-    monkeypatch.setattr(mcp_mod.urllib.request, "urlopen", _fake_ollama(["qwen3:8b"], ["qwen3:8b"]))
+    monkeypatch.setattr(mcp_mod.tai._LOCAL_OPENER, "open", _fake_ollama(["qwen3:8b"], ["qwen3:8b"]))
     first = json.loads(mcp_mod.list_models())
     assert list(first) == ["roles", "loaded_now", "outputs"]
     assert list(first["roles"]) == ["reason", "taiwan", "reason_heavy", "image", "speech"]

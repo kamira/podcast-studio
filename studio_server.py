@@ -59,6 +59,29 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
   `outputs/`、`outputs/uploads/`、`workflows/` 逐層不得是符號連結、解析後必須等於 repo 內對應目錄;
   不符時上傳與存檔回 500(本文不含路徑)、讀取回 404,且不建立任何東西。
 
+設定 API(T9;模型設定一律只經 `settings.load()` / `save()` / `validate()` / `load_meta()`
+/ `voice_options()`,本檔不直接開啟設定資料庫或一次性匯入來源):
+
+  GET  /api/config               `settings.load()` 的結果(roles、review_seats,讀取失敗時另有
+                                 `_warnings`)加上 `meta`:{"imported_from", "imported_at"}
+                                 (`settings.load_meta()`;只在沒有 `_warnings` 時提供,否則為 {})。
+  PUT  /api/config               本文為設定 JSON(可直接送回 GET 的內容;`_warnings`、`meta` 會被忽略),
+                                 上限 MAX_CONFIG_BODY(串流累計,超過 413)。流程:
+                                 本文不是 JSON 物件 → 422;`settings.validate(cfg, None)` 有錯 → 422
+                                 (結構、否決席 glm4、Codex 只限否決席、暫停的 27B、聲線路徑);
+                                 向 Ollama `/api/tags` 取已下載清單,連不上 → 503(不儲存,不會在
+                                 無法確認時接受未知模型名稱);`settings.validate(cfg, 清單)` 有錯 → 422;
+                                 合格才呼叫 `settings.save(cfg)`,失敗 → 500。
+                                 成功回 200 {"saved": true, "config": 同 GET}。
+  GET  /api/models               {"ollama": {"reachable", "models": [已下載模型名稱], "error"?},
+                                  "mflux": {"installed"}, "breezyvoice": {"installed"},
+                                  "voices": [可選聲線檔,repo 相對路徑(settings.voice_options())]}
+                                 Ollama 連不上時 reachable=false、models=[],仍回 200。
+  Ollama 查詢只打 `taiwan_ai.OLLAMA` 的 `/api/tags`(經 `taiwan_ai.local_open()`:只限本機主機、
+  不經代理、不跟隨重新導向),逾時 OLLAMA_TIMEOUT 秒、不重試,
+  在執行緒池中執行,不阻塞事件迴圈;回應上限 MAX_TAGS_BYTES。
+  所有錯誤訊息與 `_warnings` 一律經 `scrub()`,不送本機絕對路徑。
+
 事件內容與 executor.py 檔頭相同,另有兩點:
   - 字串一律經 `scrub()`:repo 根目錄換成 `<repo>`、家目錄換成 `~`,不把本機絕對路徑送到瀏覽器。
   - 節點輸出值若是 repo 內的檔案路徑,改送相對於 repo 的路徑(例 `outputs/cover-….png`);
@@ -96,9 +119,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse  # noqa: E402
+from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 import executor  # noqa: E402
 import nodes  # noqa: E402
+import settings  # noqa: E402
+import taiwan_ai  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -121,6 +147,10 @@ KEEP_RUNS = 20               # 保留最近幾次 run 的事件,供 SSE 重連
 SSE_POLL_SECONDS = 0.05
 SSE_KEEPALIVE_SECONDS = 15.0
 MAX_UPLOAD = 200 * 1024 * 1024   # 上傳上限(CHG 代決事項)
+MAX_CONFIG_BODY = 256 * 1024     # PUT /api/config 本文上限(逐字稿 20000 字以 \uXXXX 跳脫仍在範圍內)
+OLLAMA_TIMEOUT = 3               # 秒;查 /api/tags 不重試
+MAX_TAGS_BYTES = 4 * 1024 * 1024  # /api/tags 回應上限
+CONFIG_EXTRA_KEYS = ("_warnings", "meta")   # GET 回應附加、PUT 時忽略的鍵
 MAX_UPLOAD_NAME = 255
 # 副檔名 → 埠型別;與 file-input 節點接受的副檔名一致
 UPLOAD_KINDS = {ext: kind for kind, exts in nodes.FILE_KINDS.items() for ext in exts}
@@ -344,15 +374,17 @@ def _bad(message: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"errors": [{"node_id": None, "port": None, "message": message}]}, status_code=status)
 
 
-async def _read_body(request: Request) -> bytes | None:
-    """串流讀取本文;超過 MAX_BODY 回 None。"""
+async def _read_body(request: Request, limit: int | None = None) -> bytes | None:
+    """串流讀取本文;超過 limit(預設 MAX_BODY,呼叫時才讀取)回 None。"""
+    if limit is None:
+        limit = MAX_BODY
     length = request.headers.get("content-length")
-    if length is not None and length.isdigit() and int(length) > MAX_BODY:
+    if length is not None and length.isdigit() and int(length) > limit:
         return None
     buf = bytearray()
     async for chunk in request.stream():
         buf.extend(chunk)
-        if len(buf) > MAX_BODY:
+        if len(buf) > limit:
             return None
     return bytes(buf)
 
@@ -510,11 +542,80 @@ def _err(message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
 
+# ---------- 設定 API(T9) ----------
+
+class OllamaUnavailable(Exception):
+    """無法取得 Ollama 已下載模型清單(連不上、逾時或回應格式不對)。"""
+
+
+OLLAMA_DOWN = "無法連線到本機 Ollama(localhost:11434),無法確認模型是否已下載"
+
+
+def _good_model_name(v) -> bool:
+    return (isinstance(v, str) and v.strip() != "" and len(v) <= settings.MAX_NAME_LEN
+            and not any(ord(c) < 32 for c in v))
+
+
+def fetch_ollama_tags() -> list[str]:
+    """查本機 Ollama `/api/tags`,回傳已下載的模型名稱;逾時 OLLAMA_TIMEOUT 秒、不重試。
+
+    連不上、逾時、回應過大或格式不對一律丟 OllamaUnavailable。
+    """
+    try:
+        with taiwan_ai.local_open(f"{taiwan_ai.OLLAMA}/api/tags", timeout=OLLAMA_TIMEOUT) as r:
+            data = r.read(MAX_TAGS_BYTES + 1)
+    except (OSError, ValueError) as e:   # URLError、逾時、連線被拒、重新導向(HTTPError)皆為 OSError;非本機主機為 ValueError
+        raise OllamaUnavailable(type(e).__name__) from None
+    if len(data) > MAX_TAGS_BYTES:
+        raise OllamaUnavailable("回應過大")
+    try:
+        models = json.loads(data.decode("utf-8"))["models"]
+    except (UnicodeDecodeError, ValueError, RecursionError, KeyError, TypeError):
+        raise OllamaUnavailable("回應格式不對") from None
+    if not isinstance(models, list):
+        raise OllamaUnavailable("回應格式不對")
+    return [m["name"] for m in models if isinstance(m, dict) and _good_model_name(m.get("name"))]
+
+
+def _tags(fetch: Callable[[], list]) -> list[str]:
+    """呼叫查詢函式並整理清單(去重、排序、濾掉不合格名稱);任何失敗一律轉成 OllamaUnavailable。"""
+    try:
+        names = fetch()
+    except OllamaUnavailable:
+        raise
+    except Exception as e:
+        print(f"studio_server:查詢 Ollama 模型清單失敗({type(e).__name__})", file=sys.stderr)
+        raise OllamaUnavailable(type(e).__name__) from None
+    if not isinstance(names, (list, tuple, set, frozenset)):
+        raise OllamaUnavailable("回應格式不對")
+    return sorted({n for n in names if _good_model_name(n)})
+
+
+def _config_view() -> dict:
+    """GET /api/config 的回應:settings.load() + meta 提示;字串一律 scrub。"""
+    cfg = settings.load()
+    out = {k: v for k, v in cfg.items() if k != "meta"}
+    out["meta"] = {} if cfg.get("_warnings") else settings.load_meta()
+    return _scrub_obj(out)
+
+
+def _installed_tools() -> dict:
+    mflux = Path(taiwan_ai.MFLUX)
+    return {
+        "mflux": {"installed": mflux.is_file() and os.access(mflux, os.X_OK)},
+        "breezyvoice": {"installed": (Path(taiwan_ai.BREEZY) / ".venv").is_dir()},
+    }
+
+
 def create_app(runner: Callable | None = None, token: str | None = None,
-               static_dir: Path | None = None, root: Path | None = None) -> FastAPI:
+               static_dir: Path | None = None, root: Path | None = None,
+               ollama_tags: Callable[[], list] | None = None) -> FastAPI:
     """建立 app。runner 預設為 executor.run(測試可換替身);token 預設每次隨機產生;
-    root 為 repo 根目錄(`outputs/`、`workflows/` 所在處),預設本檔所在目錄,測試可指到暫存目錄。"""
+    root 為 repo 根目錄(`outputs/`、`workflows/` 所在處),預設本檔所在目錄,測試可指到暫存目錄;
+    ollama_tags 為取得 Ollama 已下載模型清單的函式(預設 fetch_ollama_tags,測試可換替身;
+    失敗時應丟 OllamaUnavailable)。設定資料庫的位置由 settings.ROOT 決定。"""
     token = token or secrets.token_urlsafe(32)
+    tags_fn = ollama_tags or fetch_ollama_tags
     static_dir = Path(static_dir) if static_dir is not None else STATIC_DIR
     root = Path(root) if root is not None else ROOT
     run_fn = runner or executor.run
@@ -715,6 +816,55 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         finally:
             tmp.unlink(missing_ok=True)
         return {"name": name, "saved": True}
+
+    @app.get("/api/config")
+    def api_config_get():
+        return JSONResponse(_config_view(), headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/config")
+    async def api_config_put(request: Request):
+        body = await _read_body(request, MAX_CONFIG_BODY)
+        if body is None:
+            return _err(f"請求內容超過 {MAX_CONFIG_BODY // 1024} KB", 413)
+        try:
+            cfg = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return JSONResponse({"errors": ["請求內容不是合法的 JSON"]}, status_code=422)
+        if not isinstance(cfg, dict):
+            return JSONResponse({"errors": ["設定必須是 JSON 物件"]}, status_code=422)
+        cfg = {k: v for k, v in cfg.items() if k not in CONFIG_EXTRA_KEYS}
+        errors = settings.validate(cfg, None)
+        if errors:
+            return JSONResponse({"errors": _scrub_obj(errors)}, status_code=422)
+        try:
+            available = await run_in_threadpool(_tags, tags_fn)
+        except OllamaUnavailable:
+            return _err(OLLAMA_DOWN + ";設定未儲存,請確認 Ollama 已啟動後再試", 503)
+        errors = settings.validate(cfg, available)
+        if errors:
+            return JSONResponse({"errors": _scrub_obj(errors)}, status_code=422)
+        try:
+            await run_in_threadpool(settings.save, cfg)
+        except ValueError as e:   # 路徑不安全、資料庫不是 SQLite 或版本不明:不寫入
+            msgs = e.args[0] if e.args and isinstance(e.args[0], list) else []
+            print("studio_server:設定儲存被拒(ValueError)", file=sys.stderr)
+            return JSONResponse({"error": "設定儲存失敗",
+                                 "errors": _scrub_obj([str(m) for m in msgs])}, status_code=500)
+        except Exception as e:
+            print(f"studio_server:設定儲存失敗({type(e).__name__})", file=sys.stderr)
+            return _err("設定儲存失敗", 500)
+        view = await run_in_threadpool(_config_view)
+        return JSONResponse({"saved": True, "config": view}, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/models")
+    def api_models():
+        try:
+            ollama = {"reachable": True, "models": _tags(tags_fn)}
+        except OllamaUnavailable:
+            ollama = {"reachable": False, "models": [], "error": OLLAMA_DOWN}
+        body = {"ollama": ollama, **_installed_tools(),
+                "voices": settings.voice_options(settings.MAX_VOICE_OPTIONS)}
+        return JSONResponse(_scrub_obj(body), headers={"Cache-Control": "no-store"})
 
     app.add_middleware(SecurityMiddleware, token=token)
     return app
