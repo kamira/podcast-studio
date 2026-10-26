@@ -354,3 +354,20 @@ def test_list_models每次重讀設定且輸出結構不變(mcp_mod, cfg, monkey
     second = json.loads(mcp_mod.list_models())
     assert second["roles"]["reason"] == {"model": "qwen3:8b", "downloaded": True}
     assert second["loaded_now"] == ["qwen3:8b"]
+
+
+def test_list_models的image列回報設定中的生圖模型(mcp_mod, cfg, monkeypatch):
+    """CHG-20261026-01 T2:image 列的 model 改為設定值,鍵與順序不變;一次呼叫只讀一次設定。"""
+    monkeypatch.setattr(mcp_mod.tai._LOCAL_OPENER, "open", _fake_ollama([], []))
+    first = json.loads(mcp_mod.list_models())
+    assert list(first["roles"]["image"]) == ["model", "tool", "installed"]
+    assert first["roles"]["image"]["model"] == settings.DEFAULTS["roles"]["image"]["model"]
+    assert first["roles"]["image"]["model"] == "mflux-community/flux-1-schnell-mflux-q4"
+    assert first["roles"]["image"]["tool"] == str(mcp_mod.tai.MFLUX)
+    cfg["data"]["roles"]["image"]["model"] = "test/model"
+    before = cfg["calls"]
+    second = json.loads(mcp_mod.list_models())
+    assert cfg["calls"] - before == 1
+    assert second["roles"]["image"] == {**first["roles"]["image"], "model": "test/model"}
+    assert list(second["roles"]) == ["reason", "taiwan", "reason_heavy", "image", "speech"]
+    assert list(second) == ["roles", "loaded_now", "outputs"]
