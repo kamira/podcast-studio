@@ -33,13 +33,19 @@ PRAGMA;只有版本已知、或新建(沒有任何表)的資料庫,才以讀寫�
 建立(權限 0600),SQLite 本身不會建立資料庫檔(`mode=rw`)。SQL 一律參數化,表名與欄名
 寫死在本檔。
 
+初始化鎖(依 PR #37 審議新增):資料庫不存在或還沒有任何表時,建立檔案、第一次匯入或存入、
+失敗時清理,一律在跨行程鎖 `config/.studio.db.lock`(`fcntl.flock(LOCK_EX)`,不入 git、不刪除)
+內進行;版本已知的既有資料庫一般讀寫不取這把鎖。
+
 安全影響 (c) 跨模組信任:模型名稱必須在 Ollama 清單內;聲線檔限
 `tools/BreezyVoice/data/` 與 `outputs/uploads/` 之下;否決席不得為 glm4(DIR-1 第 6 條)。
 安全影響 (e):資料庫讀出的設定一律再經 `validate(cfg, None)`,不合法整份回預設值。
 """
 from __future__ import annotations
 
+import contextlib
 import copy
+import fcntl
 import json
 import os
 import sqlite3
@@ -279,6 +285,11 @@ def _sidecars(db: Path) -> tuple[Path, Path]:
     return db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")
 
 
+def _lock_file(db: Path) -> Path:
+    """初始化鎖檔 `config/.studio.db.lock`(依 PR #37 審議新增;只用來上鎖,不讀寫內容、不刪除)。"""
+    return db.with_name("." + db.name + ".lock")
+
+
 def _fallback(warning: str) -> dict:
     print("[settings] " + warning + "(" + str(_db_file()) + ")", file=sys.stderr)
     cfg = copy.deepcopy(DEFAULTS)
@@ -305,14 +316,16 @@ def _config_path_error() -> str | None:
 
 
 def _db_path_error() -> str | None:
-    """資料庫必須是 repo 內的 config/studio.db;config/、studio.db、-wal、-shm 逐層都不得是符號連結。
+    """資料庫必須是 repo 內的 config/studio.db;config/、studio.db、-wal、-shm 與初始化鎖檔
+    `.studio.db.lock` 逐層都不得是符號連結。
 
     不存在的層不算錯(save 會在檢查後於 repo 內建立 config/)。回傳錯誤訊息或 None。
     """
     root = ROOT.resolve()
     expected = root / "config" / "studio.db"
     db = _db_file()
-    layers = (root / "config", expected, *_sidecars(expected), db.parent, db, *_sidecars(db))
+    layers = (root / "config", expected, *_sidecars(expected), _lock_file(expected),
+              db.parent, db, *_sidecars(db), _lock_file(db))
     for layer in layers:
         if layer.is_symlink():
             try:
@@ -426,13 +439,13 @@ def _same_file(db: Path, ident: tuple[int, int]) -> bool:
 def _discard(db: Path, ident: tuple[int, int]) -> None:
     """移除本次呼叫建立、但交易失敗的資料庫檔與其 -wal、-shm(下次 load() 再試)。
 
-    只在「路徑上的檔案仍是本次建立的那一個(st_dev、st_ino 相同),且仍沒有任何資料表
-    (沒有 meta、沒有匯入的資料)」時才刪;另一行程已在同一個檔完成匯入、檔案已被換掉,
-    或無法確認時一律保留(依 PR #36 審議修正)。
+    一律在 `_init_lock()` 內呼叫(依 PR #37 審議修正):建立資料庫檔、第一次匯入或存入、
+    失敗時清理,全部在同一把跨行程初始化鎖內進行,其他行程不可能在清理期間建立新的
+    資料庫檔或對這個空檔匯入,刪除 -wal、-shm 因此不會刪到別人的檔。
 
-    確認與刪除在同一個 `BEGIN IMMEDIATE` 寫入鎖內進行,期間其他行程無法提交匯入。
-    殘餘情況:另一行程若已開啟連線、但尚未開始交易,刪除後它會匯入到已刪除的檔,
-    接著 `_load_known()` 開不到資料庫而回預設值並帶警告;下一次 `load()` 會重新匯入。
+    另外仍核對:路徑上的檔案是本次建立的那一個(st_dev、st_ino 相同),且在
+    `BEGIN IMMEDIATE` 內確認仍沒有任何資料表(沒有 meta、沒有匯入的資料)才刪;
+    無法確認時一律保留(依 PR #36 審議修正)。
     """
     if not _same_file(db, ident):
         return
@@ -454,13 +467,43 @@ def _discard(db: Path, ident: tuple[int, int]) -> None:
         pass
     finally:
         con.close()
-    if not removed or db.exists():
-        return  # 沒刪,或已有其他行程重新建立:不動 -wal、-shm
+    if not removed:
+        return
     for p in _sidecars(db):
         try:
             p.unlink()
         except FileNotFoundError:
             pass
+
+
+@contextlib.contextmanager
+def _init_lock():
+    """跨行程初始化鎖(`fcntl.flock(LOCK_EX)` 鎖 `config/.studio.db.lock`)。
+
+    「資料庫不存在或還沒有任何表」時的建立、第一次匯入或存入、失敗時清理,一律在這把鎖內;
+    既有資料庫(版本已知)的一般讀寫不取這把鎖,照舊靠 WAL 與 busy_timeout。
+    開鎖檔前做與資料庫相同的路徑檢查(不經符號連結、必須在 repo 內),並以 O_NOFOLLOW 開啟;
+    取不到鎖檔時丟 _DbError(只轉換取鎖階段的錯誤,with 區塊內的例外原樣往外丟)。
+    """
+    msg = _db_path_error()
+    if msg:
+        raise _DbError(WARN_UNSAFE_PATH)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(_lock_file(_db_file()), flags, 0o600)
+    except OSError:
+        raise _DbError(WARN_UNSAFE_PATH if _db_path_error() else WARN_DB_UNREADABLE) from None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            raise _DbError(WARN_DB_UNREADABLE) from None
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _role_rows(cfg: dict) -> list[tuple[str, str]]:
@@ -576,46 +619,59 @@ def _import_source() -> tuple[dict | None, str | None]:
     return cfg, None
 
 
+def _create_or_import(db: Path, body, imported_ok: bool):
+    """只在 _init_lock() 內呼叫:重新判斷資料庫狀態,需要時建立檔案並以 body 在單一交易內寫入。
+
+    回傳 True 代表已寫入;imported_ok 為 True 且另一行程已完成匯入(版本已知)時回 False,
+    不再寫入。非 SQLite、損壞或版本不明丟 _DbError。寫入失敗時清掉本次建立的檔再往外丟。
+    """
+    created = None
+    if db.exists():
+        if _probe(db) == _KNOWN and imported_ok:
+            return False
+    else:
+        created = _create_db_file(db)
+        if created is None:  # 鎖內不應發生(建立一律在鎖內),保守視為無法使用
+            raise _DbError(WARN_DB_UNREADABLE)
+    try:
+        con = _open_rw(db)
+        try:
+            _immediate(con, body)
+        finally:
+            con.close()
+    except BaseException:
+        if created is not None:
+            _discard(db, created)
+        raise
+    return True
+
+
 def load() -> dict:
     """讀設定資料庫;資料庫不存在時視 config/models.json 決定回預設值或匯入一次。"""
     if _db_path_error():
         return _fallback(WARN_UNSAFE_PATH)
     db = _db_file()
-    for _ in range(2):
-        if db.exists():
-            try:
-                state = _probe(db)
-            except _DbError as e:
-                return _fallback(e.args[0])
-            if state == _KNOWN:
-                return _load_known(db)
-        # 資料庫不存在,或存在但沒有任何表(另一行程剛建立、尚未匯入)
-        src, warning = _import_source()
-        if warning:
-            return _fallback(warning)
-        if src is None:
-            return copy.deepcopy(DEFAULTS)  # 不建立資料庫
-        created = None
-        if not db.exists():
-            created = _create_db_file(db)
-            if created is None:
-                continue  # 另一行程剛建立,重新判斷
+    if db.exists():
         try:
-            con = _open_rw(db)
-            try:
-                _immediate(con, _import_body(src))
-            finally:
-                con.close()
+            state = _probe(db)
         except _DbError as e:
-            if created is not None:
-                _discard(db, created)
             return _fallback(e.args[0])
-        except Exception:
-            if created is not None:
-                _discard(db, created)
-            return _fallback(WARN_DB_UNREADABLE)
-        return _load_known(db)
-    return _fallback(WARN_DB_UNREADABLE)
+        if state == _KNOWN:
+            return _load_known(db)
+    # 資料庫不存在,或存在但沒有任何表(另一行程正在建立或曾中斷)
+    src, warning = _import_source()
+    if warning:
+        return _fallback(warning)
+    if src is None:
+        return copy.deepcopy(DEFAULTS)  # 不建立資料庫
+    try:
+        with _init_lock():
+            _create_or_import(db, _import_body(src), imported_ok=True)
+    except _DbError as e:
+        return _fallback(e.args[0])
+    except Exception:
+        return _fallback(WARN_DB_UNREADABLE)
+    return _load_known(db)
 
 
 def save(cfg) -> None:
@@ -634,30 +690,17 @@ def save(cfg) -> None:
     msg = _db_path_error()
     if msg:
         raise ValueError([msg])
-    for _ in range(2):
-        created = None
-        if db.exists():
-            try:
-                _probe(db)  # 非 SQLite、損壞或版本不明 → 不寫入、不覆寫、不重建
-            except _DbError as e:
-                raise ValueError([e.args[0]]) from None
-        else:
-            created = _create_db_file(db)
-            if created is None:
-                continue  # 另一行程剛建立,重新判斷
-        try:
+    try:
+        if db.exists() and _probe(db) == _KNOWN:
+            # 版本已知的既有資料庫:一般寫入,不取初始化鎖
             con = _open_rw(db)
             try:
                 _immediate(con, _save_body(cfg))
             finally:
                 con.close()
-        except _DbError as e:
-            if created is not None:
-                _discard(db, created)
-            raise ValueError([e.args[0]]) from None
-        except BaseException:
-            if created is not None:
-                _discard(db, created)
-            raise
-        return
-    raise ValueError([WARN_DB_UNREADABLE])
+            return
+        # 資料庫不存在或還沒有任何表:建立與第一次存入在初始化鎖內進行
+        with _init_lock():
+            _create_or_import(db, _save_body(cfg), imported_ok=False)
+    except _DbError as e:  # 非 SQLite、損壞或版本不明 → 不寫入、不覆寫、不重建
+        raise ValueError([e.args[0]]) from None
