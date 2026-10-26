@@ -63,6 +63,7 @@ podcast-studio/
 ├── tests/
 │   ├── conftest.py            # 把 repo 根目錄放進 sys.path
 │   ├── test_*.py              # 產品程式的 pytest(CHG-20261022-01)
+│   ├── ui_check.py            # UI 互動檢查(Playwright 無頭 Chromium;不屬 pytest,見下表)
 │   └── ci/                    # scripts/ 的單元測試(unittest)
 ├── .ai-sdlc/                  # vendored ai-sdlc v1.66.0(不修改內容)
 │   ├── README.md              # 版本、來源、MIT 授權、更新方式
@@ -101,6 +102,7 @@ podcast-studio/
 | `scripts/check.sh` | 產品測試載具(CHG-20261022-01 T1):以 uv 暫時環境帶 pytest、fastapi 等依賴執行 `pytest -q tests/` | 可帶測試路徑或 pytest 參數;CI `program` job 與 `scripts/deploy_local.sh` 都會執行 | 〔觀察〕 |
 | `scripts/deploy_local.sh` | 本機部署:在乾淨的 main 上 `pull --ff-only`,重啟 7860 網頁伺服器(`uv run --script studio_server.py`),驗證只綁本機 | 只寫入 `outputs/` 下的 pidfile 與 log | 〔觀察〕 |
 | `tests/`(根層) | 產品程式的 pytest:設定、節點、執行器、重型鎖、伺服器核心 / 檔案 / 設定 API、前端靜態檢查、預設範本 | 以 `./scripts/check.sh` 執行;模型呼叫一律以替身取代;ADP-6 的結案以 ACC 為準 | 〔觀察〕 |
+| `tests/ui_check.py` | UI 互動檢查(CHG-20261022-01 T14):PEP 723 script(playwright 1.64.1),本行程內以替身執行器與替身 Ollama 清單啟動 `create_app()`(隨機空閒埠,設定資料庫與 `outputs/`、`workflows/` 放暫存目錄),以無頭 Chromium 操作 ⚙ → 設定 › 進階流程、拖節點、連線、拖檔、釘住、設定存檔;截圖寫 `outputs/ui_check/` | `uv run --script tests/ui_check.py`;需先安裝 Chromium(前置 P2);檔名不是 `test_*.py`,`./scripts/check.sh` 與 CI 不執行 | 〔觀察〕 |
 | `tests/ci/` | `scripts/` 的單元測試 | `python3 -m unittest discover -s tests/ci -v`(`./scripts/check.sh` 也會一併收集) | 〔觀察〕 |
 | `.ai-sdlc/` | vendored ai-sdlc v1.66.0:`skills/ai-sdlc-autopilot/{scripts,assets}`、`SHA256SUMS`、`README.md` | 內容一律不修改;版本與來源記在 `.ai-sdlc/README.md` | 〔觀察〕 |
 | `.github/workflows/ci.yml` | GitHub Actions CI:`document`、`chg`、`program`、`review` 四個 job | main ruleset 要求四項全過 | 〔觀察〕 |
