@@ -1,4 +1,7 @@
-"""影片合成相關測試(CHG-20261026-01 T4):`media.wav_seconds()` 以 `struct` 自行解析 RIFF/WAVE。
+"""影片合成相關測試(CHG-20261026-01 T4、T5)。
+
+T4:`media.wav_seconds()` 以 `struct` 自行解析 RIFF/WAVE。
+T5:`media._run_ffmpeg()` 對 WAV 加 `-t <秒數>`、影格率 `-r 10`,以真的 ffmpeg(imageio-ffmpeg 內建)量軌長。
 
 測試檔一律在暫存目錄以手寫位元組產生(PCM 一份以標準庫 `wave` 產生),不讀 repo 外的真音檔,CI 可跑。
 """
@@ -7,12 +10,16 @@ from __future__ import annotations
 import os
 import re
 import struct
+import subprocess
 import wave
 from pathlib import Path
 
+import imageio_ffmpeg
 import pytest
+from PIL import Image
 
 import media
+import taiwan_ai as tai
 
 ROOT = Path(__file__).resolve().parents[1]
 _HAN = re.compile(r"[一-鿿]")
@@ -221,3 +228,129 @@ def test_odd_data_chunk_with_pad(tmp_path):
     fmt = _chunk(b"fmt ", _fmt(1, 1, 8000, 8))
     p = _write(tmp_path, "x.wav", _riff(fmt, _chunk(b"data", b"\x80" * 8001)))
     assert abs(media.wav_seconds(p) - 8001 / 8000) <= 0.001
+
+
+# ── T5:影片長度等於聲音長度(真的 ffmpeg,imageio-ffmpeg 內建) ─────────
+#
+# 17.3 秒的 float WAV:3 秒音檔重現不出「影片比聲音長」的缺陷(見 CHG-20261026-01 決策表),不得改用短音檔。
+
+LONG_SECONDS = 17.3
+SCRIPT3 = "夜市的燈亮了。攤販開始吆喝。我們一起去吃點東西吧。"
+_TIME = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+_SRT_END = re.compile(r"--> (\d+):(\d+):(\d+),(\d+)")
+
+
+@pytest.fixture
+def out(tmp_path, monkeypatch):
+    d = tmp_path / "outputs"
+    monkeypatch.setattr(tai, "OUT", d)
+    return d
+
+
+@pytest.fixture
+def media_in(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    img = src / "cover.png"
+    Image.new("RGB", (1360, 768), (40, 90, 160)).save(img)
+    wav = _float_wav(src, LONG_SECONDS, 22050, name="speech.wav")
+    return img, wav
+
+
+def _track_seconds(mp4, sel):
+    """以 `ffmpeg -i <mp4> -map <sel> -f null -` 解碼,取最後一個 time= 為該軌長度。"""
+    r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(mp4), "-map", sel,
+                        "-f", "null", "-"], capture_output=True, text=True, check=True)
+    h, m, s = _TIME.findall(r.stderr)[-1]
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def _probe(mp4):
+    r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(mp4)],
+                       capture_output=True, text=True)
+    return r.stderr
+
+
+def test_make_video不帶字幕_影片軌與音軌長度差在0點1秒內(out, media_in):
+    img, wav = media_in
+    p = media.make_video(img, wav)
+    v, a = _track_seconds(p, "0:v"), _track_seconds(p, "0:a")
+    assert abs(v - a) <= 0.1, f"影片軌 {v} 秒、音軌 {a} 秒"
+    assert abs(a - LONG_SECONDS) <= 0.1
+
+
+def test_make_video帶字幕_長度對齊且含一條mov_text字幕軌(out, media_in):
+    img, wav = media_in
+    p = media.make_video(img, wav, SCRIPT3)
+    v, a = _track_seconds(p, "0:v"), _track_seconds(p, "0:a")
+    assert abs(v - a) <= 0.1, f"影片軌 {v} 秒、音軌 {a} 秒"
+    info = _probe(p)
+    assert len(re.findall(r"Stream #\S+.*Subtitle: mov_text", info)) == 1, info
+    assert len(re.findall(r"Stream #\S+.*Subtitle:", info)) == 1, info
+    srt = p.with_suffix(".srt").read_text(encoding="utf-8")
+    h, m, s, ms = _SRT_END.findall(srt)[-1]
+    end = int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+    assert abs(end - LONG_SECONDS) <= 0.5
+
+
+def _capture_ffmpeg(monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        Path(cmd[-1]).write_bytes(b"MP4")
+    monkeypatch.setattr(media.subprocess, "run", fake_run)
+    return seen
+
+
+def test_wav時argv含t與r10且保留shortest(out, media_in, monkeypatch):
+    img, wav = media_in
+    seen = _capture_ffmpeg(monkeypatch)
+    p = media.make_video(img, wav)
+    cmd = seen[0]
+    i = cmd.index("-t")
+    assert cmd[i + 1] == "17.300"
+    assert cmd[-1] == str(p) and i == len(cmd) - 3  # -t <秒數> 緊接在輸出檔名前
+    assert cmd[cmd.index("-r") + 1] == "10" and cmd.count("-r") == 1
+    assert "-shortest" in cmd and "2" not in cmd
+
+
+def test_wav帶字幕時argv同樣含t與r10(out, media_in, monkeypatch):
+    img, wav = media_in
+    seen = _capture_ffmpeg(monkeypatch)
+    media.make_video(img, wav, SCRIPT3)
+    cmd = seen[0]
+    assert cmd[cmd.index("-t") + 1] == "17.300"
+    assert cmd[cmd.index("-r") + 1] == "10" and "-shortest" in cmd
+    assert cmd[cmd.index("-c:s") + 1] == "mov_text"
+
+
+def test_非riff的mp3不帶字幕時不加t_仍為r10(out, tmp_path, monkeypatch):
+    mp3 = _write(tmp_path, "a.mp3", b"ID3\x04" + b"\x00" * 60)
+    seen = _capture_ffmpeg(monkeypatch)
+    media.make_video(tmp_path / "c.png", mp3)
+    cmd = seen[0]
+    assert "-t" not in cmd
+    assert cmd[cmd.index("-r") + 1] == "10" and "-shortest" in cmd
+
+
+def test_以檔頭判斷wav_不看副檔名(out, tmp_path, monkeypatch):
+    # 內容是 RIFF/WAVE、副檔名是 .mp3 → 仍加 -t;內容不是 RIFF、副檔名是 .wav → 不加
+    disguised = _float_wav(tmp_path, 2.0, 8000, name="其實是wav.mp3")
+    fake_wav = _write(tmp_path, "其實不是.wav", b"ID3\x04" + b"\x00" * 60)
+    seen = _capture_ffmpeg(monkeypatch)
+    media.make_video(tmp_path / "c.png", disguised)
+    media.make_video(tmp_path / "c.png", fake_wav)
+    assert seen[0][seen[0].index("-t") + 1] == "2.000"
+    assert "-t" not in seen[1]
+
+
+def test_其餘ffmpeg參數與順序不變(out, media_in, monkeypatch):
+    img, wav = media_in
+    seen = _capture_ffmpeg(monkeypatch)
+    p = media.make_video(img, wav)
+    vf = (f"scale={media.VIDEO_W}:{media.VIDEO_H}:force_original_aspect_ratio=decrease,"
+          f"pad={media.VIDEO_W}:{media.VIDEO_H}:(ow-iw)/2:(oh-ih)/2")
+    assert seen[0] == [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loop", "1", "-i", str(img), "-i", str(wav),
+                       "-vf", vf, "-c:v", "libx264", "-tune", "stillimage", "-r", "10", "-pix_fmt", "yuv420p",
+                       "-c:a", "aac", "-b:a", "192k", "-shortest", "-t", "17.300", str(p)]

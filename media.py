@@ -204,14 +204,31 @@ def make_video(image_path, audio_path, script=""):
     return path
 
 
+def _is_wav(path):
+    """以檔頭前 12 位元組判斷是否為 RIFF/WAVE(不看副檔名);讀不到檔案視為不是 WAV。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+    except OSError:
+        return False
+    return len(head) == 12 and head[:4] == b"RIFF" and head[8:12] == b"WAVE"
+
+
 def _run_ffmpeg(image_path, audio_path, script, path, srt):
+    # `-loop 1` 的靜止圖加 `-shortest` 不會在聲音結束時截止(ACC-20261026-01:17 秒的聲音產出約 50 秒的影片),
+    # 所以 WAV 另以 `-t <秒數>` 截止;影格率 10(間隔 0.1 秒)讓截止誤差不超過 0.1 秒(CHG-20261026-01 T5)。
+    # 非 WAV(MP3 / M4A)讀不到長度,沿用只有 `-shortest` 的做法(ADP-7)。
+    seconds = wav_seconds(audio_path) if _is_wav(audio_path) else None
     cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loop", "1", "-i", str(image_path), "-i", str(audio_path)]
     if srt is not None:
-        make_srt(script, wav_seconds(audio_path), srt)
+        make_srt(script, seconds if seconds is not None else wav_seconds(audio_path), srt)
         cmd += ["-i", str(srt), "-map", "0:v", "-map", "1:a", "-map", "2:s",
                 "-c:s", "mov_text", "-metadata:s:s:0", "language=chi"]
     cmd += ["-vf", f"scale={VIDEO_W}:{VIDEO_H}:force_original_aspect_ratio=decrease,"
                    f"pad={VIDEO_W}:{VIDEO_H}:(ow-iw)/2:(oh-ih)/2",
-            "-c:v", "libx264", "-tune", "stillimage", "-r", "2", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-shortest", str(path)]
+            "-c:v", "libx264", "-tune", "stillimage", "-r", "10", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-shortest"]
+    if seconds is not None:
+        cmd += ["-t", f"{seconds:.3f}"]  # 本機計算的秒數,不是使用者字串
+    cmd.append(str(path))
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
