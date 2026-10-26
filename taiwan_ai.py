@@ -14,6 +14,8 @@
   model(role) -> str      每次呼叫重讀設定,回傳該角色的模型名稱;未知角色丟 KeyError
   chat(role, prompt, system="", think=None) -> str
   unload_llms()           卸載 Ollama `/api/ps` 列出的全部模型(ADP-1)
+  local_open(req, timeout) 對本機 Ollama 送請求:只限 localhost/127.0.0.1/::1、不經代理、
+                          不跟隨重新導向(依 PR #42 審議修正);chat、unload_llms 與網頁、MCP 一律經此
   stamp() -> str          輸出檔名用時間戳:YYYYMMDD-HHMMSS-毫秒-4 碼隨機(ADP-8)
   reserve(prefix, suffix, also=()) -> Path
                           在 OUT 下排他建立 `<prefix>-<stamp()><suffix>` 空佔位檔,撞名重取;
@@ -29,6 +31,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -46,6 +50,30 @@ BREEZY = ROOT / "tools/BreezyVoice"
 VOICE_WAV = BREEZY / "data/example.wav"
 VOICE_TEXT = ("在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。"
               "只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。")
+
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """遇到任何 3xx 重新導向一律丟錯,不跟隨(依 PR #42 審議修正)。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "本機 Ollama 回應重新導向,不跟隨", headers, fp)
+
+
+# 只連本機 Ollama 的 opener:ProxyHandler({}) 不套用任何代理(環境變數與系統代理皆不用),
+# _NoRedirect 不跟隨重新導向。所有對 Ollama 的請求一律經 local_open(),不直接呼叫 urlopen。
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def local_open(req, timeout):
+    """以 _LOCAL_OPENER 送出請求;網址的主機必須是 localhost、127.0.0.1 或 ::1(http),否則丟 ValueError。"""
+    url = req if isinstance(req, str) else req.full_url
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "http" or parts.hostname not in LOCAL_HOSTS:
+        raise ValueError("只允許連線到本機 Ollama(localhost、127.0.0.1 或 ::1),已拒絕此連線")
+    return _LOCAL_OPENER.open(req, timeout=timeout)
+
 
 TW = "一律使用繁體中文與台灣慣用語(例如:軟體、網路、資訊、影片、品質),不要使用中國大陸用語。"
 to_tw = OpenCC("s2twp").convert  # 簡體/大陸用語 → 台灣繁體與用語
@@ -76,7 +104,7 @@ def chat(role, prompt, system="", think=None):
     req = urllib.request.Request(f"{OLLAMA}/api/chat", json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
     # 27B 約 14 tok/s,思考模式可能要跑十幾分鐘
-    with urllib.request.urlopen(req, timeout=1800) as r:
+    with local_open(req, timeout=1800) as r:
         text = json.load(r)["message"]["content"]
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
 
@@ -88,7 +116,7 @@ def unload_llms():
     Ollama 連不上或單一模型卸載失敗都不丟例外。
     """
     try:
-        with urllib.request.urlopen(f"{OLLAMA}/api/ps", timeout=10) as r:
+        with local_open(f"{OLLAMA}/api/ps", timeout=10) as r:
             loaded = [m.get("model") or m.get("name") for m in json.load(r).get("models", [])]
     except Exception:
         return
@@ -97,8 +125,9 @@ def unload_llms():
             continue
         body = json.dumps({"model": m, "keep_alive": 0}).encode()
         try:
-            urllib.request.urlopen(urllib.request.Request(
-                f"{OLLAMA}/api/generate", body, {"Content-Type": "application/json"}), timeout=30)
+            with local_open(urllib.request.Request(
+                    f"{OLLAMA}/api/generate", body, {"Content-Type": "application/json"}), timeout=30):
+                pass
         except Exception:
             pass
 

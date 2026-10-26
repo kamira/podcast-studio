@@ -1,6 +1,6 @@
 """taiwan_ai.py 的測試(CHG-20261022-01 T2;ADP-1、ADP-8)。
 
-一律以 monkeypatch 替身取代 Ollama(`urllib.request.urlopen`)與設定檔,不連任何網路。
+一律以 monkeypatch 替身取代 Ollama(`taiwan_ai._LOCAL_OPENER.open`)與設定檔,不連任何網路。
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class FakeOllama:
 @pytest.fixture
 def ollama(monkeypatch):
     fake = FakeOllama()
-    monkeypatch.setattr(tai.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(tai._LOCAL_OPENER, "open", fake)
     return fake
 
 
@@ -150,7 +150,7 @@ def test_unload沒有載入任何模型(cfg, ollama):
 def test_unload_Ollama連不上不丟例外(monkeypatch):
     def boom(*a, **k):
         raise OSError("連線被拒")
-    monkeypatch.setattr(tai.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(tai._LOCAL_OPENER, "open", boom)
     tai.unload_llms()
 
 
@@ -165,7 +165,7 @@ def test_unload單一模型失敗仍卸載其他(monkeypatch):
             if m == "a:1":
                 raise OSError("逾時")
         return fake(req, timeout)
-    monkeypatch.setattr(tai.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(tai._LOCAL_OPENER, "open", flaky)
     tai.unload_llms()
     assert seen == ["a:1", "b:2"]
 

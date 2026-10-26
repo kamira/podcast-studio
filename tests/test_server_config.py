@@ -3,7 +3,7 @@
 
 一律把 settings.ROOT / CONFIG_PATH 與 `create_app(root=...)` 指到暫存目錄,不碰 repo 內的
 `config/`;Ollama `/api/tags` 一律以替身取代(`create_app(ollama_tags=...)`,或替換
-`urllib.request.urlopen`),不連真的網路。以 FastAPI TestClient 呼叫 ASGI app,不開網路埠。
+`taiwan_ai._LOCAL_OPENER.open`),不連真的網路。以 FastAPI TestClient 呼叫 ASGI app,不開網路埠。
 """
 from __future__ import annotations
 
@@ -43,10 +43,10 @@ def tags_down():
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
-    """保險:任何測試意外走到真的 urlopen 一律失敗,不連網路。"""
+    """保險:任何測試意外走到真的 Ollama 請求一律失敗,不連網路。"""
     def boom(*a, **k):
         raise AssertionError("測試不得呼叫真的網路")
-    monkeypatch.setattr(ss.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(taiwan_ai._LOCAL_OPENER, "open", boom)
 
 
 @pytest.fixture
@@ -479,7 +479,7 @@ def test_models_filters_bad_tag_names(make_client, root):
     assert body["ollama"]["models"] == ["qwen3:8b"]
 
 
-# ---------- 預設的 Ollama 查詢(以替身取代 urlopen) ----------
+# ---------- 預設的 Ollama 查詢(以替身取代 opener 的 open) ----------
 
 class FakeResp:
     def __init__(self, data: bytes):
@@ -502,7 +502,7 @@ def test_fetch_ollama_tags_uses_local_tags_with_short_timeout(monkeypatch):
         calls.append((url, timeout))
         return FakeResp(json.dumps({"models": [{"name": "qwen3:8b"}, {"name": "glm4:latest"},
                                                {"model": "沒有 name"}]}).encode())
-    monkeypatch.setattr(ss.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(taiwan_ai._LOCAL_OPENER, "open", fake)
     assert ss.fetch_ollama_tags() == ["qwen3:8b", "glm4:latest"]
     assert calls == [("http://localhost:11434/api/tags", ss.OLLAMA_TIMEOUT)]
     assert ss.OLLAMA_TIMEOUT <= 3
@@ -516,7 +516,7 @@ def test_fetch_ollama_tags_network_errors_raise_unavailable(monkeypatch, exc):
     def fake(url, timeout=None):
         calls.append(url)
         raise exc
-    monkeypatch.setattr(ss.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(taiwan_ai._LOCAL_OPENER, "open", fake)
     with pytest.raises(ss.OllamaUnavailable):
         ss.fetch_ollama_tags()
     assert len(calls) == 1          # 不重試
@@ -525,13 +525,13 @@ def test_fetch_ollama_tags_network_errors_raise_unavailable(monkeypatch, exc):
 @pytest.mark.parametrize("data", [b"not json", b"[]", b'{"models": "x"}', b"{}",
                                   b"x" * (ss.MAX_TAGS_BYTES + 10)])
 def test_fetch_ollama_tags_bad_response_raises_unavailable(monkeypatch, data):
-    monkeypatch.setattr(ss.urllib.request, "urlopen", lambda url, timeout=None: FakeResp(data))
+    monkeypatch.setattr(taiwan_ai._LOCAL_OPENER, "open", lambda url, timeout=None: FakeResp(data))
     with pytest.raises(ss.OllamaUnavailable):
         ss.fetch_ollama_tags()
 
 
 def test_default_app_uses_fetch_ollama_tags(root, monkeypatch):
-    monkeypatch.setattr(ss.urllib.request, "urlopen",
+    monkeypatch.setattr(taiwan_ai._LOCAL_OPENER, "open",
                         lambda url, timeout=None: FakeResp(json.dumps(
                             {"models": [{"name": n} for n in ALL]}).encode()))
     app = ss.create_app(token=TOKEN, static_dir=root / "no-static", root=root)

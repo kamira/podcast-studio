@@ -77,7 +77,8 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
                                   "mflux": {"installed"}, "breezyvoice": {"installed"},
                                   "voices": [可選聲線檔,repo 相對路徑(settings.voice_options())]}
                                  Ollama 連不上時 reachable=false、models=[],仍回 200。
-  Ollama 查詢只打 `taiwan_ai.OLLAMA` 的 `/api/tags`,逾時 OLLAMA_TIMEOUT 秒、不重試,
+  Ollama 查詢只打 `taiwan_ai.OLLAMA` 的 `/api/tags`(經 `taiwan_ai.local_open()`:只限本機主機、
+  不經代理、不跟隨重新導向),逾時 OLLAMA_TIMEOUT 秒、不重試,
   在執行緒池中執行,不阻塞事件迴圈;回應上限 MAX_TAGS_BYTES。
   所有錯誤訊息與 `_warnings` 一律經 `scrub()`,不送本機絕對路徑。
 
@@ -109,7 +110,6 @@ import sys
 import threading
 import time
 import traceback
-import urllib.request
 import uuid
 from collections import OrderedDict
 from pathlib import Path
@@ -562,9 +562,9 @@ def fetch_ollama_tags() -> list[str]:
     連不上、逾時、回應過大或格式不對一律丟 OllamaUnavailable。
     """
     try:
-        with urllib.request.urlopen(f"{taiwan_ai.OLLAMA}/api/tags", timeout=OLLAMA_TIMEOUT) as r:
+        with taiwan_ai.local_open(f"{taiwan_ai.OLLAMA}/api/tags", timeout=OLLAMA_TIMEOUT) as r:
             data = r.read(MAX_TAGS_BYTES + 1)
-    except (OSError, ValueError) as e:   # URLError、逾時、連線被拒皆為 OSError
+    except (OSError, ValueError) as e:   # URLError、逾時、連線被拒、重新導向(HTTPError)皆為 OSError;非本機主機為 ValueError
         raise OllamaUnavailable(type(e).__name__) from None
     if len(data) > MAX_TAGS_BYTES:
         raise OllamaUnavailable("回應過大")
