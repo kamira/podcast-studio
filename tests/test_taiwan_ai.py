@@ -272,7 +272,7 @@ def test_reserve_also一起佔位_撞名時清掉本輪佔位(out, monkeypatch):
     assert (out / "podcast-A.srt").read_text(encoding="utf-8") == "舊字幕"
 
 
-def test_speak寫入佔位檔_失敗時刪除佔位(out, monkeypatch):
+def test_speak寫入佔位檔_失敗時刪除佔位(out, cfg, monkeypatch):
     seen = []
 
     def fake_run(cmd, **kw):
@@ -324,7 +324,7 @@ def test_結構不合法回退預設模型(cfg_file, ollama, capsys):
 
 # ---- speak 子程序離線環境(T4,ADP-12) ----
 
-def test_speak子程序環境含離線變數_其餘不變(out, monkeypatch):
+def test_speak子程序環境含離線變數_其餘不變(out, cfg, monkeypatch):
     seen = {}
 
     def fake_run(cmd, **kw):
@@ -342,8 +342,8 @@ def test_speak子程序環境含離線變數_其餘不變(out, monkeypatch):
     # argv 與其他參數不變
     assert seen["cmd"] == [str(tai.BREEZY / ".venv/bin/python"), "single_inference.py",
                            "--content_to_synthesize", "測試",
-                           "--speaker_prompt_audio_path", str(tai.VOICE_WAV),
-                           "--speaker_prompt_text_transcription", tai.VOICE_TEXT,
+                           "--speaker_prompt_audio_path", str(OLD_VOICE_WAV),
+                           "--speaker_prompt_text_transcription", OLD_VOICE_TEXT,
                            "--output_path", str(p)]
     assert seen["kw"]["cwd"] == tai.BREEZY
     assert seen["kw"]["check"] is True
@@ -352,13 +352,111 @@ def test_speak子程序環境含離線變數_其餘不變(out, monkeypatch):
     assert p.read_bytes() == b"RIFF"
 
 
-def test_speak失敗時提示不自動下載(out, monkeypatch, capsys):
+def test_speak失敗時提示不自動下載(out, cfg, monkeypatch, capsys):
     def boom(cmd, **kw):
         raise tai.subprocess.CalledProcessError(1, cmd)
     monkeypatch.setattr(tai.subprocess, "run", boom)
     with pytest.raises(tai.subprocess.CalledProcessError):
         tai.speak("測試")
     assert "不連網下載" in capsys.readouterr().err
+
+
+# ---- 聲線讀設定(CHG-20261026-01 T1) ----
+
+# 本筆之前 taiwan_ai.py 的 VOICE_WAV、VOICE_TEXT 常數值(原文照抄,用來證明預設設定下 argv 逐元素不變)
+OLD_VOICE_WAV = tai.ROOT / "tools/BreezyVoice/data/example.wav"
+OLD_VOICE_TEXT = ("在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。"
+                  "只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。")
+
+
+def _capture_speak(monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append((cmd, kw))
+        Path(cmd[cmd.index("--output_path") + 1]).write_bytes(b"RIFF")
+    monkeypatch.setattr(tai.subprocess, "run", fake_run)
+    return seen
+
+
+def _argv_value(cmd, flag):
+    return cmd[cmd.index(flag) + 1]
+
+
+def test_舊聲線常數已移除():
+    assert not hasattr(tai, "VOICE_WAV")
+    assert not hasattr(tai, "VOICE_TEXT")
+
+
+def test_role_config回傳設定副本(cfg):
+    v = tai.role_config("voice")
+    assert v == settings.DEFAULTS["roles"]["voice"]
+    v["wav"] = "被改掉"
+    assert tai.role_config("voice")["wav"] == settings.DEFAULTS["roles"]["voice"]["wav"]
+    assert tai.role_config("image") == settings.DEFAULTS["roles"]["image"]
+
+
+def test_role_config未知角色丟KeyError(cfg):
+    with pytest.raises(KeyError):
+        tai.role_config("不存在")
+    with pytest.raises(KeyError):
+        tai.role_config("code")
+
+
+def test_speak預設設定時argv與本筆之前逐元素相同(out, cfg, monkeypatch):
+    seen = _capture_speak(monkeypatch)
+    p = tai.speak("你好")
+    ((cmd, kw),) = seen
+    assert cmd == [str(tai.BREEZY / ".venv/bin/python"), "single_inference.py",
+                   "--content_to_synthesize", "你好",
+                   "--speaker_prompt_audio_path", str(OLD_VOICE_WAV),
+                   "--speaker_prompt_text_transcription", OLD_VOICE_TEXT,
+                   "--output_path", str(p)]
+    assert cmd[5] == str(tai.ROOT) + "/tools/BreezyVoice/data/example.wav"
+    assert kw["env"] == tai.BREEZY_ENV
+    assert kw["cwd"] == tai.BREEZY
+
+
+def test_speak每次呼叫重讀聲線設定(out, cfg, monkeypatch):
+    seen = _capture_speak(monkeypatch)
+    tai.speak("第一次")
+    cfg["roles"]["voice"]["wav"] = "outputs/uploads/v.wav"
+    cfg["roles"]["voice"]["text"] = "測試逐字稿"
+    p = tai.speak("第二次")
+    first, second = seen[0][0], seen[1][0]
+    assert _argv_value(first, "--speaker_prompt_audio_path") == str(OLD_VOICE_WAV)
+    assert _argv_value(first, "--speaker_prompt_text_transcription") == OLD_VOICE_TEXT
+    assert _argv_value(second, "--speaker_prompt_audio_path") == str(tai.ROOT / "outputs/uploads/v.wav")
+    assert Path(_argv_value(second, "--speaker_prompt_audio_path")).is_absolute()
+    assert _argv_value(second, "--speaker_prompt_text_transcription") == "測試逐字稿"
+    # 只有這兩個值改變,其餘 argv 與環境不變
+    assert second == [str(tai.BREEZY / ".venv/bin/python"), "single_inference.py",
+                      "--content_to_synthesize", "第二次",
+                      "--speaker_prompt_audio_path", str(tai.ROOT / "outputs/uploads/v.wav"),
+                      "--speaker_prompt_text_transcription", "測試逐字稿",
+                      "--output_path", str(p)]
+    assert seen[1][1]["env"] == tai.BREEZY_ENV
+
+
+def test_speak一次呼叫只讀一次設定(out, cfg, monkeypatch):
+    _capture_speak(monkeypatch)
+    calls = []
+    real = settings.load
+
+    def counting():
+        calls.append(1)
+        return real()
+    monkeypatch.setattr(settings, "load", counting)
+    tai.speak("一次")
+    assert len(calls) == 1
+
+
+def test_speak讀設定失敗時不留佔位檔(out, monkeypatch):
+    monkeypatch.setattr(settings, "load", lambda: {"roles": {}, "review_seats": {}})
+    monkeypatch.setattr(tai.subprocess, "run", lambda *a, **k: pytest.fail("不應啟動子程序"))
+    with pytest.raises(KeyError):
+        tai.speak("x")
+    assert not out.exists() or list(out.iterdir()) == []
 
 
 # ---- 模型快取缺失時離線失敗、不下載(PR #34 security 疑慮;替身 BreezyVoice,不連網) ----
@@ -428,7 +526,7 @@ Path(args.output_path).write_bytes(b"RIFF-fake")
 
 
 @pytest.fixture
-def fake_breezy(monkeypatch, tmp_path):
+def fake_breezy(monkeypatch, tmp_path, cfg):
     """在暫存目錄建立替身 BreezyVoice:.venv/bin/python 轉呼叫目前的直譯器,
     single_inference.py 匯入同目錄的替身 huggingface_hub、transformers(遵守離線變數)。"""
     d = tmp_path / "BreezyVoice"
@@ -443,7 +541,6 @@ def fake_breezy(monkeypatch, tmp_path):
     (d / "transformers/__init__.py").write_text(FAKE_TRANSFORMERS, encoding="utf-8")
     (d / "single_inference.py").write_text(FAKE_INFERENCE, encoding="utf-8")
     monkeypatch.setattr(tai, "BREEZY", d)
-    monkeypatch.setattr(tai, "VOICE_WAV", d / "data/example.wav")
     return d
 
 
