@@ -37,14 +37,106 @@
     <a class="subnav-link" href="#/settings/flow" data-sub="flow">進階流程</a>
   </nav>
 
-  <div class="subpage" data-sub="models" hidden>
-    <p class="placeholder">「模型」子頁建置中。</p>
+  <!-- 設定表單(T12):模型與審議席位兩個子頁共用提示列與「還原預設 / 儲存」;
+       欄位以 data-field 對應 settings.DEFAULTS 的鍵(tests/test_static.py 檢查) -->
+  <div class="settings-notices" id="cfg-notices" hidden>
+    <p class="notice notice-info" id="cfg-loading">讀取設定中…</p>
+    <div class="notice notice-warn" id="cfg-warnings" role="alert" hidden></div>
+    <p class="notice notice-warn" id="cfg-ollama-down" role="alert" hidden></p>
+    <div class="notice notice-err" id="cfg-errors" role="alert" hidden></div>
+    <p class="notice notice-info" id="cfg-imported" hidden></p>
   </div>
-  <div class="subpage" data-sub="seats" hidden>
-    <p class="placeholder">「審議席位」子頁建置中。</p>
+
+  <div class="subpage settings-sub" data-sub="models" hidden>
+    <section class="settings-section">
+      <h2 class="section-title">角色模型</h2>
+      <p class="section-hint">網頁與 local-models MCP 共用 · 儲存於設定資料庫</p>
+      <div class="role-row">
+        <span class="role-name">推理 reason</span>
+        <label class="field field-model"><span class="field-label">模型</span>
+          <select data-field="roles.reason.model" data-options="ollama"></select></label>
+        <label class="field"><span class="field-label">think</span>
+          <select data-field="roles.reason.think" data-kind="think">
+            <option value="true">開</option>
+            <option value="false">關</option>
+            <option value="null">不指定</option>
+          </select></label>
+        <label class="field field-num"><span class="field-label">ctx</span>
+          <input type="number" data-field="roles.reason.num_ctx" data-kind="int" step="1" inputmode="numeric"></label>
+      </div>
+      <div class="role-row">
+        <span class="role-name">重型推理 reason_heavy</span>
+        <label class="field field-model"><span class="field-label">模型</span>
+          <select data-field="roles.reason_heavy.model" data-options="ollama"></select></label>
+        <label class="field"><span class="field-label">think</span>
+          <select data-field="roles.reason_heavy.think" data-kind="think">
+            <option value="true">開</option>
+            <option value="false">關</option>
+            <option value="null">不指定</option>
+          </select></label>
+        <label class="field field-num"><span class="field-label">ctx</span>
+          <input type="number" data-field="roles.reason_heavy.num_ctx" data-kind="int" step="1" inputmode="numeric"></label>
+      </div>
+      <div class="role-row">
+        <span class="role-name">台灣用語 taiwan</span>
+        <label class="field field-model"><span class="field-label">模型</span>
+          <select data-field="roles.taiwan.model" data-options="ollama"></select></label>
+        <label class="field"><span class="field-label">think</span>
+          <select data-field="roles.taiwan.think" data-kind="think">
+            <option value="true">開</option>
+            <option value="false">關</option>
+            <option value="null">不指定</option>
+          </select></label>
+        <label class="field field-num"><span class="field-label">ctx</span>
+          <input type="number" data-field="roles.taiwan.num_ctx" data-kind="int" step="1" inputmode="numeric"></label>
+      </div>
+      <div class="role-row">
+        <span class="role-name">生圖 image</span>
+        <label class="field field-model"><span class="field-label">模型</span>
+          <input type="text" data-field="roles.image.model" autocomplete="off" spellcheck="false"></label>
+        <label class="field field-num"><span class="field-label">steps</span>
+          <input type="number" data-field="roles.image.steps" data-kind="int" step="1" inputmode="numeric"></label>
+        <span class="tool-status" id="cfg-mflux"></span>
+      </div>
+      <div class="role-row">
+        <span class="role-name">語音聲線 voice</span>
+        <label class="field field-model"><span class="field-label">聲線檔</span>
+          <select data-field="roles.voice.wav" data-options="voice"></select></label>
+        <span class="tool-status" id="cfg-breezy"></span>
+        <label class="field field-wide"><span class="field-label">聲線檔逐字稿</span>
+          <textarea data-field="roles.voice.text" rows="3" spellcheck="false"></textarea></label>
+      </div>
+    </section>
   </div>
+
+  <div class="subpage settings-sub" data-sub="seats" hidden>
+    <section class="settings-section">
+      <h2 class="section-title">審議席位(DIR-1)</h2>
+      <div class="seat-grid">
+        <label class="field seat" data-seat="risk"><span class="field-label">risk</span>
+          <select data-field="review_seats.risk" data-options="seat"></select></label>
+        <label class="field seat" data-seat="security"><span class="field-label">security</span>
+          <select data-field="review_seats.security" data-options="seat"></select></label>
+        <label class="field seat" data-seat="compliance"><span class="field-label">compliance</span>
+          <select data-field="review_seats.compliance" data-options="seat"></select></label>
+        <label class="field seat" data-seat="impact"><span class="field-label">impact</span>
+          <select data-field="review_seats.impact" data-options="seat"></select></label>
+        <label class="field seat" data-seat="drift"><span class="field-label">drift</span>
+          <select data-field="review_seats.drift" data-options="seat"></select></label>
+        <label class="field seat" data-seat="consistency"><span class="field-label">consistency</span>
+          <select data-field="review_seats.consistency" data-options="seat"></select></label>
+      </div>
+      <ul class="seat-rules">
+        <li>⛔ 為否決席(risk、security、compliance)。</li>
+        <li>⚠ glm4 不得用於 ⛔ 否決席(下拉選單不列出)。</li>
+        <li>Codex 只能擔任 ⛔ 否決席(DIR-1 第 9 條;預設同 settings.DEFAULTS)。</li>
+        <li>暫停審議的 27B 模型不列入任何席位(DIR-1 第 10 條)。</li>
+      </ul>
+    </section>
+  </div>
+
   <div class="subpage" data-sub="voice" hidden>
-    <p class="placeholder">「語音預設」子頁建置中。</p>
+    <p class="placeholder">「語音預設」的欄位將於後續版本加入;目前的聲線設定在「模型」子頁。</p>
   </div>
 
   <!-- 設定 › 進階流程:節點畫布 -->
@@ -76,6 +168,26 @@
     </div>
     <div class="statusbar" id="statusbar" role="status" aria-live="polite">尚未執行</div>
   </div>
+
+  <div class="settings-actions" id="cfg-actions" hidden>
+    <button type="button" class="btn" id="cfg-reset">還原預設</button>
+    <button type="button" class="btn btn-primary" id="cfg-save" disabled>儲存</button>
+  </div>
+  <footer class="page-footer">
+    <a class="footer-link" href="#/disclaimer">免責說明與授權</a>
+  </footer>
+</section>
+
+<!-- 免責說明與授權:頁面內容由 CHG-20261022-04 提供,這裡只放位置 -->
+<section id="page-disclaimer" class="page" data-page="disclaimer" hidden>
+  <header class="page-header">
+    <a class="back-link" href="#/">← 首頁</a>
+    <h1 class="page-title">免責說明與授權</h1>
+    <span class="icon-mark" aria-hidden="true"></span>
+  </header>
+  <main class="home-main">
+    <p class="placeholder">「免責說明與授權」頁面尚未提供,將於後續版本加入。</p>
+  </main>
 </section>
 
 <!-- 工作流程存檔 / 載入對話框(T11);沒有列出流程的端點,載入時輸入名稱 -->
