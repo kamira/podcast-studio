@@ -2,23 +2,26 @@
 
 > 導入反推(2026-10-22,基準點 `7da165b6048897abb8acac4bba69db9677827471`)。來源等級見 `docs/ai-guideline.md` 表頭。現況不等於規範;缺陷見 Guideline §9。
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:新增 HTTP API 契約、節點登錄表、設定模組介面、跨行程鎖;CLI 與 Gradio 版移除;設計決策表加入本筆決策(以 T1~T13 合併後的 main 為準)。
+> 2026-10-26 依 CHG-20261026-01 結構文件更新:新增 `taiwan_ai.role_config()`;生圖與聲線改讀設定、mflux 子程序加 `HF_HUB_OFFLINE=1`;移除 `FLUX` 常數;`wav_seconds()` 改為自寫 RIFF/WAVE 解析;影片合成 `-r 10`、WAV 加 `-t`;設計決策表加入本筆代決(以 T1~T5 合併後的 main 為準)。
 
 ## 關鍵元件
 
 | 元件 | 責任 | 對外介面/契約 | 等級 |
 |------|------|----------------|------|
 | `taiwan_ai.model(role)` | 每次呼叫經 `settings.load()` 取該角色(`reason`、`reason_heavy`、`taiwan`)的模型名稱 | 回傳 `str`;未知角色丟 `KeyError` | 〔觀察〕 |
+| `taiwan_ai.role_config(role)` | 每次呼叫經 `settings.load()` 取 `roles[role]`;不要求角色有 `model` 鍵(`voice` 只有 `wav`、`text`) | 回傳該角色設定的**副本**(`dict`);未知角色丟 `KeyError` | 〔觀察〕CHG-20261026-01 T1 |
 | `taiwan_ai.chat(role, prompt, system="", think=None)` | 對 Ollama `/api/chat` 非串流請求;模型與 `num_ctx` 取自設定;`keep_alive=10m`、逾時 1800 秒;移除 `<think>…</think>` | 回傳 `str`(可能是空字串);HTTP 錯誤直接拋出 | 〔觀察〕 |
 | `taiwan_ai.local_open(req, timeout)` | 對本機 Ollama 送請求:只限 `localhost` / `127.0.0.1` / `::1`、不經代理、不跟隨重新導向 | `chat`、`unload_llms`、網頁設定 API、MCP `list_models` 一律經此 | 〔觀察〕 |
 | `taiwan_ai.unload_llms()` | 查 `/api/ps`,對目前載入的**全部**模型送 `keep_alive: 0`;錯誤全吞 | 無回傳 | 〔觀察〕ADP-1 的處理(CHG-20261022-01 T2) |
-| `taiwan_ai.speak(text)` | 清 Markdown 符號 → 子程序 BreezyVoice(固定女聲樣本與逐字稿);子程序環境 `BREEZY_ENV` 含 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`,模型快取不存在時失敗並提示,不下載 | 回傳 `outputs/speech-<stamp>.wav` 的 `Path`;呼叫端須在 `heavy_lock()` 內 | 〔觀察〕ADP-12 的處理(T4);ADP-4、ADP-9 未處理 |
+| `taiwan_ai.speak(text)` | 每次呼叫以 `role_config("voice")` 取聲線檔(repo 相對路徑轉絕對路徑)與逐字稿 → 清 Markdown 符號 → 子程序 BreezyVoice;子程序環境 `BREEZY_ENV` 含 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`,模型快取不存在時失敗並提示,不下載 | 回傳 `outputs/speech-<stamp>.wav` 的 `Path`;呼叫端須在 `heavy_lock()` 內 | 〔觀察〕ADP-12 的處理(T4);ADP-4、ADP-9 未處理 |
 | `taiwan_ai.to_tw` | OpenCC `s2twp` | `str → str` | 〔觀察〕 |
 | `taiwan_ai.stamp()` / `reserve(prefix, suffix, also=())` | `stamp()`:`YYYYmmdd-HHMMSS-毫秒-4 碼隨機`;`reserve()`:在 `outputs/` 以 `O_EXCL`、不跟隨符號連結排他建立佔位檔,撞名重取(最多 20 次) | 輸出檔一律先佔位再寫入,不覆寫既有檔 | 〔觀察〕ADP-8 的處理(T2) |
-| `media.generate_image(prompt, w, h)` | 卸載 LLM → mflux 4 步 | `outputs/image-<stamp>.png` | 〔觀察〕 |
+| `media.generate_image(prompt, w, h)` | 每次呼叫以 `role_config("image")` 取 `model`、`steps`(一次呼叫讀一次)→ 卸載 LLM → mflux;子程序環境為目前環境的副本加 `HF_HUB_OFFLINE=1`(沒有快取的模型直接失敗,不下載) | `outputs/image-<stamp>.png` | 〔觀察〕CHG-20261026-01 T2 |
 | `media.make_cover(prompt, title)` / `add_title(img, title)` | 1360×768 → 放大裁切 1920×1080 → 底部 28% 模糊帶 + 白字黑邊標題(120→48 px,最多 2 行) | `outputs/cover-<stamp>.png` | 〔觀察〕超過 2 行未處理(ADP-3) |
 | `media.split_sentences(script, max_chars=24)` | 依 `。！？!?；;\n` 切,過長再依 `，,、` 切,仍過長硬切 | `list[str]` | 〔觀察〕 |
 | `media.make_srt(script, seconds, path)` | 依字數比例分配時間 | 寫 SRT,回傳 path | 〔觀察〕 |
-| `media.make_video(image, audio, script="")` | ffmpeg:loop 圖 + 音訊(+ mov_text 字幕),`-r 2 -tune stillimage`,`-shortest` | `outputs/podcast-<stamp>.mp4`(+ 同名 `.srt`) | 〔觀察〕音訊須為 WAV 才能算字幕(ADP-7) |
+| `media.wav_seconds(path)` | 以標準庫 `struct` 解析 RIFF/WAVE:只讀 chunk 標頭與 `fmt `(最多 64 位元組),以 `seek` 跳過其他 chunk,data 不讀進記憶體;支援 PCM(1)、IEEE float(3)、WAVE_FORMAT_EXTENSIBLE(0xFFFE,以 SubFormat 前 2 位元組判斷 1 或 3);長度 = data 位元組數 ÷(聲道數 × 每樣本位元組數)÷ 取樣率;chunk 長度(含奇數補位)不得超出檔尾、最多走訪 `WAV_MAX_CHUNKS`(1024)個 chunk | 回傳 `float` 秒數;不是 RIFF/WAVE、缺 `fmt ` 或 `data`、不支援的編碼、欄位為 0、data 不是整數個樣本框、讀檔失敗(`OSError`,以 `from None` 斷開例外鏈)一律丟繁中 `ValueError`,訊息不含路徑 | 〔觀察〕CHG-20261026-01 T4;`RF64`、64 位元 float 未支援 |
+| `media.make_video(image, audio, script="")` | ffmpeg:loop 圖 + 音訊(+ mov_text 字幕),`-r 10 -tune stillimage`,`-shortest`;以檔頭前 12 位元組判斷音檔為 RIFF/WAVE(不看副檔名)時,在輸出檔名前加 `-t <wav_seconds(),小數 3 位>`,影片軌與音軌長度差 ≤ 0.1 秒 | `outputs/podcast-<stamp>.mp4`(+ 同名 `.srt`) | 〔觀察〕CHG-20261026-01 T5;非 WAV 不加 `-t`(片尾可能多出靜止畫面),帶字幕時讀不到長度而失敗(ADP-7) |
 | `heavy_lock.heavy_lock(timeout=None, on_wait=None)` | 跨行程排他鎖 `outputs/.heavy.lock`(`fcntl.flock(LOCK_EX)`);被占用時呼叫一次 `on_wait()` 再每 0.05 秒重試 | context manager;`timeout` 秒數逾時丟 `TimeoutError`;`outputs/` 或鎖檔是符號連結丟 `OSError`;鎖檔不讀不寫不刪 | 〔觀察〕ADP-2 的處理(T4) |
 | `local_models_mcp.busy()` | 重讀設定 → `heavy_lock(on_wait=…)` → `redirect_stdout(stderr)` | context manager;等待時寫 stderr | 〔觀察〕 |
 | `settings`(`load` / `save` / `validate` / `load_meta` / `voice_options`) | 模型設定的唯一存取點,儲存層為 SQLite `config/studio.db` | 見下方「設定模組介面」 | 〔觀察〕 |
@@ -26,7 +29,7 @@
 | `executor.validate(graph)` / `run(graph, emit, cancel=None)` | 驗證流程圖;依拓撲順序在呼叫端執行緒執行並以 `emit(dict)` 推送事件 | 見下方「流程圖格式與執行事件」 | 〔觀察〕 |
 | `studio_server.create_app(...)` / `main()` | FastAPI app;`main()` 以 uvicorn 綁 `127.0.0.1:7860` | 見下方「HTTP API」 | 〔觀察〕 |
 
-〔觀察〕設定中的 `roles.image`(`model`、`steps`)與 `roles.voice`(`wav`、`text`)可在設定頁編輯並通過驗證後存入資料庫,但 `media.generate_image()` 仍使用 `taiwan_ai.FLUX` 與固定 `--steps 4`,`taiwan_ai.speak()` 仍使用 `VOICE_WAV` / `VOICE_TEXT` 常數;〔未知〕這兩個角色何時接上設定(CHG-20261022-01 的 task 未要求)。
+〔觀察〕設定中的 `roles.image`(`model`、`steps`)與 `roles.voice`(`wav`、`text`)由 `media.generate_image()`、`taiwan_ai.speak()` 在每次呼叫時經 `taiwan_ai.role_config()` → `settings.load()` 讀取(CHG-20261026-01 T1、T2);網頁節點與 MCP 工具共用這兩個函式,MCP 不需另改即跟上。`--base-model` 仍固定 `schnell`,設定頁沒有對應欄位〔觀察〕;換成 dev 系模型時以錯誤基底執行(CHG-20261026-01 代決 3)。
 
 ## 元件關係圖
 
@@ -61,9 +64,10 @@ classDiagram
     heavy_lock(timeout, on_wait)
   }
   class taiwan_ai {
-    OUT / OLLAMA / FLUX / MFLUX / BREEZY
+    OUT / OLLAMA / MFLUX / BREEZY
     TW: str
     model(role) str
+    role_config(role) dict
     chat(role, prompt, system, think) str
     local_open(req, timeout)
     unload_llms()
@@ -81,6 +85,7 @@ classDiagram
     make_cover(prompt, title) Path
     split_sentences(script) list
     make_srt(script, seconds, path)
+    wav_seconds(path) float
     make_video(image, audio, script) Path
   }
   class local_models_mcp {
@@ -179,15 +184,16 @@ classDiagram
 | `taiwanize` | `text: str` | 台灣正體文字 | Ollama 錯誤直接拋出 |
 | `generate_image` | `prompt: str`, `width: int = 1024`, `height: int = 1024` | PNG 絕對路徑 | 非 16 倍數 → `ValueError`;mflux 失敗 → `CalledProcessError` |
 | `speak` | `text: str` | WAV 絕對路徑 | 子程序失敗 → `CalledProcessError`(子程序 stderr 被丟棄;本行程 stderr 印離線提示) |
-| `make_video` | `image_path: str`, `audio_path: str`, `script: str = ""` | MP4 路徑 | 檔案不存在 → `FileNotFoundError`;非 WAV + script → `wave.Error`(ADP-7) |
-| `list_models` | — | JSON 字串:`roles`(reason、taiwan、reason_heavy 取自設定,另有 image、speech)、`loaded_now`、`outputs` | Ollama 沒開 → `URLError` |
+| `make_video` | `image_path: str`, `audio_path: str`, `script: str = ""` | MP4 路徑 | 檔案不存在 → `FileNotFoundError`;非 WAV 或壞掉的 WAV + script → 繁中 `ValueError`(ADP-7;CHG-20261026-01 T4 前為 `wave.Error`) |
+| `list_models` | — | JSON 字串:`roles`(reason、taiwan、reason_heavy 取自設定;image 的 `model` 也取自設定 `roles.image.model`(CHG-20261026-01 T2);另有 speech)、`loaded_now`、`outputs` | Ollama 沒開 → `URLError` |
 
 〔觀察〕工具名稱、參數、回傳格式在 CHG-20261022-01 前後相同;每次工具呼叫重讀設定,重型工具在 `heavy_lock()` 內執行。
 
 ### 外部引擎契約(〔觀察〕)
 - Ollama:`POST /api/chat`、`POST /api/generate`(卸載)、`GET /api/tags`、`GET /api/ps`
-- mflux:`--model <FLUX> --base-model schnell --steps 4 --width --height --prompt --output`
-- BreezyVoice:`single_inference.py --content_to_synthesize --speaker_prompt_audio_path --speaker_prompt_text_transcription --output_path`,cwd = `tools/BreezyVoice`;環境變數只有 `PYTHONUTF8`、`PATH`、`HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`(ADP-12)
+- mflux:`--model <roles.image.model> --base-model schnell --steps <roles.image.steps> --width --height --prompt --output`;環境變數為目前環境加 `HF_HUB_OFFLINE=1`(CHG-20261026-01 T2)
+- ffmpeg(imageio-ffmpeg 內附):`-y -loop 1 -i <圖> -i <音>`(+ `-i <srt> -map 0:v -map 1:a -map 2:s -c:s mov_text -metadata:s:s:0 language=chi`)`-vf scale…,pad… -c:v libx264 -tune stillimage -r 10 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest`(WAV 時再加 `-t <秒數>`)`<輸出>`(CHG-20261026-01 T5)
+- BreezyVoice:`single_inference.py --content_to_synthesize --speaker_prompt_audio_path <roles.voice.wav 絕對路徑> --speaker_prompt_text_transcription <roles.voice.text> --output_path`,cwd = `tools/BreezyVoice`;環境變數只有 `PYTHONUTF8`、`PATH`、`HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`(ADP-12)
 
 ## 設計決策與取捨
 
@@ -198,7 +204,7 @@ classDiagram
 | 每分鐘 250 字 | — | 台灣華語播報常見語速 | 〔推論〕`§5` |
 | 標題用字型疊上 | FLUX 畫字 vs 字型疊加 | FLUX 無法正確產生中文字 | 〔推論〕`§5` |
 | 生圖前卸載 LLM | 同時載入 vs 卸載 | FLUX 峰值 14–16 GB,與 LLM 並存超出記憶體 | 〔推論〕`§5` |
-| 2 fps、`-tune stillimage` | — | 靜態畫面,降低檔案大小與編碼時間 | 〔推論〕`§5` |
+| ~~2 fps~~ 10 fps、`-tune stillimage` | 2 fps vs 10 fps | 靜態畫面,降低檔案大小與編碼時間;CHG-20261026-01 T5 改為 10 fps:影格間隔 0.1 秒,`-t` 截止誤差才能 ≤ 0.1 秒(2 fps 實測誤差達 0.5 秒) | 〔推論〕`§5`;〔觀察〕CHG-20261026-01 T5 |
 | imageio-ffmpeg | 系統 ffmpeg vs 內附 | 沒有 Homebrew,免額外安裝 | 〔推論〕`§5` |
 | 軟字幕 mov_text + `.srt` | 硬字幕 vs 軟字幕 | 已確認決策 | 〔推論〕`§8 #3` |
 | 依字數比例分配字幕時間 | 對齊模型 vs 比例 | 沒有語音對齊模型;誤差約 1–2 秒 | 〔觀察〕`media.py:94` 註解 |
@@ -233,6 +239,18 @@ classDiagram
 | security、compliance 審議席由 Codex 擔任 | 本機 Ollama vs Codex(雲端,`-s read-only`) | 實審中 8B / 27B 輸出截斷或誤判,Codex 回答證據具體;送審資料送出本機屬使用者明示例外,前提是 repo 已公開 | 〔觀察〕DIR-1 第 9 條(使用者 2026-10-23 指示) |
 | 暫停 27B 審議 | 27B vs Codex 擔任高風險 risk 席 | 使用者指示暫不使用 27B;`scripts/local_review.py` 預設仍含 27B,暫停期間須帶 `--codex-seats risk,security,compliance` | 〔觀察〕DIR-1 第 10 條(使用者 2026-10-23 指示) |
 | 27B 逾時 30 分鐘改派 Codex | 重派 27B vs 改派 Codex | 27B 太慢;某階段逾時或累計超過 30 分鐘沒有回答即改派,該席判決的模型欄註明改派 | 〔觀察〕DIR-1(使用者 2026-10-23 規則) |
+| 生圖與聲線設定每次呼叫重讀 | 每次呼叫重讀 vs 行程啟動時讀一次 | 與 `taiwan_ai.model()` 一致;MCP 是長駐行程,改了設定要立刻生效 | 〔觀察〕CHG-20261026-01 代決 1 |
+| 新增 `taiwan_ai.role_config()` | 新增介面 vs 各處直接讀 `settings.load()["roles"]` | `_role()` 要求 `model` 鍵,`voice` 沒有;設定只經 `settings.load()` 存取 | 〔觀察〕CHG-20261026-01 代決 1 |
+| `generate-image` 節點不加 `steps` 參數 | 節點參數 vs 只走設定 | 避免兩個來源互相覆蓋 | 〔觀察〕CHG-20261026-01 代決 2 |
+| `--base-model schnell` 維持固定 | 固定 vs 開放設定 | 設定 schema v1 不變;代價是 dev 系模型以錯誤基底執行 | 〔觀察〕CHG-20261026-01 代決 3 |
+| mflux 子程序加 `HF_HUB_OFFLINE=1` | 允許下載 vs 離線 vs 只准預設模型 | 不送資料出本機;沒有快取直接失敗,同 ADP-12 對 BreezyVoice 的做法 | 〔觀察〕CHG-20261026-01 代決 4 |
+| 移除 `FLUX`、`VOICE_WAV`、`VOICE_TEXT` | 保留 vs 移除 | 保留會留下第二個「看似生效」的來源;預設值只留在 `settings.DEFAULTS` | 〔觀察〕CHG-20261026-01 代決 5 |
+| 不新增 `settings.validate` 規則 | 新增 vs 沿用 | 既有規則已限制步數、聲線檔目錄、文字長度與控制字元;argv 為 list、不經 shell | 〔觀察〕CHG-20261026-01 代決 6 |
+| 覆寫 `default` 只記錄、不擋 | 只記錄 vs 伺服器拒絕 | 使用者指示範圍只限 `.gitignore`;覆寫後 `deploy_local.sh` 中止,以 `git checkout` 復原 | 〔觀察〕CHG-20261026-01 代決 7 |
+| `workflows/` 只追蹤 `default.json`,不改 `deploy_local.sh` | `.gitignore` vs 改存檔位置 vs 改部署判定 | 使用者指示;已忽略的檔案不算工作樹不乾淨 | 〔觀察〕CHG-20261026-01 代決 8 |
+| WAV 長度自寫 RIFF/WAVE 解析 | 自寫 `struct` 解析 vs imageio-ffmpeg | imageio-ffmpeg 只附 `ffmpeg`、沒有 `ffprobe`,改用要另開子程序解析文字;自寫不加依賴、精度為取樣等級 | 〔觀察〕CHG-20261026-01 代決 10 |
+| WAV 加 `-t <秒數>` 並保留 `-shortest`;非 WAV 沿用 | `-shortest` vs `-t` vs `-shortest -t` vs `+shortest` 旗標 | 實測 `-loop 1` + `-shortest` 對 17 秒的聲音產出約 50 秒的影片;`-t` 才能截止 | 〔觀察〕CHG-20261026-01 代決 11、12 |
+| 壞檔丟繁中 `ValueError`、訊息不含路徑 | 沿用 `wave.Error` vs 自訂 | 節點與 MCP 會把錯誤訊息顯示給使用者 | 〔觀察〕CHG-20261026-01 代決 13 |
 
 ## 採用模式
 

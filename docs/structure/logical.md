@@ -3,6 +3,7 @@
 > 導入反推(2026-10-22,基準點 `7da165b6048897abb8acac4bba69db9677827471`)。來源等級:〔觀察〕/〔推論〕/〔未知〕,定義見 `docs/ai-guideline.md` 表頭。
 > 本文件描述**現況**,不代表現況正確;已知缺陷見 Guideline §9(ADP-n)。
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:網頁改為 `studio_server.py`(FastAPI + 原生 JS 節點畫布),移除 Gradio 版與 CLI;架構圖與流程 A 改寫,新增檔案拖放流程與設定讀寫流程(以 T1~T13 合併後的 main 為準;端到端驗收結果以 `docs/acceptance/` 為準)。
+> 2026-10-26 依 CHG-20261026-01 結構文件更新:媒體層改經 `taiwan_ai.role_config()` 讀生圖設定(不再讀 `FLUX`),語音改讀聲線設定;耦合點補上 `roles.image`、`roles.voice` 的讀取端(以 T1~T5 合併後的 main 為準)。
 
 ## 分層 / 模組
 
@@ -14,8 +15,8 @@
 | 入口層:MCP `local_models_mcp.py` | 把模型包成 6 個 stdio 工具;每次工具呼叫重讀設定;重型工具在跨行程 `heavy_lock()` 內執行並把 stdout 導向 stderr | `media`、`taiwan_ai`、`settings`、`heavy_lock`、mcp SDK、Ollama `/api/tags` `/api/ps` | FR-8~13、21 | 〔觀察〕 |
 | 設定 `settings.py` | 模型角色與審議席位設定的唯一存取點:`load()` / `save()` / `validate()` / `load_meta()` / `voice_options()`;SQLite `config/studio.db`;一次性從 `config/models.json` 匯入 | sqlite3(標準函式庫) | FR-21、23 | 〔觀察〕 |
 | 鎖 `heavy_lock.py` | 跨行程排他鎖 `outputs/.heavy.lock`(`fcntl.flock(LOCK_EX)`),網頁與 MCP 共用 | — | NFR 重型工作互斥(ADP-2) | 〔觀察〕 |
-| 媒體層 `media.py` | 生圖、16:9 裁切、疊標題、切句、SRT、ffmpeg 合成 | `taiwan_ai`(`OUT`、`reserve`、`unload_llms`、`MFLUX`、`FLUX`)、Pillow、imageio-ffmpeg | FR-4~6、10、12 | 〔觀察〕 |
-| 模型層 `taiwan_ai.py` | `model(role)`(每次經 `settings.load()`)、`chat()`、`unload_llms()`(卸載 `/api/ps` 列出的全部模型)、`speak()`(子程序帶離線變數)、`to_tw()`、`local_open()`、`stamp()` / `reserve()` | Ollama HTTP、BreezyVoice 子程序、mflux 子程序、OpenCC、`settings` | FR-1~3、8、9、11 | 〔觀察〕 |
+| 媒體層 `media.py` | 生圖、16:9 裁切、疊標題、切句、SRT、ffmpeg 合成 | `taiwan_ai`(`OUT`、`reserve`、`unload_llms`、`MFLUX`、`role_config("image")`)、Pillow、imageio-ffmpeg | FR-4~6、10、12 | 〔觀察〕 |
+| 模型層 `taiwan_ai.py` | `model(role)` / `role_config(role)`(每次經 `settings.load()`)、`chat()`、`unload_llms()`(卸載 `/api/ps` 列出的全部模型)、`speak()`(每次經 `role_config("voice")` 取聲線;子程序帶離線變數)、`to_tw()`、`local_open()`、`stamp()` / `reserve()` | Ollama HTTP、BreezyVoice 子程序、mflux 子程序、OpenCC、`settings` | FR-1~3、8、9、11 | 〔觀察〕 |
 | 外部引擎 | Ollama(`localhost:11434`)、`mflux-generate`、`tools/BreezyVoice/.venv`、內附 ffmpeg | — | — | 〔觀察〕皆不在 repo 內 |
 | 建置 `setup_breezyvoice.sh` + `patches/` | 重建 BreezyVoice macOS 環境 | GitHub、uv | FR-15 | 〔觀察〕 |
 
@@ -74,7 +75,8 @@ flowchart TD
 
 - 〔觀察〕`API --> CFG` 一律經 `settings.py`(`studio_server.py` 不含 `sqlite3` 或 `models.json` 字樣,`tests/test_server_config.py` 檢查);`API --> OLLAMA` 只有設定 API 查 `/api/tags`(經 `taiwan_ai.local_open()`,圖中省略)。
 - 〔觀察〕`TAI --> ENG` 的 BreezyVoice 子程序環境一律帶 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`(ADP-12,CHG-20261022-01 T4)。
-- 〔觀察〕mflux 指令只剩 `media.generate_image()` 一份(CLI 的 `taiwan_ai.image()` 已移除)。
+- 〔觀察〕mflux 指令只剩 `media.generate_image()` 一份(CLI 的 `taiwan_ai.image()` 已移除);mflux 子程序環境為目前環境加 `HF_HUB_OFFLINE=1`(CHG-20261026-01 T2)。
+- 〔觀察〕ffmpeg 合成:音檔為 WAV 時加 `-t <wav_seconds() 秒數>`、影格率 `-r 10`,影片在聲音結束時截止(CHG-20261026-01 T5);非 WAV 只靠 `-shortest`(ADP-7)。
 
 ## 主要流程
 
@@ -193,7 +195,7 @@ flowchart TD
 
 〔觀察〕單向、無循環:入口(`studio_server` / `local_models_mcp`)→ `executor` → `nodes` → `media` → `taiwan_ai` → `settings`;`executor` 與 `local_models_mcp` 另依賴 `heavy_lock`;`studio_server` 也直接用 `settings`、`taiwan_ai`。`media` 依賴 `taiwan_ai`,`taiwan_ai` 不依賴 `media`;`settings` 不依賴其他專案模組。
 
-〔觀察〕耦合點:`media.py` 直接讀 `taiwan_ai` 的模組層常數(`OUT`、`MFLUX`、`FLUX`)與函式;設定資料(`config/studio.db`)是網頁與 MCP 兩個行程共享的**資料契約**,只經 `settings.py` 存取(CHG-20261022-01 Global Constraints)。
+〔觀察〕耦合點:`media.py` 直接讀 `taiwan_ai` 的模組層常數(`OUT`、`MFLUX`)與函式(`role_config`、`reserve`、`unload_llms`);`roles.image` 的讀取端是 `media.generate_image()`、`roles.voice` 的讀取端是 `taiwan_ai.speak()`,兩者每次呼叫經 `taiwan_ai.role_config()` → `settings.load()` 讀一次,網頁與 MCP 兩個行程都經這兩個函式(CHG-20261026-01 T1、T2);設定資料(`config/studio.db`)是網頁與 MCP 兩個行程共享的**資料契約**,只經 `settings.py` 存取(CHG-20261022-01 Global Constraints)。
 
 ## 開發流程(CI/CD)
 
