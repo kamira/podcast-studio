@@ -11,6 +11,8 @@
   speak         文字轉語音 BreezyVoice(台灣華語)
 
 介面:
+  role_config(role) -> dict
+                          每次呼叫重讀設定,回傳 roles[role] 的副本;未知角色丟 KeyError(CHG-20261026-01)
   model(role) -> str      每次呼叫重讀設定,回傳該角色的模型名稱;未知角色丟 KeyError
   chat(role, prompt, system="", think=None) -> str
   unload_llms()           卸載 Ollama `/api/ps` 列出的全部模型(ADP-1)
@@ -20,9 +22,10 @@
   reserve(prefix, suffix, also=()) -> Path
                           在 OUT 下排他建立 `<prefix>-<stamp()><suffix>` 空佔位檔,撞名重取;
                           輸出檔一律先佔位再寫入,不覆寫既有檔案
-  speak(text) -> Path     BreezyVoice 子程序環境含 HF_HUB_OFFLINE、TRANSFORMERS_OFFLINE(ADP-12),
+  speak(text) -> Path     聲線檔與逐字稿每次呼叫經 role_config("voice") 讀設定;BreezyVoice 子程序環境含 HF_HUB_OFFLINE、TRANSFORMERS_OFFLINE(ADP-12),
                           模型快取不存在時失敗、不下載;呼叫端須在 heavy_lock() 內呼叫(ADP-2)
 """
+import copy
 import json
 import os
 import re
@@ -47,9 +50,8 @@ OLLAMA = "http://localhost:11434"
 FLUX = "mflux-community/flux-1-schnell-mflux-q4"
 MFLUX = Path.home() / ".local/bin/mflux-generate"
 BREEZY = ROOT / "tools/BreezyVoice"
-VOICE_WAV = BREEZY / "data/example.wav"
-VOICE_TEXT = ("在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。"
-              "只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。")
+# 聲線檔與逐字稿不再是常數(CHG-20261026-01 T1):每次 speak() 經 role_config("voice") 讀設定,
+# 預設值只留在 settings.DEFAULTS。
 
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -85,6 +87,18 @@ def _role(role):
     if role not in roles or not isinstance(roles[role], dict) or "model" not in roles[role]:
         raise KeyError(f"未知的模型角色:{role}")
     return roles[role]
+
+
+def role_config(role):
+    """回傳設定中該角色設定的副本;每次呼叫經 settings.load() 重讀設定資料庫,未知角色丟 KeyError。
+
+    與 _role() 不同,不要求角色有 `model` 鍵(`voice` 角色只有 `wav`、`text`)。
+    呼叫端拿到的是副本,改了也不影響設定(CHG-20261026-01 T1)。
+    """
+    roles = settings.load()["roles"]
+    if role not in roles or not isinstance(roles[role], dict):
+        raise KeyError(f"未知的設定角色:{role}")
+    return copy.deepcopy(roles[role])
 
 
 def model(role):
@@ -218,6 +232,9 @@ SPEAK_FAILED_HINT = ("✗ 語音合成失敗。執行期不連網下載模型(HF
 
 
 def speak(text):
+    # 聲線檔與逐字稿每次呼叫讀一次設定(roles.voice);wav 為 repo 相對路徑,以 ROOT 轉成絕對路徑
+    voice = role_config("voice")
+    voice_wav = ROOT / voice["wav"]
     # BreezyVoice 讀 Markdown 符號會念錯,先清掉
     text = re.sub(r"[#*`>|_\-]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -227,8 +244,8 @@ def speak(text):
         try:
             subprocess.run([str(BREEZY / ".venv/bin/python"), "single_inference.py",
                             "--content_to_synthesize", text,
-                            "--speaker_prompt_audio_path", str(VOICE_WAV),
-                            "--speaker_prompt_text_transcription", VOICE_TEXT,
+                            "--speaker_prompt_audio_path", str(voice_wav),
+                            "--speaker_prompt_text_transcription", voice["text"],
                             "--output_path", str(path)],
                            cwd=BREEZY, check=True, env=BREEZY_ENV,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
