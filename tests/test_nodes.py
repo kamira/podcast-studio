@@ -73,8 +73,13 @@ def fake_media(monkeypatch, out):
         p.write_bytes(b"MP4")
         return p
 
+    def add_title(img, title):  # 替身:CI(Linux)沒有 media.FONT 的 macOS 字型
+        calls.setdefault("add_title", []).append((img.size, title))
+        return img
+
     monkeypatch.setattr(media, "generate_image", generate_image)
     monkeypatch.setattr(media, "make_video", make_video)
+    monkeypatch.setattr(media, "add_title", add_title)
     return calls
 
 
@@ -275,7 +280,7 @@ def test_generate_image傳入寬高(fake_media):
     assert fake_media["generate_image"] == [("p", 512, 256)]
 
 
-def test_add_title存成新的16比9封面且不改原圖(out):
+def _add_title_case(out):
     src = tai.reserve("image", ".png")
     Image.new("RGB", (1360, 768), "navy").save(src)
     before = src.read_bytes()
@@ -285,6 +290,16 @@ def test_add_title存成新的16比9封面且不改原圖(out):
     assert p != src and p.parent == out and p.name.startswith("cover-")
     assert Image.open(p).size == (media.VIDEO_W, media.VIDEO_H)
     assert src.read_bytes() == before
+
+
+def test_add_title存成新的16比9封面且不改原圖(fake_media, out):
+    _add_title_case(out)
+    assert fake_media["add_title"] == [((media.VIDEO_W, media.VIDEO_H), "夜市的味道")]
+
+
+@pytest.mark.skipif(not Path(media.FONT).exists(), reason="本機沒有 media.FONT 字型(例如 Linux CI)")
+def test_add_title以真實字型疊標題(out):
+    _add_title_case(out)
 
 
 def test_add_title失敗時不留佔位檔(out, monkeypatch):
