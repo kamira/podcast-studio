@@ -1,4 +1,4 @@
-// Podcast 工作室前端(CHG-20261022-01 T10、T11):首頁 ⚙ 入口、設定頁子頁切換、「設定 › 進階流程」節點畫布、
+// Podcast 工作室前端(CHG-20261022-01 T10、T11、T12):首頁 ⚙ 入口、設定頁子頁切換、「設定 › 進階流程」節點畫布、
 // 檔案拖放(T11)與工作流程存檔 / 載入對話框(T11)。
 //
 // 約束(CHG Global Constraints):
@@ -8,7 +8,7 @@
 //   - 所有請求帶 X-Studio-Token(取自 <meta name="studio-token">)。
 //   - Drawflow 的數字 id 送到 API 前一律轉成字串。
 //
-// 設定頁表單屬 T12,這裡只留位置。
+// 設定頁表單(T12):模型、審議席位子頁、還原預設、儲存(422 逐欄顯示);免責說明頁只留位置。
 "use strict";
 
 (function () {
@@ -200,19 +200,35 @@
 
   // ---------- 頁面切換(hash 路由,不是網頁分頁) ----------
 
+  const FORM_SUBPAGES = ["models", "seats"];   // 共用「還原預設 / 儲存」與提示列的子頁
+  let currentPage = null;
+
+  function showPage(name) {
+    ["home", "settings", "disclaimer"].forEach(function (p) {
+      document.getElementById("page-" + p).hidden = p !== name;
+    });
+    const entering = currentPage !== name;
+    currentPage = name;
+    return entering;
+  }
+
   function route() {
     const h = location.hash || "#/";
+    if (/^#\/disclaimer\/?$/.test(h)) {
+      showPage("disclaimer");
+      return;
+    }
     const m = /^#\/settings(?:\/([a-z]+))?\/?$/.exec(h);
-    const home = document.getElementById("page-home");
-    const settings = document.getElementById("page-settings");
     if (!m) {
-      home.hidden = false;
-      settings.hidden = true;
+      showPage("home");
       return;
     }
     const sub = SUBPAGES.indexOf(m[1]) !== -1 ? m[1] : "models";
-    home.hidden = true;
-    settings.hidden = false;
+    // 由其他頁面進入設定頁時重新讀取設定與模型清單
+    if (showPage("settings")) Settings.open();
+    const formSub = FORM_SUBPAGES.indexOf(sub) !== -1;
+    document.getElementById("cfg-notices").hidden = !formSub;
+    document.getElementById("cfg-actions").hidden = !formSub;
     document.querySelectorAll(".subpage").forEach(function (p) { p.hidden = p.dataset.sub !== sub; });
     document.querySelectorAll(".subnav-link").forEach(function (a) {
       if (a.dataset.sub === sub) a.setAttribute("aria-current", "page");
@@ -1215,9 +1231,315 @@
     },
   };
 
+  // ---------- 設定頁表單(T12) ----------
+  //
+  // 資料來源:GET /api/config(目前設定 + _warnings + meta.imported_from / imported_at)、
+  // GET /api/models(Ollama 清單、mflux / BreezyVoice 是否安裝、可選聲線檔)。
+  // 儲存:PUT /api/config(帶 X-Studio-Token);422 逐欄顯示、503 表示 Ollama 未啟動。
+  // 欄位一律以 data-field="roles.reason.model" 這類路徑對應 settings.DEFAULTS 的鍵。
+
+  // 預設值:settings.DEFAULTS 的 JSON 副本(「還原預設」用;tests/test_static.py 檢查與 settings.DEFAULTS 相等)
+  const SETTINGS_DEFAULTS = {"roles": {"reason": {"model": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M", "think": true, "num_ctx": 16384}, "reason_heavy": {"model": "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M", "think": true, "num_ctx": 16384}, "taiwan": {"model": "hf.co/mradermacher/Llama-Breeze2-8B-Instruct-text-only-GGUF:Q4_K_M", "think": null, "num_ctx": 16384}, "image": {"model": "mflux-community/flux-1-schnell-mflux-q4", "steps": 4}, "voice": {"wav": "tools/BreezyVoice/data/example.wav", "text": "在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。"}}, "review_seats": {"risk": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M", "impact": "glm4:latest", "drift": "qwen3:8b", "compliance": "codex", "security": "codex", "consistency": "glm4:latest"}};
+
+  // 審議席位規則:與 settings.validate 一致(CODEX、VETO_SEATS、SEATS、PAUSED_REVIEW_MODELS、
+  // 否決席不得用 glm4:*);tests/test_static.py 比對常數,並在有 JS 執行環境時實跑 seatAllows
+  const SEAT_RULES = {"codex": "codex", "veto_seats": ["risk", "security", "compliance"], "seats": ["risk", "impact", "drift", "compliance", "security", "consistency"], "paused": ["hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M"], "veto_banned_prefix": "glm4:"};
+
+  // 數值欄位範圍:同 settings.NUM_CTX_RANGE、STEPS_RANGE、MAX_TEXT_LEN(tests/test_static.py 檢查)
+  const FIELD_LIMITS = {"num_ctx": [2048, 65536], "steps": [1, 8], "text_max": 20000, "name_max": 300};
+
+  const OLLAMA_DOWN_TEXT = "Ollama 未啟動,無法儲存模型設定";
+  const CODEX_LABEL = "Codex";
+
+  // 審議席位下拉的唯一規則(seat 為席位名稱,model 為模型名稱或 SEAT_RULES.codex)
+  function seatAllows(seat, model) {
+    const veto = SEAT_RULES.veto_seats.indexOf(seat) !== -1;
+    if (model === SEAT_RULES.codex) return veto;
+    if (SEAT_RULES.paused.indexOf(model) !== -1) return false;
+    if (veto && String(model).indexOf(SEAT_RULES.veto_banned_prefix) === 0) return false;
+    return true;
+  }
+  // seatAllows 結束
+
+  // 伺服器錯誤訊息「roles.reason.model:模型…」→ {field, message};沒有欄位前綴回 null
+  function splitFieldError(text) {
+    const s = String(text);
+    const i = s.indexOf(":");
+    if (i <= 0) return null;
+    const key = s.slice(0, i);
+    if (!/^[a-z_]+(\.[a-z_]+)+$/.test(key)) return null;
+    return { field: key, message: s.slice(i + 1) };
+  }
+
+  function getPath(obj, path) {
+    return path.split(".").reduce(function (o, k) {
+      return o && typeof o === "object" && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined;
+    }, obj);
+  }
+
+  function setPath(obj, path, value) {
+    const keys = path.split(".");
+    let o = obj;
+    keys.slice(0, -1).forEach(function (k) {
+      if (!o[k] || typeof o[k] !== "object") o[k] = {};
+      o = o[k];
+    });
+    o[keys[keys.length - 1]] = value;
+  }
+
+  const Settings = {
+    loaded: false,
+    loading: false,
+    saving: false,
+    models: null,          // GET /api/models 的回應
+    ollamaUp: false,
+
+    $(id) { return document.getElementById(id); },
+
+    fields() {
+      return Array.from(document.querySelectorAll("#page-settings [data-field]"));
+    },
+
+    field(path) {
+      return this.fields().find(function (f) { return f.dataset.field === path; }) || null;
+    },
+
+    // 第一次進入設定頁(或由別的頁面回來)時重新讀取
+    async open() {
+      if (this.loading) return;
+      this.loading = true;
+      this.$("cfg-notices").hidden = false;
+      this.$("cfg-loading").hidden = false;
+      this.$("cfg-save").disabled = true;
+      const both = await Promise.all([api("GET", "/api/config"), api("GET", "/api/models")]);
+      this.loading = false;
+      this.$("cfg-loading").hidden = true;
+      const cfg = both[0];
+      const models = both[1];
+      this.models = models.ok && models.data ? models.data : null;
+      this.ollamaUp = !!(this.models && this.models.ollama && this.models.ollama.reachable === true);
+      this.showTools();
+      this.clearErrors();
+      if (!cfg.ok || !cfg.data || typeof cfg.data !== "object") {
+        this.showTopErrors(["讀取設定失敗:" + errorText(cfg)]);
+        this.fill(SETTINGS_DEFAULTS);
+        this.loaded = false;
+        this.updateSaveState();
+        return;
+      }
+      this.showNotices(cfg.data);
+      this.fill(cfg.data);
+      this.loaded = true;
+      this.updateSaveState();
+    },
+
+    updateSaveState() {
+      const down = this.$("cfg-ollama-down");
+      down.textContent = OLLAMA_DOWN_TEXT;
+      down.hidden = this.ollamaUp;
+      this.$("cfg-save").disabled = !this.loaded || !this.ollamaUp || this.saving;
+    },
+
+    showTools() {
+      const m = this.models || {};
+      const mark = function (id, info, name) {
+        const e = document.getElementById(id);
+        const ok = !!(info && info.installed === true);
+        e.textContent = ok ? "✔ " + name + " 已安裝" : "✘ " + name + " 未安裝";
+        e.classList.toggle("tool-ok", ok);
+        e.classList.toggle("tool-missing", !ok);
+      };
+      mark("cfg-mflux", m.mflux, "mflux");
+      mark("cfg-breezy", m.breezyvoice, "BreezyVoice");
+    },
+
+    // _warnings 橫幅與「已匯入一次」提示
+    showNotices(data) {
+      const w = this.$("cfg-warnings");
+      w.replaceChildren();
+      const warnings = Array.isArray(data._warnings) ? data._warnings : [];
+      warnings.forEach(function (t) { w.appendChild(el("div", "", "⚠ " + String(t))); });
+      w.hidden = warnings.length === 0;
+      const meta = data.meta && typeof data.meta === "object" ? data.meta : {};
+      const imp = this.$("cfg-imported");
+      if (typeof meta.imported_from === "string" && meta.imported_from) {
+        const at = typeof meta.imported_at === "string" && meta.imported_at ? "(" + meta.imported_at + ")" : "";
+        imp.textContent = "ⓘ 已從 " + meta.imported_from + " 匯入一次" + at + ",之後只讀設定資料庫";
+        imp.hidden = false;
+      } else {
+        imp.textContent = "";
+        imp.hidden = true;
+      }
+    },
+
+    // 下拉選項:Ollama 清單(或聲線檔清單)+ 目前值(不在清單內時標註)
+    options(f, current) {
+      const kind = f.dataset.options;
+      const m = this.models || {};
+      const ollama = m.ollama && Array.isArray(m.ollama.models) ? m.ollama.models.filter(function (x) { return typeof x === "string"; }) : [];
+      let list = [];
+      if (kind === "ollama") {
+        list = ollama.map(function (n) { return { value: n, label: n }; });
+      } else if (kind === "voice") {
+        const voices = Array.isArray(m.voices) ? m.voices.filter(function (x) { return typeof x === "string"; }) : [];
+        list = voices.map(function (n) { return { value: n, label: n }; });
+      } else if (kind === "seat") {
+        const seat = f.dataset.field.split(".")[1];
+        list = ollama.filter(function (n) { return seatAllows(seat, n); })
+          .map(function (n) { return { value: n, label: n }; });
+        if (seatAllows(seat, SEAT_RULES.codex)) list.unshift({ value: SEAT_RULES.codex, label: CODEX_LABEL });
+      }
+      if (typeof current === "string" && current && !list.some(function (o) { return o.value === current; })) {
+        const missing = kind === "voice" ? "(找不到檔案)" : (this.ollamaUp ? "(未下載)" : "");
+        const label = current === SEAT_RULES.codex ? CODEX_LABEL : current + missing;
+        list.unshift({ value: current, label: label });
+      }
+      return list;
+    },
+
+    fill(data) {
+      const self = this;
+      this.fields().forEach(function (f) {
+        const v = getPath(data, f.dataset.field);
+        if (f.dataset.options) {
+          f.replaceChildren();
+          self.options(f, v).forEach(function (o) {
+            const opt = el("option", "", o.label);
+            opt.value = o.value;
+            f.appendChild(opt);
+          });
+          f.value = typeof v === "string" ? v : "";
+        } else if (f.dataset.kind === "think") {
+          f.value = v === true ? "true" : v === false ? "false" : "null";
+        } else {
+          f.value = v === undefined || v === null ? "" : String(v);
+        }
+      });
+    },
+
+    collect() {
+      const out = {};
+      this.fields().forEach(function (f) {
+        let v = f.value;
+        if (f.dataset.kind === "think") v = v === "true" ? true : v === "false" ? false : null;
+        // 整數欄位:不是整數就原樣送出,由伺服器回 422 指出欄位
+        else if (f.dataset.kind === "int" && /^-?\d+$/.test(String(v).trim())) v = parseInt(String(v).trim(), 10);
+        setPath(out, f.dataset.field, v);
+      });
+      return out;
+    },
+
+    clearErrors() {
+      this.$("cfg-errors").replaceChildren();
+      this.$("cfg-errors").hidden = true;
+      document.querySelectorAll("#page-settings .field-error").forEach(function (e) { e.remove(); });
+      this.fields().forEach(function (f) { f.removeAttribute("aria-invalid"); });
+      document.querySelectorAll(".subnav-link").forEach(function (a) { a.classList.remove("has-error"); });
+    },
+
+    showTopErrors(list) {
+      const box = this.$("cfg-errors");
+      list.forEach(function (t) { box.appendChild(el("div", "", String(t))); });
+      box.hidden = box.childElementCount === 0;
+    },
+
+    // 422:能對應到欄位的訊息放在該欄位下,其餘列在頂端
+    showFieldErrors(errors) {
+      const self = this;
+      const top = [];
+      errors.forEach(function (raw) {
+        const text = typeof raw === "string" ? raw : String((raw && raw.message) || raw);
+        const parsed = splitFieldError(text);
+        const f = parsed ? self.field(parsed.field) : null;
+        if (!f) {
+          top.push(text);
+          return;
+        }
+        f.setAttribute("aria-invalid", "true");
+        const holder = f.closest(".field") || f.parentNode;
+        holder.appendChild(el("span", "field-error", parsed.message));
+        const sub = f.closest(".subpage");
+        const link = sub && document.querySelector('.subnav-link[data-sub="' + sub.dataset.sub + '"]');
+        if (link) link.classList.add("has-error");
+      });
+      const fieldCount = errors.length - top.length;
+      if (fieldCount > 0) top.unshift("有 " + fieldCount + " 個欄位不合格,請看各欄位下方的說明(標紅的子頁)");
+      this.showTopErrors(top);
+    },
+
+    reset() {
+      this.clearErrors();
+      this.fill(SETTINGS_DEFAULTS);
+      toast("已填入預設值,按「儲存」後才會生效");
+    },
+
+    async save() {
+      if (this.saving || !this.loaded) return;
+      this.saving = true;
+      this.updateSaveState();
+      this.clearErrors();
+      const r = await api("PUT", "/api/config", this.collect());
+      this.saving = false;
+      if (r.ok && r.data && r.data.saved === true) {
+        if (r.data.config && typeof r.data.config === "object") {
+          this.showNotices(r.data.config);
+          this.fill(r.data.config);
+        }
+        this.updateSaveState();
+        toast("設定已儲存");
+        return;
+      }
+      if (r.status === 503) this.ollamaUp = false;
+      this.updateSaveState();
+      if (r.status === 422 && r.data && Array.isArray(r.data.errors)) {
+        this.showFieldErrors(r.data.errors);
+        toast("設定未儲存:有欄位不合格", true);
+        return;
+      }
+      const extra = r.data && Array.isArray(r.data.errors) ? r.data.errors.map(String) : [];
+      this.showTopErrors(["設定未儲存:" + errorText(r)].concat(extra.filter(function (t) { return t !== errorText(r); })));
+      toast("設定未儲存", true);
+    },
+
+    init() {
+      const self = this;
+      this.$("cfg-save").addEventListener("click", function () { self.save(); });
+      this.$("cfg-reset").addEventListener("click", function () { self.reset(); });
+      // 數值範圍與長度上限取自 FIELD_LIMITS,不在 HTML 另寫一份(伺服器仍會再驗證)
+      this.fields().forEach(function (f) {
+        const leaf = f.dataset.field.split(".").pop();
+        const range = FIELD_LIMITS[leaf];
+        if (f.dataset.kind === "int" && Array.isArray(range)) {
+          f.min = String(range[0]);
+          f.max = String(range[1]);
+        } else if (f.tagName === "TEXTAREA") {
+          f.maxLength = FIELD_LIMITS.text_max;
+        } else if (f.tagName === "INPUT" && f.type === "text") {
+          f.maxLength = FIELD_LIMITS.name_max;
+        }
+      });
+      // 否決席標記取自 SEAT_RULES,不在 HTML 另寫一份
+      document.querySelectorAll("#page-settings .seat[data-seat]").forEach(function (s) {
+        if (SEAT_RULES.veto_seats.indexOf(s.dataset.seat) === -1) return;
+        const mark = el("span", "veto-mark", "⛔");
+        mark.title = "否決席";
+        s.querySelector(".field-label").appendChild(mark);
+      });
+      // 欄位一改就清掉該欄位的錯誤說明
+      this.fields().forEach(function (f) {
+        f.addEventListener("change", function () {
+          f.removeAttribute("aria-invalid");
+          const holder = f.closest(".field");
+          if (holder) holder.querySelectorAll(".field-error").forEach(function (e) { e.remove(); });
+        });
+      });
+    },
+  };
+
   // ---------- 啟動 ----------
 
   function start() {
+    Settings.init();
     document.getElementById("open-settings").addEventListener("click", function () {
       location.hash = "#/settings";
     });
