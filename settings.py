@@ -93,8 +93,9 @@ WARN_UNSAFE_PATH = "設定檔路徑不安全(符號連結或位於 repo 外),已
 WARN_DB_UNREADABLE = "設定資料庫無法讀取,已使用預設值"
 WARN_DB_VERSION = "設定資料庫版本不明,已使用預設值"
 
-# 值取自 taiwan_ai.py 原有常數:MODELS、HEAVY_REASON、FLUX,以及聲線檔與逐字稿(聲線兩個常數於
-# CHG-20261026-01 T1 移除,預設值只留在這裡,taiwan_ai.speak() 每次呼叫經 role_config("voice") 讀取);
+# 值取自 taiwan_ai.py 原有常數:MODELS、HEAVY_REASON、生圖模型名稱,以及聲線檔與逐字稿(生圖與聲線
+# 的常數於 CHG-20261026-01 T1、T2 移除,預設值只留在這裡;media.generate_image() 與 taiwan_ai.speak()
+# 每次呼叫經 taiwan_ai.role_config() 讀取);
 # chat() 的 num_ctx 16384;生圖 --steps 4;ask 預設 think=True、潤飾不帶 think(None)。
 # review_seats 取自 DIR-1 現行席位表(27B 暫停期間;security、compliance 由 Codex 擔任)。
 DEFAULTS: dict = {
