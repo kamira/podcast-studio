@@ -10,3 +10,8 @@ config/studio.db-wal
 config/studio.db-shm
 config/.studio.db.lock
 config/models.json
+
+# 使用者從畫布另存的工作流程(含存檔暫存檔 .wf-*.tmp)屬使用者資料,不入 git;
+# workflows/ 之下只追蹤預設範本 default.json(CHG-20261026-01 T3)
+workflows/*
+!workflows/default.json
