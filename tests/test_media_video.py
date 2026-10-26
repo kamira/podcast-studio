@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import struct
 import wave
@@ -166,3 +167,57 @@ def test_media_does_not_import_wave():
     src = (ROOT / "media.py").read_text(encoding="utf-8")
     assert not re.search(r"^\s*import wave\b", src, re.M)
     assert "import wave" not in src
+
+
+# ── 依 PR #56 審議修正:讀檔錯誤與補位 ─────────────────────
+
+def _assert_unreadable(path):
+    with pytest.raises(ValueError) as ei:
+        media.wav_seconds(path)
+    msg = str(ei.value)
+    assert _HAN.search(msg), f"錯誤訊息要有繁中:{msg!r}"
+    assert path.name not in msg and str(path.parent) not in msg
+    assert ei.value.__cause__ is None and ei.value.__suppress_context__
+
+
+def test_missing_file(tmp_path):
+    _assert_unreadable(tmp_path / "不存在.wav")
+
+
+def test_path_is_directory(tmp_path):
+    d = tmp_path / "目錄.wav"
+    d.mkdir()
+    _assert_unreadable(d)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root 不受檔案權限限制")
+def test_no_read_permission(tmp_path):
+    p = _float_wav(tmp_path, 0.5, 8000, name="鎖住.wav")
+    p.chmod(0)
+    try:
+        _assert_unreadable(p)
+    finally:
+        p.chmod(0o600)
+
+
+def test_odd_chunk_missing_pad_byte_before_fmt(tmp_path):
+    # 奇數長度的 LIST 區塊剛好在檔尾,缺少補位位元組
+    p = _write(tmp_path, "x.wav", _riff() + b"LIST" + struct.pack("<I", 3) + b"abc")
+    _assert_bad(p)
+    with pytest.raises(ValueError, match="超出檔尾"):
+        media.wav_seconds(p)
+
+
+def test_odd_data_chunk_at_eof_without_pad(tmp_path):
+    # 8 位元單聲道、data 3 位元組且為最後一個區塊、缺少補位:與其他區塊同樣判為壞檔
+    fmt = _chunk(b"fmt ", _fmt(1, 1, 8000, 8))
+    p = _write(tmp_path, "x.wav", _riff(fmt) + b"data" + struct.pack("<I", 3) + b"\x80\x80\x80")
+    _assert_bad(p)
+    with pytest.raises(ValueError, match="超出檔尾"):
+        media.wav_seconds(p)
+
+
+def test_odd_data_chunk_with_pad(tmp_path):
+    fmt = _chunk(b"fmt ", _fmt(1, 1, 8000, 8))
+    p = _write(tmp_path, "x.wav", _riff(fmt, _chunk(b"data", b"\x80" * 8001)))
+    assert abs(media.wav_seconds(p) - 8001 / 8000) <= 0.001

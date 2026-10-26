@@ -94,12 +94,8 @@ _WAV_FMT_MAX = 64  # fmt chunk 最多讀進記憶體的位元組數
 _WAV_PCM, _WAV_FLOAT, _WAV_EXTENSIBLE = 1, 3, 0xFFFE
 
 
-def wav_seconds(path):
-    """以標準庫 struct 解析 RIFF/WAVE 的 fmt 與 data chunk,回傳秒數(CHG-20261026-01 T4)。
-
-    支援 PCM(1)、IEEE float(3)與 WAVE_FORMAT_EXTENSIBLE(0xFFFE,以 SubFormat 前 2 位元組判斷)。
-    只讀 chunk 標頭與 fmt 內容,data 不讀進記憶體;壞檔或不支援的編碼丟 ValueError(訊息不含路徑)。
-    """
+def _wav_read_chunks(path):
+    """走訪 RIFF chunk,回傳(fmt 內容, data 位元組數);找不到的回 None。OSError 由呼叫端轉換。"""
     with open(path, "rb") as f:
         size = f.seek(0, os.SEEK_END)
         f.seek(0)
@@ -112,14 +108,20 @@ def wav_seconds(path):
             if pos + 8 > size:
                 break
             f.seek(pos)
-            cid, clen = struct.unpack("<4sI", f.read(8))
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                raise ValueError("WAV 檔案損毀:區塊標頭不完整")
+            cid, clen = struct.unpack("<4sI", hdr)
             body = pos + 8
-            if clen > size - body:
+            # 奇數長度的區塊後面有 1 位元組補位(含最後一個 data 區塊),補位也必須在檔案範圍內
+            if clen + (clen & 1) > size - body:
                 raise ValueError("WAV 檔案損毀:區塊長度超出檔尾")
             if cid == b"fmt ":
                 if clen < 16:
                     raise ValueError("WAV 檔案損毀:fmt 區塊太短")
                 fmt = f.read(min(clen, _WAV_FMT_MAX))
+                if len(fmt) < 16:
+                    raise ValueError("WAV 檔案損毀:fmt 區塊太短")
             elif cid == b"data":
                 data_len = clen
             if fmt is not None and data_len is not None:
@@ -127,6 +129,20 @@ def wav_seconds(path):
             pos = body + clen + (clen & 1)
         else:
             raise ValueError("WAV 檔案區塊過多,無法解析")
+    return fmt, data_len
+
+
+def wav_seconds(path):
+    """以標準庫 struct 解析 RIFF/WAVE 的 fmt 與 data chunk,回傳秒數(CHG-20261026-01 T4)。
+
+    支援 PCM(1)、IEEE float(3)與 WAVE_FORMAT_EXTENSIBLE(0xFFFE,以 SubFormat 前 2 位元組判斷)。
+    只讀 chunk 標頭與 fmt 內容,data 不讀進記憶體;壞檔或不支援的編碼丟 ValueError(訊息不含路徑)。
+    """
+    try:
+        fmt, data_len = _wav_read_chunks(path)
+    except OSError:
+        # 系統錯誤訊息是英文且可能帶路徑;from None 斷開例外鏈,避免路徑經 __cause__ 洩漏
+        raise ValueError("音檔無法讀取") from None
     if fmt is None:
         raise ValueError("WAV 檔案損毀:缺少 fmt 區塊")
     if data_len is None:
