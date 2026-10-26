@@ -51,9 +51,12 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
                                  其他一律 `application/octet-stream` + `Content-Disposition: attachment`。
   GET  /api/workflows/{name}     讀 `workflows/<name>.json` → {"name", "graph"};不存在 404;內容壞掉 422
   PUT  /api/workflows/{name}     本文 {"graph": 流程圖, "overwrite": true|false(選填,預設 false)};
-                                 名稱必須完全符合 `[\\w\\-]{1,64}`(re.ASCII:只限英數、底線、連字號);
+                                 名稱(GET 同)先 NFC 正規化,檔名與回應一律用 NFC 形式;每個字必須是
+                                 Unicode 字母(L*)或數字(N*,含中文),或 `-`、`_`,NFC 後 1~64 字,
+                                 且 `<名稱>.json` 不超過 255 位元組,否則 400(使用者 2026-10-26 開放中文);
                                  graph 必須通過 executor.validate(不合格 400,格式同 /api/run);
-                                 本文上限 MAX_BODY(413);已存在且未帶 overwrite:true → 409。
+                                 本文上限 MAX_BODY(413);已存在且未帶 overwrite:true → 409;
+                                 已有只差大小寫(casefold 相等)的其他名稱 → 一律 409,不論 overwrite。
                                  寫入同目錄暫存檔後:不覆寫時以 `os.link` 排他建立,覆寫時 `os.replace`
                                  (原子替換;既有的符號連結只被替換,不寫入其目標)。
   `outputs/`、`outputs/uploads/`、`workflows/` 逐層不得是符號連結、解析後必須等於 repo 內對應目錄;
@@ -104,12 +107,12 @@ import hmac
 import html
 import json
 import os
-import re
 import secrets
 import sys
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 from collections import OrderedDict
 from pathlib import Path
@@ -154,7 +157,11 @@ CONFIG_EXTRA_KEYS = ("_warnings", "meta")   # GET 回應附加、PUT 時忽略�
 MAX_UPLOAD_NAME = 255
 # 副檔名 → 埠型別;與 file-input 節點接受的副檔名一致
 UPLOAD_KINDS = {ext: kind for kind, exts in nodes.FILE_KINDS.items() for ext in exts}
-WORKFLOW_NAME = re.compile(r"[\w\-]{1,64}", re.ASCII)   # 只允許英數、底線、連字號(以 fullmatch 比對)
+# 工作流程名稱(使用者 2026-10-26 指示開放中文):NFC 正規化後 1~64 個字,每個字必須是
+# Unicode 字母(L*)或數字(N*),或 `-`、`_`;`<名稱>.json` 的 UTF-8 長度不得超過檔案系統上限
+MAX_WORKFLOW_NAME = 64
+MAX_FILE_NAME_BYTES = 255
+WORKFLOW_NAME_HINT = "工作流程名稱只能用文字(含中文)、數字、底線、連字號,長度 1 到 64 字"
 M4A_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2"})
 # /files/* 的回應型別:表內的以 inline 送出;不在表內的一律 octet-stream + attachment
 SERVE_TYPES = {
@@ -438,8 +445,30 @@ def _safe_dir(root: Path, *parts: str, create: bool) -> Path:
     return expected
 
 
-def _valid_name(name: str) -> bool:
-    return isinstance(name, str) and WORKFLOW_NAME.fullmatch(name) is not None
+def _normalize_name(name) -> str | None:
+    """工作流程名稱檢查;合格回傳 NFC 形式(檔名一律用它),不合格回 None。
+
+    - 先 NFC 正規化:macOS 會把 NFD 與 NFC 視為同一檔名,統一用 NFC 才不會存出兩份。
+    - 逐字以 Unicode 類別判斷(字母 L*、數字 N*),另外只允許 `-`、`_`;不用 `\\w`,
+      因為 `\\w` 也比對連接符號(例 U+203F)。空白、`.`、`/`、`\\`、控制字元、單獨的組合記號、
+      零寬字元、全形斜線、方向覆寫字元等一律不合格。
+    - 長度以 NFC 後的字數計,1~64;`<名稱>.json` 的 UTF-8 位元組數不得超過 255。
+    """
+    if not isinstance(name, str):
+        return None
+    nfc = unicodedata.normalize("NFC", name)
+    if not 1 <= len(nfc) <= MAX_WORKFLOW_NAME:
+        return None
+    if not all(ch in "-_" or unicodedata.category(ch)[0] in "LN" for ch in nfc):
+        return None
+    if len(f"{nfc}.json".encode("utf-8")) > MAX_FILE_NAME_BYTES:
+        return None
+    return nfc
+
+
+def _fold_name(name: str) -> str:
+    """比對「只差大小寫」用的鍵(casefold 後再 NFC)。"""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", name).casefold())
 
 
 def _upload_ext(name: str | None) -> str | None:
@@ -746,10 +775,28 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     def _workflow_path(name: str, create: bool) -> Path:
         return _safe_dir(root, "workflows", create=create) / f"{name}.json"
 
+    def _case_variant(folder: Path, name: str) -> str | None:
+        """找出 `workflows/` 裡與 name 只差大小寫(casefold 相等、本身不同)的既有名稱。
+
+        macOS 預設檔案系統不分大小寫,`Flow` 與 `flow` 會指到同一檔;Linux 則是兩個檔。
+        為了兩邊行為一致,這種名稱一律回 409,請使用者用原名稱覆寫(不論 overwrite)。
+        """
+        key = _fold_name(name)
+        with os.scandir(folder) as it:
+            for entry in it:
+                fn = entry.name
+                if fn.startswith(".") or not fn.endswith(".json"):
+                    continue
+                stem = unicodedata.normalize("NFC", fn[:-len(".json")])
+                if stem != name and _fold_name(stem) == key:
+                    return stem
+        return None
+
     @app.get("/api/workflows/{name}")
     def api_workflow_get(name: str):
-        if not _valid_name(name):
-            return _err("工作流程名稱只能用英數字、底線、連字號,最多 64 字", 400)
+        name = _normalize_name(name)
+        if name is None:
+            return _err(WORKFLOW_NAME_HINT, 400)
         try:
             path = _workflow_path(name, create=False)
         except OSError:
@@ -771,8 +818,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
 
     @app.put("/api/workflows/{name}")
     async def api_workflow_put(name: str, request: Request):
-        if not _valid_name(name):
-            return _err("工作流程名稱只能用英數字、底線、連字號,最多 64 字", 400)
+        name = _normalize_name(name)
+        if name is None:
+            return _err(WORKFLOW_NAME_HINT, 400)
         body = await _read_body(request)
         if body is None:
             return _bad(f"請求內容超過 {MAX_BODY // (1024 * 1024)} MB", 413)
@@ -794,10 +842,17 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         except OSError as e:
             print(f"studio_server:工作流程目錄不安全({type(e).__name__})", file=sys.stderr)
             return _err("工作流程目錄不可用", 500)
+        try:
+            variant = _case_variant(path.parent, name)
+        except OSError as e:
+            print(f"studio_server:工作流程目錄無法列出({type(e).__name__})", file=sys.stderr)
+            return _err("工作流程目錄不可用", 500)
+        if variant is not None:
+            return _err(f"已有只差大小寫的工作流程「{variant}」;要覆寫請改用這個名稱", 409)
         if not overwrite and os.path.lexists(path):
             return _err("已有同名的工作流程;確認要覆寫請帶 overwrite:true", 409)
         data = json.dumps(graph, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-        tmp = path.parent / f".{name}.{uuid.uuid4().hex}.tmp"
+        tmp = path.parent / f".wf-{uuid.uuid4().hex}.tmp"   # 不含名稱:最長的名稱也不會讓暫存檔名超過 255 位元組
         try:
             with os.fdopen(_open_excl(tmp, 0o644), "wb") as f:
                 f.write(data)

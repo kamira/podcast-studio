@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import os
 import struct
+import unicodedata
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -421,7 +423,8 @@ def test_workflow_overwrite_is_atomic_replace(client, root, monkeypatch):
 
 
 @pytest.mark.parametrize("name", [
-    "..", "a..b", "a.json", "a b", "流程", "%2e%2e", "a%2fb", "a" * 65, "a%0a", "-" * 65, "é",
+    "..", "a..b", "a.json", "a b", "%2e%2e", "a%2fb", "a" * 65, "a%0a", "-" * 65,
+    "夜市%2F流程", "夜市%2f..%2f流程", "夜市 流程", "夜市.流程", "%E5%A4%9C%00", "夜" * 65,
 ])
 def test_workflow_bad_names_rejected(client, root, name):
     r = put_wf(client, name)
@@ -434,12 +437,142 @@ def test_workflow_bad_names_rejected(client, root, name):
     assert not (root / "a.json").exists()
 
 
-def test_workflow_name_regex_is_ascii_only():
-    assert ss.WORKFLOW_NAME.pattern == r"[\w\-]{1,64}"
-    assert ss.WORKFLOW_NAME.flags & __import__("re").ASCII
-    assert ss._valid_name("A-z_09") and ss._valid_name("a" * 64)
-    for bad in ["", "a" * 65, "流程", "a\n", "a/b", "..", "a.b", "é", "a\x00"]:
-        assert not ss._valid_name(bad), bad
+# ---------- 工作流程名稱:Unicode 字母數字加 - _(使用者 2026-10-26 指示) ----------
+
+GOOD_NAMES = [
+    "A-z_09", "a" * 64, "夜市流程", "第1集_夜市-初稿", "夜" * 64, "café", "Ünïcödé", "東京タワー",
+    "한국어", "١٢٣", "Ⅻ", "\U00020000" * 62,
+]
+BAD_NAMES = [
+    "", "a" * 65, "夜" * 65, "a b", "a.b", "a/b", "a\\b", "..", ".", "a\x00", "a\n", "\x07", "a\x7f",
+    "́", "a​b", "a‍b", "﻿a", "a／b", "a‮b", "a　b", "a‿b",
+    "夜市。流程", "a:b", "a*b", "a\U0001F600", "\U00020000" * 64, None, 123,
+]
+
+
+@pytest.mark.parametrize("name", GOOD_NAMES)
+def test_workflow_name_unicode_letters_digits_allowed(name):
+    assert ss._normalize_name(name) == unicodedata.normalize("NFC", name)
+
+
+@pytest.mark.parametrize("name", BAD_NAMES)
+def test_workflow_name_other_chars_rejected(name):
+    assert ss._normalize_name(name) is None
+
+
+def test_workflow_name_not_using_backslash_w():
+    """`\\w` 也會比對連接符號(例 U+203F);改用明確的 Unicode 類別檢查。"""
+    assert not hasattr(ss, "WORKFLOW_NAME")
+    assert ss._normalize_name("a‿b") is None and ss._normalize_name("a⁀b") is None
+
+
+def test_workflow_name_length_counted_after_nfc():
+    nfd = unicodedata.normalize("NFD", "é") * 64          # NFD 128 個碼位、NFC 64 個字
+    assert len(nfd) == 128
+    assert ss._normalize_name(nfd) == "é" * 64
+    assert ss._normalize_name(nfd + "e") is None
+
+
+def test_workflow_name_utf8_file_name_limit():
+    longest = "夜" * 64
+    assert len((longest + ".json").encode("utf-8")) <= 255
+    assert ss._normalize_name(longest) == longest
+    four_byte = "\U00020000" * 63                          # 63 字但 `<名稱>.json` 257 位元組
+    assert len((four_byte + ".json").encode("utf-8")) > 255
+    assert ss._normalize_name(four_byte) is None
+
+
+def test_workflow_chinese_name_round_trip_percent_encoded(client, root):
+    name = "夜市流程"
+    encoded = quote(name, safe="")
+    assert encoded.startswith("%E5")
+    r = client.put(f"/api/workflows/{encoded}", json={"graph": GRAPH}, headers=auth())
+    assert r.status_code == 200, r.text
+    assert r.json() == {"name": name, "saved": True}
+    assert files_in(root / "workflows") == ["夜市流程.json"]
+    g = client.get(f"/api/workflows/{encoded}")
+    assert g.status_code == 200
+    assert g.json() == {"name": name, "graph": GRAPH}
+
+
+def test_workflow_64_char_chinese_name_saved(client, root):
+    name = "夜" * 64
+    r = put_wf(client, quote(name, safe=""))
+    assert r.status_code == 200, r.text
+    assert files_in(root / "workflows") == [name + ".json"]
+    assert client.get(f"/api/workflows/{quote(name, safe='')}").json()["graph"] == GRAPH
+
+
+def test_workflow_nfd_and_nfc_map_to_same_file(client, root):
+    nfc = unicodedata.normalize("NFC", "café夜市")
+    nfd = unicodedata.normalize("NFD", "café夜市")
+    assert nfc != nfd
+    r = put_wf(client, quote(nfd, safe=""))
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == nfc
+    names = files_in(root / "workflows")
+    assert names == [nfc + ".json"]
+    assert unicodedata.is_normalized("NFC", names[0])
+    assert put_wf(client, quote(nfc, safe="")).status_code == 409        # 同一個名稱
+    g = client.get(f"/api/workflows/{quote(nfd, safe='')}")
+    assert g.status_code == 200 and g.json()["name"] == nfc
+    other = {"nodes": [{"id": "x", "kind": "text-input", "params": {"text": "新"}}], "edges": []}
+    assert put_wf(client, quote(nfc, safe=""), graph=other, overwrite=True).status_code == 200
+    assert files_in(root / "workflows") == [nfc + ".json"]
+
+
+@pytest.mark.parametrize("first,second", [("Flow", "flow"), ("夜市Flow", "夜市FLOW"), ("STRASSE", "straße")])
+def test_workflow_case_variant_name_is_409_even_with_overwrite(client, root, first, second):
+    """只差大小寫的名稱在 macOS(預設不分大小寫)會指到同一檔;一律拒絕,請用原名稱覆寫。"""
+    assert put_wf(client, quote(first, safe="")).status_code == 200
+    other = {"nodes": [{"id": "x", "kind": "text-input", "params": {"text": "新"}}], "edges": []}
+    for ow in (None, False, True):
+        r = put_wf(client, quote(second, safe=""), graph=other, overwrite=ow)
+        assert r.status_code == 409, (ow, r.text)
+        msg = r.json()["error"]
+        assert "大小寫" in msg and first in msg
+        assert str(root) not in r.text
+    assert files_in(root / "workflows") == [first + ".json"]
+    assert client.get(f"/api/workflows/{quote(first, safe='')}").json()["graph"] == GRAPH
+    assert put_wf(client, quote(first, safe=""), graph=other, overwrite=True).status_code == 200
+    assert client.get(f"/api/workflows/{quote(first, safe='')}").json()["graph"] == other
+
+
+def test_workflow_bad_name_error_is_chinese_without_paths(client, root):
+    for name in ["夜市 流程", "a%E2%80%8Bb", "%EF%BC%8F", "%E2%80%AE"]:
+        r = client.put(f"/api/workflows/{name}", json={"graph": GRAPH}, headers=auth())
+        assert r.status_code == 400, name
+        msg = r.json()["error"]
+        assert "工作流程名稱" in msg and "64" in msg
+        assert str(root) not in r.text
+        g = client.get(f"/api/workflows/{name}")
+        assert g.status_code == 400 and g.json()["error"] == msg
+    assert files_in(root / "workflows") == []
+
+
+def test_workflow_chinese_name_invalid_graph_still_400(client, root):
+    """草稿仍需通過 executor.validate 才能存。"""
+    bad = {"nodes": [{"id": "a", "kind": "no-such-kind"}], "edges": []}
+    r = put_wf(client, quote("夜市草稿", safe=""), graph=bad, overwrite=True)
+    assert r.status_code == 400
+    assert r.json()["errors"][0]["node_id"] == "a"
+    assert files_in(root / "workflows") == []
+
+
+def test_workflow_temp_file_name_fits_for_longest_name(client, root, monkeypatch):
+    """最長的名稱寫入時,暫存檔名也不超過 255 位元組。"""
+    seen = []
+    real = ss._open_excl
+
+    def spy(path, mode):
+        seen.append(Path(path).name)
+        return real(path, mode)
+
+    monkeypatch.setattr(ss, "_open_excl", spy)
+    name = "\U00020000" * 62
+    assert put_wf(client, quote(name, safe="")).status_code == 200
+    assert seen and all(len(n.encode("utf-8")) <= 255 for n in seen)
+    assert files_in(root / "workflows") == [name + ".json"]
 
 
 def test_workflow_slash_name_does_not_escape(client, root):
