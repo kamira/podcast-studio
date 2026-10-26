@@ -18,6 +18,10 @@ FLUX_W, FLUX_H = 1360, 768  # FLUX 尺寸需為 16 的倍數,比例接近 16:9
 
 
 def generate_image(prompt, width=1024, height=1024):
+    # 生圖模型與步數每次呼叫讀一次設定(roles.image;CHG-20261026-01 T2)
+    conf = tai.role_config("image")
+    # 沿用目前環境並加 HF_HUB_OFFLINE=1:本機沒有快取的模型直接失敗,不在執行期下載
+    env = {**os.environ, "HF_HUB_OFFLINE": "1"}
     tai.unload_llms()
     path = tai.reserve("image", ".png")
     # mflux 遇到已存在的輸出檔不覆寫,而是改存成 `<名>_1.png`;所以讓它寫進新建的私有暫存目錄,
@@ -26,9 +30,10 @@ def generate_image(prompt, width=1024, height=1024):
     try:
         with tai.discard_on_error(path):
             tmp = Path(tmpdir) / "image.png"
-            subprocess.run([str(tai.MFLUX), "--model", tai.FLUX, "--base-model", "schnell", "--steps", "4",
+            subprocess.run([str(tai.MFLUX), "--model", conf["model"], "--base-model", "schnell",
+                            "--steps", str(conf["steps"]),
                             "--width", str(width), "--height", str(height), "--prompt", prompt,
-                            "--output", str(tmp)], check=True, stdout=subprocess.DEVNULL)
+                            "--output", str(tmp)], check=True, stdout=subprocess.DEVNULL, env=env)
             os.replace(tmp, path)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

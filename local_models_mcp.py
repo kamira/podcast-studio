@@ -115,7 +115,7 @@ def list_models() -> str:
     for role in ("reason", "taiwan", "reason_heavy"):
         m = roles[role]["model"]
         rows[role] = {"model": m, "downloaded": m in have}
-    rows["image"] = {"model": tai.FLUX, "tool": str(tai.MFLUX), "installed": tai.MFLUX.exists()}
+    rows["image"] = {"model": roles["image"]["model"],"tool": str(tai.MFLUX), "installed": tai.MFLUX.exists()}
     rows["speech"] = {"model": "BreezyVoice-300M", "installed": (tai.BREEZY / ".venv").exists()}
     return json.dumps({"roles": rows, "loaded_now": loaded, "outputs": str(tai.OUT)}, ensure_ascii=False, indent=2)
 

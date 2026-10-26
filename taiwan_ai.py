@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs"
 OLLAMA = "http://localhost:11434"
 
-FLUX = "mflux-community/flux-1-schnell-mflux-q4"
+# 生圖模型名稱不再是常數(CHG-20261026-01 T2):media.generate_image() 每次呼叫經 role_config("image") 讀設定
 MFLUX = Path.home() / ".local/bin/mflux-generate"
 BREEZY = ROOT / "tools/BreezyVoice"
 # 聲線檔與逐字稿不再是常數(CHG-20261026-01 T1):每次 speak() 經 role_config("voice") 讀設定,
