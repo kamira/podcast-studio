@@ -2,9 +2,9 @@
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
-import wave
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -89,9 +89,61 @@ def make_cover(prompt, title):
     return path
 
 
+WAV_MAX_CHUNKS = 1024  # 解析 RIFF 時最多看幾個 chunk,防止惡意檔造成長時間迴圈
+_WAV_FMT_MAX = 64  # fmt chunk 最多讀進記憶體的位元組數
+_WAV_PCM, _WAV_FLOAT, _WAV_EXTENSIBLE = 1, 3, 0xFFFE
+
+
 def wav_seconds(path):
-    with wave.open(str(path)) as w:
-        return w.getnframes() / w.getframerate()
+    """以標準庫 struct 解析 RIFF/WAVE 的 fmt 與 data chunk,回傳秒數(CHG-20261026-01 T4)。
+
+    支援 PCM(1)、IEEE float(3)與 WAVE_FORMAT_EXTENSIBLE(0xFFFE,以 SubFormat 前 2 位元組判斷)。
+    只讀 chunk 標頭與 fmt 內容,data 不讀進記憶體;壞檔或不支援的編碼丟 ValueError(訊息不含路徑)。
+    """
+    with open(path, "rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(0)
+        head = f.read(12)
+        if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            raise ValueError("音檔不是 WAV 格式")
+        fmt = data_len = None
+        pos = 12
+        for _ in range(WAV_MAX_CHUNKS):
+            if pos + 8 > size:
+                break
+            f.seek(pos)
+            cid, clen = struct.unpack("<4sI", f.read(8))
+            body = pos + 8
+            if clen > size - body:
+                raise ValueError("WAV 檔案損毀:區塊長度超出檔尾")
+            if cid == b"fmt ":
+                if clen < 16:
+                    raise ValueError("WAV 檔案損毀:fmt 區塊太短")
+                fmt = f.read(min(clen, _WAV_FMT_MAX))
+            elif cid == b"data":
+                data_len = clen
+            if fmt is not None and data_len is not None:
+                break
+            pos = body + clen + (clen & 1)
+        else:
+            raise ValueError("WAV 檔案區塊過多,無法解析")
+    if fmt is None:
+        raise ValueError("WAV 檔案損毀:缺少 fmt 區塊")
+    if data_len is None:
+        raise ValueError("WAV 檔案損毀:缺少 data 區塊")
+    tag, channels, rate, _, _, bits = struct.unpack("<HHIIHH", fmt[:16])
+    if tag == _WAV_EXTENSIBLE:
+        if len(fmt) < 26:
+            raise ValueError("WAV 檔案損毀:EXTENSIBLE 格式缺少 SubFormat")
+        tag = struct.unpack("<H", fmt[24:26])[0]
+    if tag not in (_WAV_PCM, _WAV_FLOAT):
+        raise ValueError(f"WAV 編碼不支援(format {tag})")
+    if channels == 0 or rate == 0 or bits == 0:
+        raise ValueError("WAV 檔案損毀:聲道數、取樣率或每樣本位元數為 0")
+    frame = channels * ((bits + 7) // 8)
+    if data_len % frame:
+        raise ValueError("WAV 檔案損毀:音訊資料不是整數個樣本框")
+    return data_len / frame / rate
 
 
 def split_sentences(script, max_chars=24):
