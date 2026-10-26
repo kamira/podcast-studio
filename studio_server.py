@@ -27,6 +27,38 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
                                  送完 finished 後結束;支援 Last-Event-ID 從中斷處續傳
   POST /api/run/{id}/cancel      設定取消旗標;executor 不再啟動新節點,進行中的節點跑完
 
+上傳、檔案服務、工作流程(T8):
+
+  POST /api/upload?name=<原始檔名>
+                                 請求本文就是檔案的原始位元組(不是 multipart,前端以
+                                 `fetch(url, {method: "POST", body: file})` 送出);原始檔名只取副檔名。
+                                 白名單 `.txt .md .png .jpg .jpeg .webp .wav .mp3 .m4a`(= nodes.FILE_KINDS);
+                                 以串流寫入 `outputs/uploads/` 內點開頭的暫存檔並累計大小,超過
+                                 MAX_UPLOAD(200 MB)立即中止回 413 並刪除暫存檔;依檔頭位元組嗅探
+                                 (不信任用戶端 Content-Type),文字檔必須是 UTF-8、無 NUL、≤ nodes.MAX_TEXT 字;
+                                 不符回 400。通過後以 `os.link` 排他建立 `outputs/uploads/<uuid4 hex>.<ext>`
+                                 (撞名重取,不覆寫、不跟隨符號連結)。
+                                 回 200 {"file_id": "uploads/<uuid>.<ext>", "kind": "text"|"image"|"audio",
+                                         "url": "/files/outputs/uploads/<uuid>.<ext>"}
+                                 `file_id` 相對於 `outputs/`,可直接當 file-input 節點的 `file` 參數。
+  GET  /files/{path}             path 相對於 repo 根目錄,且第一層必須是 `outputs`
+                                 (與 SSE 事件裡的 `outputs/…` 相同)。路徑由框架 URL 解碼一次,
+                                 再 resolve(),最後以路徑元件判斷是否位於 outputs/ 之內(不用字串前綴,
+                                 `outputs_evil/` 之類的兄弟目錄不算)。絕對路徑、任一層以 `.` 開頭
+                                 (含 `..`、`.heavy.lock`、上傳暫存檔)、指向 outputs/ 外的符號連結、
+                                 不是一般檔案、`outputs/` 本身是符號連結 → 一律 404。
+                                 已知媒體型別 inline 送出;文字檔 `text/plain; charset=utf-8`;
+                                 其他一律 `application/octet-stream` + `Content-Disposition: attachment`。
+  GET  /api/workflows/{name}     讀 `workflows/<name>.json` → {"name", "graph"};不存在 404;內容壞掉 422
+  PUT  /api/workflows/{name}     本文 {"graph": 流程圖, "overwrite": true|false(選填,預設 false)};
+                                 名稱必須完全符合 `[\\w\\-]{1,64}`(re.ASCII:只限英數、底線、連字號);
+                                 graph 必須通過 executor.validate(不合格 400,格式同 /api/run);
+                                 本文上限 MAX_BODY(413);已存在且未帶 overwrite:true → 409。
+                                 寫入同目錄暫存檔後:不覆寫時以 `os.link` 排他建立,覆寫時 `os.replace`
+                                 (原子替換;既有的符號連結只被替換,不寫入其目標)。
+  `outputs/`、`outputs/uploads/`、`workflows/` 逐層不得是符號連結、解析後必須等於 repo 內對應目錄;
+  不符時上傳與存檔回 500(本文不含路徑)、讀取回 404,且不建立任何東西。
+
 事件內容與 executor.py 檔頭相同,另有兩點:
   - 字串一律經 `scrub()`:repo 根目錄換成 `<repo>`、家目錄換成 `~`,不把本機絕對路徑送到瀏覽器。
   - 節點輸出值若是 repo 內的檔案路徑,改送相對於 repo 的路徑(例 `outputs/cover-….png`);
@@ -49,6 +81,7 @@ import hmac
 import html
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -87,6 +120,19 @@ MAX_BODY = 4 * 1024 * 1024   # /api/run 本文上限(100 個節點 × 20000 字�
 KEEP_RUNS = 20               # 保留最近幾次 run 的事件,供 SSE 重連
 SSE_POLL_SECONDS = 0.05
 SSE_KEEPALIVE_SECONDS = 15.0
+MAX_UPLOAD = 200 * 1024 * 1024   # 上傳上限(CHG 代決事項)
+MAX_UPLOAD_NAME = 255
+# 副檔名 → 埠型別;與 file-input 節點接受的副檔名一致
+UPLOAD_KINDS = {ext: kind for kind, exts in nodes.FILE_KINDS.items() for ext in exts}
+WORKFLOW_NAME = re.compile(r"[\w\-]{1,64}", re.ASCII)   # 只允許英數、底線、連字號(以 fullmatch 比對)
+M4A_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2"})
+# /files/* 的回應型別:表內的以 inline 送出;不在表內的一律 octet-stream + attachment
+SERVE_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "video/mp4",
+    ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8",
+    ".srt": "text/plain; charset=utf-8",
+}
 
 PLACEHOLDER_INDEX = f"""<!doctype html>
 <html lang="zh-Hant-TW">
@@ -325,11 +371,152 @@ def _static_file(static_dir: Path, rel: str) -> Path | None:
     return path
 
 
+# ---------- 上傳、檔案服務、工作流程(T8) ----------
+
+class UnsafePath(OSError):
+    """repo 內的資料目錄是符號連結或解析到別處。訊息不含路徑,可安全記錄。"""
+
+
+def _safe_dir(root: Path, *parts: str, create: bool) -> Path:
+    """回傳 root/parts 的真實路徑;逐層不得是符號連結、解析後必須等於 repo 內對應目錄。
+
+    create=True 時不存在的層會建立(建立前後都檢查);不符丟 UnsafePath,且不建立任何東西。
+    """
+    base = Path(root).resolve()
+    cur, expected = Path(root), base
+    for part in parts:
+        cur, expected = cur / part, expected / part
+        if cur.is_symlink():
+            raise UnsafePath(f"資料目錄「{part}」是符號連結,不接受")
+        if not cur.exists():
+            if not create:
+                raise FileNotFoundError(part)
+            try:
+                cur.mkdir(mode=0o755)
+            except FileExistsError:
+                pass
+            if cur.is_symlink():
+                raise UnsafePath(f"資料目錄「{part}」是符號連結,不接受")
+        try:
+            resolved = cur.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise UnsafePath(f"資料目錄「{part}」無法解析") from None
+        if resolved != expected or not resolved.is_dir():
+            raise UnsafePath(f"資料目錄「{part}」不在 repo 內")
+    return expected
+
+
+def _valid_name(name: str) -> bool:
+    return isinstance(name, str) and WORKFLOW_NAME.fullmatch(name) is not None
+
+
+def _upload_ext(name: str | None) -> str | None:
+    """只取原始檔名的副檔名(小寫);不在白名單回 None。"""
+    if not isinstance(name, str) or not name or len(name) > MAX_UPLOAD_NAME or "\x00" in name:
+        return None
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    stem, dot, ext = base.rpartition(".")
+    if not dot or not stem:
+        return None
+    ext = "." + ext.lower()
+    return ext if ext in UPLOAD_KINDS else None
+
+
+def _sniff_binary(ext: str, head: bytes) -> bool:
+    """依檔頭位元組判斷內容是否與副檔名相符(不信任用戶端 Content-Type)。"""
+    if ext == ".png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if ext in (".jpg", ".jpeg"):
+        return head.startswith(b"\xff\xd8\xff")
+    if ext == ".webp":
+        return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    if ext == ".wav":
+        return head[:4] == b"RIFF" and head[8:12] == b"WAVE"
+    if ext == ".mp3":
+        if head.startswith(b"ID3"):
+            return True
+        if len(head) < 2 or head[0] != 0xFF or head[1] & 0xE0 != 0xE0:
+            return False
+        version, layer = (head[1] >> 3) & 0x03, (head[1] >> 1) & 0x03
+        return version != 0x01 and layer != 0x00   # 保留值不是合法 MPEG 音訊框
+    if ext == ".m4a":
+        return head[4:8] == b"ftyp" and head[8:12] in M4A_BRANDS
+    return False
+
+
+def _check_upload(ext: str, path: Path, size: int) -> str | None:
+    """回傳錯誤訊息;內容合格回 None。"""
+    if size == 0:
+        return "檔案是空的"
+    if UPLOAD_KINDS[ext] == "text":
+        if size > nodes.MAX_TEXT * 4 + 3:   # UTF-8 每字最多 4 位元組,加 BOM
+            return f"文字檔超過 {nodes.MAX_TEXT} 字"
+        try:
+            text = path.read_bytes().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return "文字檔必須是 UTF-8 編碼"
+        if "\x00" in text:
+            return "文字檔內容不是純文字"
+        if len(text) > nodes.MAX_TEXT:
+            return f"文字檔超過 {nodes.MAX_TEXT} 字"
+        return None
+    with open(path, "rb") as f:
+        head = f.read(16)
+    if not _sniff_binary(ext, head):
+        return f"檔案內容與副檔名 {ext} 不符"
+    return None
+
+
+def _open_excl(path: Path, mode: int = 0o600) -> int:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    return os.open(path, flags, mode)
+
+
+def _link_excl(src: Path, make_dst: Callable[[], Path], tries: int = 8) -> Path:
+    """以 os.link 排他建立目標(已存在——含符號連結——就換名重試);回傳目標路徑。"""
+    for _ in range(tries):
+        dst = make_dst()
+        try:
+            os.link(src, dst)   # link(2) 在目標已存在(含符號連結)時失敗,不會跟隨
+            return dst
+        except FileExistsError:
+            continue
+    raise FileExistsError("無法取得不重複的檔名")
+
+
+def _served_file(root: Path, rel: str) -> Path | None:
+    """`/files/{rel}` 對應的真實檔案;不在 outputs/ 之內或不合規則回 None。"""
+    if not isinstance(rel, str) or not rel or "\x00" in rel or "\\" in rel or rel.startswith("/"):
+        return None
+    parts = rel.split("/")
+    if parts[0] != "outputs" or len(parts) < 2 or any(not p or p.startswith(".") for p in parts):
+        return None
+    try:
+        out = _safe_dir(root, "outputs", create=False)
+        path = (Path(root) / rel).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    # 以路徑元件判斷包含關係(不是字串前綴):outputs_evil/ 不算在 outputs/ 之內
+    if not path.is_relative_to(out) or path == out:
+        return None
+    if any(p.startswith(".") for p in path.relative_to(out).parts):
+        return None
+    if not path.is_file():
+        return None
+    return path
+
+
+def _err(message: str, status: int) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status)
+
+
 def create_app(runner: Callable | None = None, token: str | None = None,
-               static_dir: Path | None = None) -> FastAPI:
-    """建立 app。runner 預設為 executor.run(測試可換替身);token 預設每次隨機產生。"""
+               static_dir: Path | None = None, root: Path | None = None) -> FastAPI:
+    """建立 app。runner 預設為 executor.run(測試可換替身);token 預設每次隨機產生;
+    root 為 repo 根目錄(`outputs/`、`workflows/` 所在處),預設本檔所在目錄,測試可指到暫存目錄。"""
     token = token or secrets.token_urlsafe(32)
     static_dir = Path(static_dir) if static_dir is not None else STATIC_DIR
+    root = Path(root) if root is not None else ROOT
     run_fn = runner or executor.run
     runs = Runs()
 
@@ -410,6 +597,124 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             return JSONResponse({"error": "找不到這次執行"}, status_code=404)
         run.cancel.set()
         return {"run_id": run.id, "cancelled": True}
+
+    @app.post("/api/upload")
+    async def api_upload(request: Request):
+        ext = _upload_ext(request.query_params.get("name"))
+        if ext is None:
+            return _err("不支援此檔案類型", 400)
+        limit = MAX_UPLOAD
+        length = request.headers.get("content-length")
+        if length is not None and length.isdigit() and int(length) > limit:
+            return _err(f"檔案超過 {limit // (1024 * 1024)} MB 上限", 413)
+        try:
+            updir = _safe_dir(root, "outputs", "uploads", create=True)
+        except OSError as e:
+            print(f"studio_server:上傳目錄不安全({type(e).__name__})", file=sys.stderr)
+            return _err("上傳目錄不可用", 500)
+        tmp = updir / f".upload-{uuid.uuid4().hex}.part"
+        fd = _open_excl(tmp)
+        size = 0
+        try:
+            with os.fdopen(fd, "wb") as f:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > limit:
+                        return _err(f"檔案超過 {limit // (1024 * 1024)} MB 上限", 413)
+                    f.write(chunk)
+            problem = _check_upload(ext, tmp, size)
+            if problem:
+                return _err(problem, 400)
+            final = _link_excl(tmp, lambda: updir / f"{uuid.uuid4().hex}{ext}")
+        finally:
+            tmp.unlink(missing_ok=True)   # 成功時最終檔是另一個硬連結,暫存名一律移除
+        rel = f"uploads/{final.name}"
+        return {"file_id": rel, "kind": UPLOAD_KINDS[ext], "url": f"/files/outputs/{rel}"}
+
+    @app.get("/files/{rel:path}")
+    def files(rel: str):
+        path = _served_file(root, rel)
+        if path is None:
+            return _err("找不到檔案", 404)
+        ctype = SERVE_TYPES.get(path.suffix.lower())
+        if ctype is None:
+            return FileResponse(path, media_type="application/octet-stream", filename=path.name,
+                                content_disposition_type="attachment")
+        return FileResponse(path, media_type=ctype, filename=path.name, content_disposition_type="inline")
+
+    def _workflow_path(name: str, create: bool) -> Path:
+        return _safe_dir(root, "workflows", create=create) / f"{name}.json"
+
+    @app.get("/api/workflows/{name}")
+    def api_workflow_get(name: str):
+        if not _valid_name(name):
+            return _err("工作流程名稱只能用英數字、底線、連字號,最多 64 字", 400)
+        try:
+            path = _workflow_path(name, create=False)
+        except OSError:
+            return _err("找不到這個工作流程", 404)
+        if path.is_symlink() or not path.is_file():
+            return _err("找不到這個工作流程", 404)
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            with os.fdopen(os.open(path, flags), "rb") as f:
+                data = f.read(MAX_BODY + 1)
+            if len(data) > MAX_BODY:
+                return _err("工作流程檔過大", 422)
+            graph = json.loads(data.decode("utf-8"))
+        except FileNotFoundError:
+            return _err("找不到這個工作流程", 404)
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+            return _err("工作流程檔內容損壞,無法讀取", 422)
+        return {"name": name, "graph": graph}
+
+    @app.put("/api/workflows/{name}")
+    async def api_workflow_put(name: str, request: Request):
+        if not _valid_name(name):
+            return _err("工作流程名稱只能用英數字、底線、連字號,最多 64 字", 400)
+        body = await _read_body(request)
+        if body is None:
+            return _bad(f"請求內容超過 {MAX_BODY // (1024 * 1024)} MB", 413)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return _bad("請求內容不是合法的 JSON")
+        if not isinstance(payload, dict) or "graph" not in payload:
+            return _bad("請求內容必須是 {\"graph\": 流程圖, \"overwrite\": 是/否}")
+        overwrite = payload.get("overwrite", False)
+        if not isinstance(overwrite, bool):
+            return _bad("overwrite 必須是 true 或 false")
+        graph = payload["graph"]
+        errors = executor.validate(graph)
+        if errors:
+            return JSONResponse(_error_body(errors), status_code=400)
+        try:
+            path = _workflow_path(name, create=True)
+        except OSError as e:
+            print(f"studio_server:工作流程目錄不安全({type(e).__name__})", file=sys.stderr)
+            return _err("工作流程目錄不可用", 500)
+        if not overwrite and os.path.lexists(path):
+            return _err("已有同名的工作流程;確認要覆寫請帶 overwrite:true", 409)
+        data = json.dumps(graph, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+        tmp = path.parent / f".{name}.{uuid.uuid4().hex}.tmp"
+        try:
+            with os.fdopen(_open_excl(tmp, 0o644), "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            if overwrite:
+                os.replace(tmp, path)
+            else:
+                try:
+                    os.link(tmp, path)   # 排他建立:這段期間別人先存了同名檔就 409
+                except FileExistsError:
+                    return _err("已有同名的工作流程;確認要覆寫請帶 overwrite:true", 409)
+        except OSError as e:
+            print(f"studio_server:工作流程寫入失敗({type(e).__name__})", file=sys.stderr)
+            return _err("工作流程存檔失敗", 500)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return {"name": name, "saved": True}
 
     app.add_middleware(SecurityMiddleware, token=token)
     return app
