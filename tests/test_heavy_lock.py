@@ -30,7 +30,9 @@ REPO = Path(hl.__file__).resolve().parent
 
 @pytest.fixture
 def lock_path(tmp_path, monkeypatch):
-    p = tmp_path / "outputs" / ".heavy.lock"
+    root = tmp_path.resolve()
+    p = root / "outputs" / ".heavy.lock"
+    monkeypatch.setattr(hl, "ROOT", root)
     monkeypatch.setattr(hl, "LOCK_PATH", p)
     return p
 
@@ -41,6 +43,7 @@ CHILD_PRELUDE = textwrap.dedent("""
     sys.path.insert(0, {repo!r})
     import heavy_lock
     heavy_lock.LOCK_PATH = Path({lock!r})
+    heavy_lock.ROOT = heavy_lock.LOCK_PATH.parent.parent
     go = Path({go!r})
     deadline = time.time() + 30
     while not go.exists():
@@ -132,6 +135,35 @@ def test_鎖檔是符號連結時不跟隨(lock_path, tmp_path):
         with hl.heavy_lock():
             pass
     assert target.read_text(encoding="utf-8") == "不可動"
+
+
+def test_outputs是指向repo外的符號連結時丟例外且不建立鎖檔(lock_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside_outputs")
+    lock_path.parent.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        with hl.heavy_lock():
+            pass
+    assert list(outside.iterdir()) == []
+    assert not (outside / ".heavy.lock").exists()
+
+
+def test_outputs是指向repo內其他目錄的符號連結時也拒絕(lock_path):
+    other = lock_path.parent.parent / "elsewhere"
+    other.mkdir()
+    lock_path.parent.symlink_to(other, target_is_directory=True)
+    with pytest.raises(OSError):
+        with hl.heavy_lock():
+            pass
+    assert list(other.iterdir()) == []
+
+
+def test_LOCK_PATH不在repo的outputs下時拒絕且不建立(lock_path, monkeypatch, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside_dir")
+    monkeypatch.setattr(hl, "LOCK_PATH", outside / "outputs" / ".heavy.lock")
+    with pytest.raises(OSError):
+        with hl.heavy_lock():
+            pass
+    assert list(outside.iterdir()) == []
 
 
 def test_同一行程不同執行緒也互斥(lock_path):
