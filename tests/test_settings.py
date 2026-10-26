@@ -680,3 +680,187 @@ def test_一行程連續save200次另一行程load200次皆成功且完整(env):
         assert "database is locked" not in err
         assert "[settings]" not in err  # 沒有任何回退警告
     assert settings.load() == b  # 最後一次 save 是 configs[199 % 2]
+
+
+
+# ---- _discard 與初始化鎖(依 PR #36、PR #37 審議修正) ----
+
+def _fail_first_open(monkeypatch, before_fail):
+    """第一次 _open_rw(建立者自己的匯入或 save)先執行 before_fail(),再模擬失敗;之後照常。"""
+    real = settings._open_rw
+    calls = []
+
+    def fake(path):
+        calls.append(path)
+        if len(calls) == 1:
+            before_fail()
+            raise sqlite3.OperationalError("database is locked(模擬)")
+        return real(path)
+    monkeypatch.setattr(settings, "_open_rw", fake)
+    return real
+
+
+def _ident(p: Path) -> tuple[int, int]:
+    st = p.stat()
+    return st.st_dev, st.st_ino
+
+
+def _wait_for(path: Path, proc: subprocess.Popen, seconds: float = 60) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        if proc.poll() is not None:
+            pytest.fail("子行程提早結束:" + proc.stderr.read())
+        if time.monotonic() > deadline:
+            proc.kill()
+            pytest.fail(f"子行程 {seconds} 秒內沒有產生 {path.name}")
+        time.sleep(0.01)
+
+
+# 子行程:load() 後保持一條讀取連線(讓 -wal、-shm 存在),等 exit 訊號才結束
+CHILD_LOAD_AND_HOLD = CHILD_PRELUDE + textwrap.dedent("""
+    import sqlite3
+    got = settings.load()
+    con = sqlite3.connect(str(root / "config" / "studio.db"))
+    con.execute("SELECT count(*) FROM roles").fetchone()
+    (root / "done").write_text(json.dumps(got, ensure_ascii=False), encoding="utf-8")
+    deadline = time.time() + 60
+    while not (root / "exit").exists() and time.time() < deadline:
+        time.sleep(0.01)
+    con.close()
+""")
+
+
+def test_建立者清理時另一行程正要建立_另一行程的資料庫與附屬檔不被刪(env, monkeypatch):
+    """建立者匯入失敗、刪掉自己的空檔後正要刪 -wal、-shm 時,另一行程開始第一次 load()。
+
+    舊做法(只在刪附屬檔前看主檔是否存在)下,另一行程會在這個窗口建立新資料庫與附屬檔,
+    接著附屬檔被建立者刪掉;初始化鎖下另一行程必須等清理結束才能建立。
+    """
+    c = changed()
+    write_json(env, c)
+    (env / "go").write_text("go")
+    state = {}
+    real_sidecars = settings._sidecars
+
+    def window(p):
+        if state.pop("armed", False):
+            proc = _spawn(CHILD_LOAD_AND_HOLD.format(repo=str(REPO), root=str(env)), env)
+            state["proc"] = proc
+            deadline = time.monotonic() + 1.5
+            while (not (env / "done").exists() and proc.poll() is None
+                   and time.monotonic() < deadline):
+                time.sleep(0.01)
+            state["other_done_during_cleanup"] = (env / "done").exists()
+        return real_sidecars(p)
+
+    def arm():
+        state["armed"] = True
+
+    _fail_first_open(monkeypatch, arm)
+    monkeypatch.setattr(settings, "_sidecars", window)
+    got = settings.load()  # 建立者自己的匯入失敗 → 本次回預設值
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    proc = state["proc"]
+    try:
+        assert state["other_done_during_cleanup"] is False  # 另一行程在鎖外等待
+        _wait_for(env / "done", proc)
+        assert json.loads((env / "done").read_text(encoding="utf-8")) == c
+        # 另一行程建立的資料庫與附屬檔都在
+        assert db(env).exists()
+        assert all(p.exists() for p in sidecars(env))
+        assert len(query(env, "SELECT value FROM meta WHERE key = ?", ("imported_at",))) == 1
+        assert settings.load() == c
+    finally:
+        (env / "exit").write_text("exit")
+        out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert settings.load() == c
+
+
+def test_discard不刪已有資料表的檔(env):
+    """同一個檔已完成匯入或存入(有 meta 與資料)時,即使身分相同也保留(PR #36)。"""
+    (env / "config").mkdir()
+    path = db(env)
+    ident = settings._create_db_file(path)
+    con = settings._open_rw(path)
+    try:
+        settings._immediate(con, settings._save_body(changed()))
+    finally:
+        con.close()
+    settings._discard(path, ident)
+    assert path.exists() and _ident(path) == ident
+    assert settings.load() == changed()
+
+
+def test_建立者失敗時檔案已被換成另一個檔_不刪除(env, monkeypatch):
+    write_json(env, changed())
+    replacement = env / "config" / "replacement"
+
+    def swap():
+        replacement.write_bytes(b"")
+        os.replace(replacement, db(env))  # 同一路徑換成另一個 inode
+
+    _fail_first_open(monkeypatch, swap)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    assert db(env).exists()  # 不是本次建立的那一個檔,保留
+    assert db(env).stat().st_size == 0
+
+
+def test_建立者失敗且檔案仍是自己建立的空檔_照舊刪除(env, monkeypatch):
+    write_json(env, changed())
+    real = _fail_first_open(monkeypatch, lambda: None)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_UNREADABLE]
+    assert not db(env).exists()
+    assert not any(p.exists() for p in sidecars(env))
+    monkeypatch.setattr(settings, "_open_rw", real)
+    assert settings.load() == changed()  # 下次 load() 再試
+
+
+def test_save建立者失敗時另一行程等鎖後才存入(env, monkeypatch):
+    other = changed(reason="glm4:latest")
+    (env / "go").write_text("go")
+    state = {}
+
+    def start_other_then_fail():
+        code = CHILD_PRELUDE.format(repo=str(REPO), root=str(env)) + (
+            f"settings.save(json.loads({json.dumps(json.dumps(other))}))\nprint('ok')\n")
+        proc = _spawn(code, env)
+        state["proc"] = proc
+        time.sleep(0.8)
+        assert proc.poll() is None  # 另一行程在初始化鎖外等待
+        assert db(env).stat().st_size == 0
+
+    real = _fail_first_open(monkeypatch, start_other_then_fail)
+    with pytest.raises(sqlite3.OperationalError):
+        settings.save(changed())
+    out, err = state["proc"].communicate(timeout=60)
+    assert state["proc"].returncode == 0, err
+    assert out.strip() == "ok"
+    monkeypatch.setattr(settings, "_open_rw", real)
+    assert settings.load() == other
+
+
+def test_初始化鎖檔權限0600且不刪除(env):
+    write_json(env, changed())
+    assert settings.load() == changed()
+    lock = env / "config" / ".studio.db.lock"
+    assert lock.is_file() and not lock.is_symlink()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+def test_初始化鎖檔是符號連結時不讀不寫(env, tmp_path_factory):
+    write_json(env, changed())
+    outside = tmp_path_factory.mktemp("outside_lock")
+    target = outside / "target"
+    target.write_bytes(b"keep")
+    (env / "config" / ".studio.db.lock").symlink_to(target)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got == settings.DEFAULTS
+    with pytest.raises(ValueError):
+        settings.save(cfg())
+    assert target.read_bytes() == b"keep"
+    assert not db(env).exists()
+    assert sorted(x.name for x in outside.iterdir()) == ["target"]

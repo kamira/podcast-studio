@@ -8,4 +8,5 @@ __pycache__/
 config/studio.db
 config/studio.db-wal
 config/studio.db-shm
+config/.studio.db.lock
 config/models.json

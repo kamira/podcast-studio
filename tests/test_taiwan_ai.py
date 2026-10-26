@@ -8,6 +8,8 @@ import ast
 import copy
 import io
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -318,3 +320,170 @@ def test_結構不合法回退預設模型(cfg_file, ollama, capsys):
     assert settings.WARN_INVALID in capsys.readouterr().err
     tai.chat("reason", "問題")
     assert ollama.bodies("/api/chat")[-1]["model"] == LIGHT
+
+
+# ---- speak 子程序離線環境(T4,ADP-12) ----
+
+def test_speak子程序環境含離線變數_其餘不變(out, monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        Path(cmd[cmd.index("--output_path") + 1]).write_bytes(b"RIFF")
+    monkeypatch.setattr(tai.subprocess, "run", fake_run)
+    p = tai.speak("測試")
+    env = seen["kw"]["env"]
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["TRANSFORMERS_OFFLINE"] == "1"
+    # 修訂前的兩個變數維持原值;ADP-9 的 HOME 不在本 task 處理
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert set(env) == {"PYTHONUTF8", "PATH", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"}
+    # argv 與其他參數不變
+    assert seen["cmd"] == [str(tai.BREEZY / ".venv/bin/python"), "single_inference.py",
+                           "--content_to_synthesize", "測試",
+                           "--speaker_prompt_audio_path", str(tai.VOICE_WAV),
+                           "--speaker_prompt_text_transcription", tai.VOICE_TEXT,
+                           "--output_path", str(p)]
+    assert seen["kw"]["cwd"] == tai.BREEZY
+    assert seen["kw"]["check"] is True
+    assert seen["kw"]["stdout"] is tai.subprocess.DEVNULL
+    assert seen["kw"]["stderr"] is tai.subprocess.DEVNULL
+    assert p.read_bytes() == b"RIFF"
+
+
+def test_speak失敗時提示不自動下載(out, monkeypatch, capsys):
+    def boom(cmd, **kw):
+        raise tai.subprocess.CalledProcessError(1, cmd)
+    monkeypatch.setattr(tai.subprocess, "run", boom)
+    with pytest.raises(tai.subprocess.CalledProcessError):
+        tai.speak("測試")
+    assert "不連網下載" in capsys.readouterr().err
+
+
+# ---- 模型快取缺失時離線失敗、不下載(PR #34 security 疑慮;替身 BreezyVoice,不連網) ----
+
+FAKE_HUB = '''
+import os
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+
+
+class LocalEntryNotFoundError(Exception):
+    pass
+
+
+def snapshot_download(repo_id, **kw):
+    """替身:快取存在就回路徑;HF_HUB_OFFLINE=1 且快取不存在 → 丟例外;否則記一筆「下載」。"""
+    cache = HERE / "hf-cache" / repo_id.replace("/", "--")
+    if cache.is_dir():
+        return str(cache)
+    if os.environ.get("HF_HUB_OFFLINE") == "1":
+        raise LocalEntryNotFoundError("離線模式且快取不存在:" + repo_id)
+    with open(HERE / "downloads.log", "a", encoding="utf-8") as f:
+        f.write(repo_id + "\\n")
+    cache.mkdir(parents=True)
+    return str(cache)
+'''
+
+FAKE_TRANSFORMERS = '''
+import os
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+
+
+class BertTokenizer:
+    @classmethod
+    def from_pretrained(cls, name):
+        """替身:TRANSFORMERS_OFFLINE=1 且快取不存在 → 丟 OSError;否則記一筆「下載」。"""
+        cache = HERE / "hf-cache" / name
+        if cache.is_dir():
+            return cls()
+        if os.environ.get("TRANSFORMERS_OFFLINE") == "1":
+            raise OSError("離線模式且快取不存在:" + name)
+        with open(HERE / "downloads.log", "a", encoding="utf-8") as f:
+            f.write(name + "\\n")
+        cache.mkdir(parents=True)
+        return cls()
+'''
+
+FAKE_INFERENCE = '''
+import argparse
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+from transformers import BertTokenizer
+
+ap = argparse.ArgumentParser()
+for a in ("--content_to_synthesize", "--speaker_prompt_audio_path",
+          "--speaker_prompt_text_transcription", "--output_path"):
+    ap.add_argument(a, required=True)
+args = ap.parse_args()
+snapshot_download("MediaTek-Research/BreezyVoice-300M")
+BertTokenizer.from_pretrained("bert-base-chinese")
+Path(args.output_path).write_bytes(b"RIFF-fake")
+'''
+
+
+@pytest.fixture
+def fake_breezy(monkeypatch, tmp_path):
+    """在暫存目錄建立替身 BreezyVoice:.venv/bin/python 轉呼叫目前的直譯器,
+    single_inference.py 匯入同目錄的替身 huggingface_hub、transformers(遵守離線變數)。"""
+    d = tmp_path / "BreezyVoice"
+    (d / ".venv/bin").mkdir(parents=True)
+    (d / "huggingface_hub").mkdir()
+    (d / "transformers").mkdir()
+    (d / "data").mkdir()
+    py = d / ".venv/bin/python"
+    py.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    py.chmod(0o755)
+    (d / "huggingface_hub/__init__.py").write_text(FAKE_HUB, encoding="utf-8")
+    (d / "transformers/__init__.py").write_text(FAKE_TRANSFORMERS, encoding="utf-8")
+    (d / "single_inference.py").write_text(FAKE_INFERENCE, encoding="utf-8")
+    monkeypatch.setattr(tai, "BREEZY", d)
+    monkeypatch.setattr(tai, "VOICE_WAV", d / "data/example.wav")
+    return d
+
+
+def _speech_files(out):
+    return sorted(out.glob("speech-*.wav")) if out.exists() else []
+
+
+def test_替身在連網環境下會下載_確認替身有效(fake_breezy, tmp_path):
+    wav = tmp_path / "control.wav"
+    r = subprocess.run([str(fake_breezy / ".venv/bin/python"), "single_inference.py",
+                        "--content_to_synthesize", "x", "--speaker_prompt_audio_path", "a",
+                        "--speaker_prompt_text_transcription", "t", "--output_path", str(wav)],
+                       cwd=fake_breezy, env={"PYTHONUTF8": "1", "PATH": "/usr/bin:/bin"},
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    log = (fake_breezy / "downloads.log").read_text(encoding="utf-8").split()
+    assert log == ["MediaTek-Research/BreezyVoice-300M", "bert-base-chinese"]
+
+
+def test_快取不存在時speak失敗_不下載_刪除佔位檔(fake_breezy, out, capsys):
+    with pytest.raises(subprocess.CalledProcessError):
+        tai.speak("測試")
+    assert not (fake_breezy / "downloads.log").exists()  # 下載次數 0
+    assert not (fake_breezy / "hf-cache").exists()
+    assert _speech_files(out) == []  # reserve() 佔下的空 wav 已刪除
+    assert "不連網下載" in capsys.readouterr().err
+
+
+def test_只有分詞器快取缺失時也失敗且不下載(fake_breezy, out):
+    (fake_breezy / "hf-cache/MediaTek-Research--BreezyVoice-300M").mkdir(parents=True)
+    with pytest.raises(subprocess.CalledProcessError):
+        tai.speak("測試")
+    assert not (fake_breezy / "downloads.log").exists()
+    assert _speech_files(out) == []
+
+
+def test_快取存在時離線合成成功(fake_breezy, out):
+    (fake_breezy / "hf-cache/MediaTek-Research--BreezyVoice-300M").mkdir(parents=True)
+    (fake_breezy / "hf-cache/bert-base-chinese").mkdir(parents=True)
+    p = tai.speak("測試")
+    assert p.read_bytes() == b"RIFF-fake"
+    assert _speech_files(out) == [p]
+    assert not (fake_breezy / "downloads.log").exists()
