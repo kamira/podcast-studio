@@ -51,9 +51,12 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
                                  其他一律 `application/octet-stream` + `Content-Disposition: attachment`。
   GET  /api/workflows/{name}     讀 `workflows/<name>.json` → {"name", "graph"};不存在 404;內容壞掉 422
   PUT  /api/workflows/{name}     本文 {"graph": 流程圖, "overwrite": true|false(選填,預設 false)};
-                                 名稱必須完全符合 `[\\w\\-]{1,64}`(re.ASCII:只限英數、底線、連字號);
+                                 名稱(GET 同)視為 Unicode 字串逐字檢查,每個字必須是中英日白名單字元
+                                 (ASCII 英數、`-`、`_`、CJK 統一漢字與擴充 A、平假名、片假名、「ー」、
+                                 「々」),1~64 字,否則 400(使用者 2026-10-26 指示:開放中文、只採中英日);
                                  graph 必須通過 executor.validate(不合格 400,格式同 /api/run);
-                                 本文上限 MAX_BODY(413);已存在且未帶 overwrite:true → 409。
+                                 本文上限 MAX_BODY(413);已存在且未帶 overwrite:true → 409;
+                                 已有只差大小寫(casefold 相等)的其他名稱 → 一律 409,不論 overwrite。
                                  寫入同目錄暫存檔後:不覆寫時以 `os.link` 排他建立,覆寫時 `os.replace`
                                  (原子替換;既有的符號連結只被替換,不寫入其目標)。
   `outputs/`、`outputs/uploads/`、`workflows/` 逐層不得是符號連結、解析後必須等於 repo 內對應目錄;
@@ -104,7 +107,6 @@ import hmac
 import html
 import json
 import os
-import re
 import secrets
 import sys
 import threading
@@ -154,7 +156,20 @@ CONFIG_EXTRA_KEYS = ("_warnings", "meta")   # GET 回應附加、PUT 時忽略�
 MAX_UPLOAD_NAME = 255
 # 副檔名 → 埠型別;與 file-input 節點接受的副檔名一致
 UPLOAD_KINDS = {ext: kind for kind, exts in nodes.FILE_KINDS.items() for ext in exts}
-WORKFLOW_NAME = re.compile(r"[\w\-]{1,64}", re.ASCII)   # 只允許英數、底線、連字號(以 fullmatch 比對)
+# 工作流程名稱(使用者 2026-10-26 指示開放中文,同日追加「只採最低限度 中英日即可」與
+# 「採用unicode編碼能解決大部分的問題」):視為 Unicode 字串,1~64 個字,每個字必須在下列白名單內。
+# 白名單字元以 UTF-8 計最多 3 位元組,64 字加 `.json` 最多 197 位元組,不會超過檔名上限 255。
+MAX_WORKFLOW_NAME = 64
+WORKFLOW_NAME_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+WORKFLOW_NAME_RANGES = (
+    (0x4E00, 0x9FFF),   # CJK 統一漢字
+    (0x3400, 0x4DBF),   # CJK 統一漢字擴充 A
+    (0x3041, 0x3096),   # 平假名
+    (0x30A1, 0x30FA),   # 片假名(不含中點「・」U+30FB)
+    (0x30FC, 0x30FC),   # 長音符「ー」
+    (0x3005, 0x3005),   # 疊字符「々」
+)
+WORKFLOW_NAME_HINT = "工作流程名稱只能用中文、日文假名、英文字母、數字、底線、連字號,長度 1 到 64 字"
 M4A_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2"})
 # /files/* 的回應型別:表內的以 inline 送出;不在表內的一律 octet-stream + attachment
 SERVE_TYPES = {
@@ -438,8 +453,33 @@ def _safe_dir(root: Path, *parts: str, create: bool) -> Path:
     return expected
 
 
-def _valid_name(name: str) -> bool:
-    return isinstance(name, str) and WORKFLOW_NAME.fullmatch(name) is not None
+def _name_char_ok(ch: str) -> bool:
+    if ch in WORKFLOW_NAME_ASCII:
+        return True
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in WORKFLOW_NAME_RANGES)
+
+
+def _normalize_name(name) -> str | None:
+    """工作流程名稱檢查;合格回傳原名稱(檔名直接用它),不合格回 None。
+
+    - 名稱視為 Unicode 字串,不做正規化或其他編碼轉換。
+    - 逐字比對明確的中英日白名單(ASCII 英數、`-`、`_`、CJK 統一漢字與擴充 A、平假名、
+      片假名、「ー」、「々」);不用 `\\w` 也不用 Unicode 類別。其餘一律不合格,包含韓文、
+      全形英數、羅馬數字、「・」、空白、`.`、`/`、`\\`、控制字元、單獨的組合記號、零寬字元、
+      全形斜線、方向覆寫字元等(NFD 形式的濁點組合記號 U+3099 也不在白名單內)。
+    - 長度以字數計,1~64。
+    """
+    if not isinstance(name, str) or not 1 <= len(name) <= MAX_WORKFLOW_NAME:
+        return None
+    if not all(_name_char_ok(ch) for ch in name):
+        return None
+    return name
+
+
+def _fold_name(name: str) -> str:
+    """比對「只差大小寫」用的鍵;白名單內只有 ASCII 字母有大小寫之分。"""
+    return name.casefold()
 
 
 def _upload_ext(name: str | None) -> str | None:
@@ -746,10 +786,28 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     def _workflow_path(name: str, create: bool) -> Path:
         return _safe_dir(root, "workflows", create=create) / f"{name}.json"
 
+    def _case_variant(folder: Path, name: str) -> str | None:
+        """找出 `workflows/` 裡與 name 只差大小寫(casefold 相等、本身不同)的既有名稱。
+
+        macOS 預設檔案系統不分大小寫,`Flow` 與 `flow` 會指到同一檔;Linux 則是兩個檔。
+        為了兩邊行為一致,這種名稱一律回 409,請使用者用原名稱覆寫(不論 overwrite)。
+        """
+        key = _fold_name(name)
+        with os.scandir(folder) as it:
+            for entry in it:
+                fn = entry.name
+                if fn.startswith(".") or not fn.endswith(".json"):
+                    continue
+                stem = fn[:-len(".json")]
+                if stem != name and _fold_name(stem) == key:
+                    return stem
+        return None
+
     @app.get("/api/workflows/{name}")
     def api_workflow_get(name: str):
-        if not _valid_name(name):
-            return _err("工作流程名稱只能用英數字、底線、連字號,最多 64 字", 400)
+        name = _normalize_name(name)
+        if name is None:
+            return _err(WORKFLOW_NAME_HINT, 400)
         try:
             path = _workflow_path(name, create=False)
         except OSError:
@@ -771,8 +829,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
 
     @app.put("/api/workflows/{name}")
     async def api_workflow_put(name: str, request: Request):
-        if not _valid_name(name):
-            return _err("工作流程名稱只能用英數字、底線、連字號,最多 64 字", 400)
+        name = _normalize_name(name)
+        if name is None:
+            return _err(WORKFLOW_NAME_HINT, 400)
         body = await _read_body(request)
         if body is None:
             return _bad(f"請求內容超過 {MAX_BODY // (1024 * 1024)} MB", 413)
@@ -794,10 +853,17 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         except OSError as e:
             print(f"studio_server:工作流程目錄不安全({type(e).__name__})", file=sys.stderr)
             return _err("工作流程目錄不可用", 500)
+        try:
+            variant = _case_variant(path.parent, name)
+        except OSError as e:
+            print(f"studio_server:工作流程目錄無法列出({type(e).__name__})", file=sys.stderr)
+            return _err("工作流程目錄不可用", 500)
+        if variant is not None:
+            return _err(f"已有只差大小寫的工作流程「{variant}」;要覆寫請改用這個名稱", 409)
         if not overwrite and os.path.lexists(path):
             return _err("已有同名的工作流程;確認要覆寫請帶 overwrite:true", 409)
         data = json.dumps(graph, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-        tmp = path.parent / f".{name}.{uuid.uuid4().hex}.tmp"
+        tmp = path.parent / f".wf-{uuid.uuid4().hex}.tmp"   # 暫存檔名不含工作流程名稱
         try:
             with os.fdopen(_open_excl(tmp, 0o644), "wb") as f:
                 f.write(data)

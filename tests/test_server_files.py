@@ -10,6 +10,7 @@ import json
 import os
 import struct
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -421,7 +422,8 @@ def test_workflow_overwrite_is_atomic_replace(client, root, monkeypatch):
 
 
 @pytest.mark.parametrize("name", [
-    "..", "a..b", "a.json", "a b", "流程", "%2e%2e", "a%2fb", "a" * 65, "a%0a", "-" * 65, "é",
+    "..", "a..b", "a.json", "a b", "%2e%2e", "a%2fb", "a" * 65, "a%0a", "-" * 65,
+    "夜市%2F流程", "夜市%2f..%2f流程", "夜市 流程", "夜市.流程", "%E5%A4%9C%00", "夜" * 65,
 ])
 def test_workflow_bad_names_rejected(client, root, name):
     r = put_wf(client, name)
@@ -434,12 +436,114 @@ def test_workflow_bad_names_rejected(client, root, name):
     assert not (root / "a.json").exists()
 
 
-def test_workflow_name_regex_is_ascii_only():
-    assert ss.WORKFLOW_NAME.pattern == r"[\w\-]{1,64}"
-    assert ss.WORKFLOW_NAME.flags & __import__("re").ASCII
-    assert ss._valid_name("A-z_09") and ss._valid_name("a" * 64)
-    for bad in ["", "a" * 65, "流程", "a\n", "a/b", "..", "a.b", "é", "a\x00"]:
-        assert not ss._valid_name(bad), bad
+# ---------- 工作流程名稱:中英日白名單(使用者 2026-10-26 指示) ----------
+
+GOOD_NAMES = [
+    "A-z_09", "a" * 64, "夜市流程", "第1集_夜市-初稿", "夜" * 64, "ポッドキャスト", "ひらがな", "々", "ラーメン",
+    "東京タワー", "人々", "Podcast2026", "\u3400\u4dbf", "\u3041\u3096", "\u30a1\u30fa", "-_",
+]
+BAD_NAMES = [
+    "", "a" * 65, "夜" * 65, "a b", "a.b", "a/b", "a\\b", "..", ".", "a\x00", "a\n", "\x07", "a\x7f",
+    "\u0301", "a\u200bb", "a\u200db", "\ufeffa", "a\uff0fb", "a\u202eb", "a\u3000b", "a\u203fb",
+    "夜市。流程", "a:b", "a*b", "a\U0001f600", "\U00020000", None, 123,
+    # 縮減範圍後不再允許(使用者 2026-10-26:「只採最低限度 中英日即可」)
+    "한국어", "\u0661\u0662", "ＡＢＣ", "１２３", "\u216b", "東京\u30fbタワー", "café", "Ünïcödé", "straße",
+    "\u3040", "\u3097", "\u30a0", "\u30fb", "\u30fd", "\u30ff", "\u3006", "\u3007", "\u9fff\ua000",
+    "\u33ff", "\u4dc0", "\uff66", "\u0391", "\u0430",
+]
+
+
+@pytest.mark.parametrize("name", GOOD_NAMES)
+def test_workflow_name_cjk_whitelist_allowed(name):
+    assert ss._normalize_name(name) == name
+
+
+@pytest.mark.parametrize("name", BAD_NAMES)
+def test_workflow_name_other_chars_rejected(name):
+    assert ss._normalize_name(name) is None
+
+
+def test_workflow_name_not_using_backslash_w_or_categories():
+    """不用 `\\w`,也不用 Unicode 類別:只認明確的中英日白名單。"""
+    assert not hasattr(ss, "WORKFLOW_NAME")
+    for ch in ["\u203f", "\u2040", "\ud55c", "\u00e9", "\u0661"]:
+        assert ss._normalize_name("a" + ch + "b") is None, ch
+
+
+def test_workflow_chinese_name_round_trip_percent_encoded(client, root):
+    name = "夜市流程"
+    encoded = quote(name, safe="")
+    assert encoded.startswith("%E5")
+    r = client.put(f"/api/workflows/{encoded}", json={"graph": GRAPH}, headers=auth())
+    assert r.status_code == 200, r.text
+    assert r.json() == {"name": name, "saved": True}
+    assert files_in(root / "workflows") == ["夜市流程.json"]
+    g = client.get(f"/api/workflows/{encoded}")
+    assert g.status_code == 200
+    assert g.json() == {"name": name, "graph": GRAPH}
+
+
+@pytest.mark.parametrize("first,second", [("Flow", "flow"), ("夜市Flow", "夜市FLOW"), ("ラーメンA1", "ラーメンa1")])
+def test_workflow_case_variant_name_is_409_even_with_overwrite(client, root, first, second):
+    """只差大小寫的名稱在 macOS(預設不分大小寫)會指到同一檔;一律拒絕,請用原名稱覆寫。"""
+    assert put_wf(client, quote(first, safe="")).status_code == 200
+    other = {"nodes": [{"id": "x", "kind": "text-input", "params": {"text": "新"}}], "edges": []}
+    for ow in (None, False, True):
+        r = put_wf(client, quote(second, safe=""), graph=other, overwrite=ow)
+        assert r.status_code == 409, (ow, r.text)
+        msg = r.json()["error"]
+        assert "大小寫" in msg and first in msg
+        assert str(root) not in r.text
+    assert files_in(root / "workflows") == [first + ".json"]
+    assert client.get(f"/api/workflows/{quote(first, safe='')}").json()["graph"] == GRAPH
+    assert put_wf(client, quote(first, safe=""), graph=other, overwrite=True).status_code == 200
+    assert client.get(f"/api/workflows/{quote(first, safe='')}").json()["graph"] == other
+
+
+def test_workflow_sharp_s_rejected_not_case_variant(client, root):
+    """ß 不在白名單:直接 400,不會走到大小寫比對。"""
+    assert put_wf(client, "STRASSE").status_code == 200
+    r = put_wf(client, quote("straße", safe=""), overwrite=True)
+    assert r.status_code == 400
+    assert "工作流程名稱" in r.json()["error"]
+    assert files_in(root / "workflows") == ["STRASSE.json"]
+
+
+def test_workflow_bad_name_error_is_chinese_without_paths(client, root):
+    for name in ["夜市 流程", "a%E2%80%8Bb", "%EF%BC%8F", "%E2%80%AE", "%ED%95%9C", "%E3%83%BB", "%EF%BC%A1"]:
+        r = client.put(f"/api/workflows/{name}", json={"graph": GRAPH}, headers=auth())
+        assert r.status_code == 400, name
+        msg = r.json()["error"]
+        assert "工作流程名稱" in msg and "64" in msg
+        assert str(root) not in r.text
+        g = client.get(f"/api/workflows/{name}")
+        assert g.status_code == 400 and g.json()["error"] == msg
+    assert files_in(root / "workflows") == []
+
+
+def test_workflow_chinese_name_invalid_graph_still_400(client, root):
+    """草稿仍需通過 executor.validate 才能存。"""
+    bad = {"nodes": [{"id": "a", "kind": "no-such-kind"}], "edges": []}
+    r = put_wf(client, quote("夜市草稿", safe=""), graph=bad, overwrite=True)
+    assert r.status_code == 400
+    assert r.json()["errors"][0]["node_id"] == "a"
+    assert files_in(root / "workflows") == []
+
+
+def test_workflow_temp_file_name_has_no_name(client, root, monkeypatch):
+    """暫存檔名為 `.wf-<uuid>.tmp`,不含工作流程名稱;寫完不留暫存檔。"""
+    seen = []
+    real = ss._open_excl
+
+    def spy(path, mode):
+        seen.append(Path(path).name)
+        return real(path, mode)
+
+    monkeypatch.setattr(ss, "_open_excl", spy)
+    name = "夜" * 64
+    assert put_wf(client, quote(name, safe="")).status_code == 200
+    assert seen and all(n.startswith(".wf-") and n.endswith(".tmp") and "夜" not in n for n in seen)
+    assert files_in(root / "workflows") == [name + ".json"]
 
 
 def test_workflow_slash_name_does_not_escape(client, root):
