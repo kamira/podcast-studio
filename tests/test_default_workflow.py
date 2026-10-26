@@ -6,6 +6,8 @@
   executor.validate 只讀 `nodes`、`edges`,`steps` 與節點的 `pos` 不影響驗證。
 - 舊入口 `podcast_studio.py` 已刪除;`.claude/launch.json` 改啟動 `studio_server.py`。
 - 設定資料庫與 UI 檢查截圖不入 git。
+- `workflows/` 之下只追蹤 `default.json`,使用者另存的工作流程與存檔暫存檔不入 git
+  (CHG-20261026-01 T3)。
 """
 from __future__ import annotations
 
@@ -147,3 +149,43 @@ def test_user_data_is_git_ignored():
                        capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == paths
+
+
+# ---------- workflows/ 使用者檔不入 git(CHG-20261026-01 T3)----------
+
+_IN_GIT = shutil.which("git") is not None and (ROOT / ".git").exists()
+
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                          text=True, encoding="utf-8", check=False)
+
+
+@pytest.mark.skipif(not _IN_GIT, reason="不在 git 工作副本中")
+@pytest.mark.parametrize("path", ["workflows/夜市流程.json", "workflows/.wf-0.tmp",
+                                  "workflows/x.json", "workflows/子目錄/y.json"])
+def test_user_workflows_are_git_ignored(path):
+    """使用者另存的工作流程與存檔暫存檔一律被 .gitignore 忽略。"""
+    r = _git("check-ignore", "-q", "--no-index", path)
+    assert r.returncode == 0, f"{path} 應被 .gitignore 忽略:{r.stderr}"
+
+
+@pytest.mark.skipif(not _IN_GIT, reason="不在 git 工作副本中")
+def test_default_workflow_not_ignored():
+    r = _git("check-ignore", "-q", "--no-index", "workflows/default.json")
+    assert r.returncode == 1, f"workflows/default.json 不可被忽略:{r.stdout}{r.stderr}"
+
+
+@pytest.mark.skipif(not _IN_GIT, reason="不在 git 工作副本中")
+def test_only_default_workflow_tracked():
+    r = _git("ls-files", "workflows")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["workflows/default.json"]
+
+
+def test_gitignore_workflow_rules_cite_chg():
+    lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "workflows/*" in lines
+    assert "!workflows/default.json" in lines
+    assert lines.index("workflows/*") < lines.index("!workflows/default.json")
+    assert any(ln.startswith("#") and "CHG-20261026-01" in ln for ln in lines)
