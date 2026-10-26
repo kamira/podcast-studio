@@ -21,6 +21,10 @@
                                  回傳逐欄的繁體中文錯誤訊息;空清單代表合格。
                                  available_models 為 Ollama 已下載的模型名稱集合;
                                  傳 None 時只做結構檢查(save 與讀出資料庫時使用)。
+  load_meta() -> dict            (T9)唯讀取得 meta 的 imported_from、imported_at;
+                                 資料庫不存在或不能用時回空 dict;不建立、不匯入、不寫入。
+  voice_options() -> list[str]   (T9)VOICE_DIRS 下可選的 .wav 聲線檔(repo 相對路徑,
+                                 不跟隨符號連結;每筆都能通過 validate 的路徑規則)。
 
 資料庫(schema v1):
   meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)        schema_version、imported_from、imported_at
@@ -672,6 +676,81 @@ def load() -> dict:
     except Exception:
         return _fallback(WARN_DB_UNREADABLE)
     return _load_known(db)
+
+
+META_KEYS = ("imported_from", "imported_at")  # load_meta() 對外提供的 meta 鍵(不含 schema_version)
+
+
+def load_meta() -> dict:
+    """唯讀取得設定資料庫 meta 中的匯入資訊(T9 設定 API 的「已匯入一次」提示用)。
+
+    回傳 {"imported_from": …, "imported_at": …} 中有值的鍵;路徑不安全、資料庫不存在、
+    不是 SQLite、版本不明或讀取失敗時回空 dict。一律以唯讀 URI 開啟、不下任何 PRAGMA、
+    不建立資料庫、不匯入、不寫入。
+    """
+    if _db_path_error():
+        return {}
+    db = _db_file()
+    if not db.exists():
+        return {}
+    try:
+        if _probe(db) != _KNOWN:
+            return {}
+        con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True,
+                              timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
+        try:
+            rows = con.execute("SELECT key, value FROM meta WHERE key IN (?, ?)", META_KEYS).fetchall()
+        finally:
+            con.close()
+    except (_DbError, sqlite3.Error):
+        return {}
+    return {k: v for k, v in rows if k in META_KEYS and isinstance(v, str)
+            and 0 < len(v) <= MAX_NAME_LEN}
+
+
+VOICE_EXTS = (".wav",)  # 可選聲線檔的副檔名(BreezyVoice 的 speaker prompt 範例為 wav)
+MAX_VOICE_OPTIONS = 500
+
+
+def voice_options(limit: int = MAX_VOICE_OPTIONS) -> list[str]:
+    """列出允許目錄(VOICE_DIRS)下可選的聲線檔,回傳相對於 repo 根目錄的 POSIX 路徑。
+
+    不跟隨符號連結(符號連結的檔案與目錄一律略過)、略過點開頭的檔案與目錄;
+    每一筆都再經與 validate 相同的路徑規則確認,因此列出的值都能通過 validate。
+    最多回傳 limit 筆。
+    """
+    root = ROOT.resolve()
+    out: list[str] = []
+    for d in VOICE_DIRS:
+        base = root / d
+        if _voice_dir_unsafe(root, d) or not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            here = Path(dirpath)
+            dirnames[:] = sorted(n for n in dirnames
+                                 if not n.startswith(".") and not (here / n).is_symlink())
+            for fn in sorted(filenames):
+                if fn.startswith(".") or Path(fn).suffix.lower() not in VOICE_EXTS:
+                    continue
+                p = here / fn
+                if p.is_symlink() or not p.is_file():
+                    continue
+                rel = p.relative_to(root).as_posix()
+                if _voice_path_error(rel) is None:
+                    out.append(rel)
+                    if len(out) >= limit:
+                        return out
+    return out
+
+
+def _voice_dir_unsafe(root: Path, d: str) -> bool:
+    """允許目錄本身(含上層)任一層是符號連結時回 True。"""
+    cur = root
+    for part in Path(d).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return True
+    return False
 
 
 def save(cfg) -> None:
