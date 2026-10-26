@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-token" content="__STUDIO_TOKEN__">
+<title>Podcast 工作室</title>
+<link rel="stylesheet" href="/static/vendor/drawflow.min.css">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/drawflow.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+
+<!-- 首頁:兩張卡片(精靈、完整模式)由 CHG-20261022-04 提供;這裡只放頁首與 ⚙ 入口 -->
+<section id="page-home" class="page" data-page="home">
+  <header class="page-header">
+    <h1 class="page-title">Podcast 工作室</h1>
+    <button type="button" class="icon-btn" id="open-settings" aria-label="設定" title="設定">⚙</button>
+  </header>
+  <main class="home-main">
+    <p class="placeholder">首頁卡片(精靈、完整模式)建置中。請由右上角 ⚙ 進入設定,在「進階流程」編排與試跑節點流程。</p>
+  </main>
+</section>
+
+<!-- 設定頁:由首頁右上角 ⚙ 開啟;子頁以連結切換,不是網頁分頁 -->
+<section id="page-settings" class="page" data-page="settings" hidden>
+  <header class="page-header">
+    <a class="back-link" href="#/">← 首頁</a>
+    <h1 class="page-title">設定</h1>
+    <span class="icon-mark" aria-hidden="true">⚙</span>
+  </header>
+  <nav class="subnav" aria-label="設定子頁">
+    <a class="subnav-link" href="#/settings/models" data-sub="models">模型</a>
+    <a class="subnav-link" href="#/settings/seats" data-sub="seats">審議席位</a>
+    <a class="subnav-link" href="#/settings/voice" data-sub="voice">語音預設</a>
+    <a class="subnav-link" href="#/settings/flow" data-sub="flow">進階流程</a>
+  </nav>
+
+  <div class="subpage" data-sub="models" hidden>
+    <p class="placeholder">「模型」子頁建置中。</p>
+  </div>
+  <div class="subpage" data-sub="seats" hidden>
+    <p class="placeholder">「審議席位」子頁建置中。</p>
+  </div>
+  <div class="subpage" data-sub="voice" hidden>
+    <p class="placeholder">「語音預設」子頁建置中。</p>
+  </div>
+
+  <!-- 設定 › 進階流程:節點畫布 -->
+  <div class="subpage flow-page" data-sub="flow" hidden>
+    <div class="flow-toolbar">
+      <span class="flow-name" id="flow-name">流程:預設</span>
+      <button type="button" class="btn" id="btn-load" disabled title="載入流程(建置中)">載入</button>
+      <button type="button" class="btn" id="btn-save" disabled title="存檔(建置中)">存檔</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-primary" id="btn-run">▶ 執行</button>
+      <button type="button" class="btn" id="btn-stop" disabled>■ 停止</button>
+    </div>
+    <div class="flow-body">
+      <aside class="palette" id="palette" aria-label="節點清單">
+        <h2 class="palette-title">節點清單</h2>
+        <div id="palette-groups"></div>
+        <p class="palette-hint">把節點拖到畫布,或點一下加入。</p>
+        <div class="legend" aria-label="埠型別顏色">
+          <span class="legend-item type-text">文字</span>
+          <span class="legend-item type-image">圖片</span>
+          <span class="legend-item type-audio">音訊</span>
+          <span class="legend-item type-video">影片</span>
+        </div>
+      </aside>
+      <div class="canvas-wrap">
+        <div id="drawflow" class="canvas"></div>
+      </div>
+    </div>
+    <div class="statusbar" id="statusbar" role="status" aria-live="polite">尚未執行</div>
+  </div>
+</section>
+
+<div id="toast" class="toast" role="alert" hidden></div>
+
+</body>
+</html>

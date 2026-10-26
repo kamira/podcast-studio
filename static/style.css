@@ -1,0 +1,206 @@
+/* Podcast 工作室網頁樣式(CHG-20261022-01 T10)。
+   CSP 不允許行內樣式:所有樣式都在本檔,不在 HTML 寫 style 屬性。
+   不載入外部字型,一律用系統字型。 */
+
+:root {
+  --c-text: #2f6fdd;     /* 文字埠:藍 */
+  --c-image: #2e9e5b;    /* 圖片埠:綠 */
+  --c-audio: #e8892b;    /* 音訊埠:橘 */
+  --c-video: #8b5cd6;    /* 影片埠:紫 */
+  --fg: #1f2328;
+  --muted: #5d6673;
+  --line: #d0d5dd;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --accent: #2f6fdd;
+  --ok: #2e9e5b;
+  --warn: #b7791f;
+  --err: #c93c37;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  font-size: 14px;
+}
+
+.page { display: flex; flex-direction: column; height: 100vh; }
+
+.page-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.page-title { font-size: 18px; margin: 0; flex: 1; }
+#page-settings .page-title { text-align: center; }
+.icon-btn {
+  font-size: 20px; line-height: 1; padding: 6px 8px; border: 1px solid transparent;
+  background: transparent; border-radius: 6px; cursor: pointer;
+}
+.icon-btn:hover, .icon-btn:focus-visible { border-color: var(--line); background: var(--bg); }
+.icon-mark { font-size: 20px; color: var(--muted); padding: 6px 8px; }
+.back-link { color: var(--accent); text-decoration: none; white-space: nowrap; }
+.back-link:hover { text-decoration: underline; }
+
+.home-main { padding: 32px 16px; }
+.placeholder { color: var(--muted); margin: 24px 16px; }
+
+.subnav { display: flex; gap: 4px; padding: 8px 16px 0; background: var(--panel); border-bottom: 1px solid var(--line); }
+.subnav-link {
+  padding: 8px 14px; color: var(--muted); text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+.subnav-link[aria-current="page"] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+
+.subpage { flex: 1; min-height: 0; overflow: auto; }
+
+/* ---------- 進階流程 ---------- */
+.flow-page { display: flex; flex-direction: column; overflow: hidden; }
+.flow-toolbar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.flow-name { color: var(--muted); margin-right: 4px; }
+.spacer { flex: 1; }
+.btn {
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--fg); cursor: pointer; font: inherit;
+}
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-small { padding: 2px 8px; font-size: 12px; }
+
+.flow-body { flex: 1; display: flex; min-height: 0; }
+.palette {
+  width: 180px; flex: none; overflow: auto; padding: 12px;
+  background: var(--panel); border-right: 1px solid var(--line);
+}
+.palette-title { font-size: 14px; margin: 0 0 8px; }
+.palette-group-title {
+  font-size: 12px; color: var(--muted); margin: 12px 0 4px; font-weight: normal;
+}
+.palette-item {
+  display: block; width: 100%; text-align: left; margin: 0 0 4px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+  cursor: grab; font: inherit; color: var(--fg);
+}
+.palette-item:hover { border-color: var(--accent); }
+.palette-hint { color: var(--muted); font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.legend-item { font-size: 12px; padding-left: 14px; position: relative; }
+.legend-item::before {
+  content: ""; position: absolute; left: 0; top: 3px; width: 10px; height: 10px; border-radius: 50%;
+}
+.legend-item.type-text::before { background: var(--c-text); }
+.legend-item.type-image::before { background: var(--c-image); }
+.legend-item.type-audio::before { background: var(--c-audio); }
+.legend-item.type-video::before { background: var(--c-video); }
+
+.canvas-wrap { flex: 1; position: relative; min-width: 0; }
+.canvas {
+  position: absolute; inset: 0;
+  background-color: #fbfcfd;
+  background-image:
+    linear-gradient(to right, #eef0f3 1px, transparent 1px),
+    linear-gradient(to bottom, #eef0f3 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.canvas.drop-target { outline: 2px dashed var(--accent); outline-offset: -4px; }
+
+.statusbar {
+  padding: 6px 16px; background: var(--panel); border-top: 1px solid var(--line);
+  color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ---------- 節點(覆寫 Drawflow 預設樣式) ---------- */
+.drawflow .drawflow-node.studio-node {
+  width: 260px; padding: 0; background: var(--panel); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+  align-items: flex-start;
+}
+.drawflow .drawflow-node.studio-node.selected { background: var(--panel); border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47, 111, 221, .25); }
+.drawflow .drawflow-node.studio-node .inputs,
+.drawflow .drawflow-node.studio-node .outputs { padding-top: 34px; }
+.drawflow .drawflow-node.studio-node .input,
+.drawflow .drawflow-node.studio-node .output {
+  width: 16px; height: 16px; border: 2px solid #fff; background: #9aa3af; margin-bottom: 10px;
+  box-shadow: 0 0 0 1px #9aa3af;
+}
+.drawflow .drawflow-node.studio-node .input { left: -9px; top: 0; }
+.drawflow .drawflow-node.studio-node .output { right: -9px; top: 0; }
+.drawflow .drawflow-node .port-text { background: var(--c-text); box-shadow: 0 0 0 1px var(--c-text); }
+.drawflow .drawflow-node .port-image { background: var(--c-image); box-shadow: 0 0 0 1px var(--c-image); }
+.drawflow .drawflow-node .port-audio { background: var(--c-audio); box-shadow: 0 0 0 1px var(--c-audio); }
+.drawflow .drawflow-node .port-video { background: var(--c-video); box-shadow: 0 0 0 1px var(--c-video); }
+.drawflow .drawflow-node.studio-node .input.port-text,
+.drawflow .drawflow-node.studio-node .output.port-text { background: var(--c-text); }
+.drawflow .drawflow-node.studio-node .input.port-image,
+.drawflow .drawflow-node.studio-node .output.port-image { background: var(--c-image); }
+.drawflow .drawflow-node.studio-node .input.port-audio,
+.drawflow .drawflow-node.studio-node .output.port-audio { background: var(--c-audio); }
+.drawflow .drawflow-node.studio-node .input.port-video,
+.drawflow .drawflow-node.studio-node .output.port-video { background: var(--c-video); }
+
+.drawflow .connection .main-path { stroke: #9aa3af; stroke-width: 3px; }
+.drawflow .connection.type-text .main-path { stroke: var(--c-text); }
+.drawflow .connection.type-image .main-path { stroke: var(--c-image); }
+.drawflow .connection.type-audio .main-path { stroke: var(--c-audio); }
+.drawflow .connection.type-video .main-path { stroke: var(--c-video); }
+.drawflow .connection .main-path.selected { stroke: var(--err); }
+
+.node-body { padding: 8px 10px 10px; cursor: default; }
+.node-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.node-title { font-weight: 600; flex: 1; }
+.node-remove {
+  border: none; background: transparent; color: var(--muted); cursor: pointer; font: inherit; padding: 0 4px;
+}
+.node-remove:hover { color: var(--err); }
+.node-ports { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.node-ports div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.node-status {
+  font-size: 12px; padding: 1px 6px; border-radius: 10px; background: var(--bg); color: var(--muted);
+  white-space: nowrap;
+}
+.node-status.st-running, .node-status.st-waiting { background: #fff4e0; color: var(--warn); }
+.node-status.st-done { background: #e6f4ec; color: var(--ok); }
+.node-status.st-error { background: #fdecea; color: var(--err); }
+.node-status.st-skipped, .node-status.st-cancelled { background: #eef0f3; color: var(--muted); }
+.drawflow .drawflow-node.studio-node.is-error { border-color: var(--err); }
+
+.node-params { display: grid; gap: 4px; }
+.param { display: grid; gap: 2px; font-size: 12px; }
+.param-label { color: var(--muted); }
+.param input[type="text"], .param input[type="number"], .param select, .param textarea,
+.node-output textarea {
+  width: 100%; font: inherit; font-size: 12px; padding: 3px 5px;
+  border: 1px solid var(--line); border-radius: 4px; background: #fff; color: var(--fg);
+}
+.param textarea { resize: vertical; min-height: 44px; }
+.param-check { display: flex; align-items: center; gap: 6px; }
+
+.node-message { font-size: 12px; color: var(--err); margin-top: 6px; white-space: pre-wrap; word-break: break-word; }
+.node-message.info { color: var(--muted); }
+
+.node-output { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; display: grid; gap: 6px; }
+.node-output textarea { min-height: 80px; resize: vertical; }
+.node-output img { max-width: 100%; border-radius: 4px; display: block; }
+.node-output audio, .node-output video { width: 100%; }
+.node-output .output-label { font-size: 12px; color: var(--muted); }
+.node-output .output-link { font-size: 12px; color: var(--accent); }
+
+.pin-bar { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; color: var(--warn); }
+.drawflow .drawflow-node.studio-node.is-pinned { border-color: var(--warn); }
+
+/* ---------- 提示 ---------- */
+.toast {
+  position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%);
+  max-width: min(640px, 90vw); padding: 10px 16px; border-radius: 8px;
+  background: #2b2f36; color: #fff; box-shadow: 0 4px 12px rgba(0, 0, 0, .2); z-index: 100;
+  white-space: pre-wrap;
+}
+.toast.toast-error { background: var(--err); }
