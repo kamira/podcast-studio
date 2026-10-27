@@ -191,6 +191,8 @@ class PlanCheckChangedTest(unittest.TestCase):
 class RealRunnerIntegrationTest(unittest.TestCase):
     def test_real_chg01_passes(self):
         src = (ROOT / "docs" / "changes" / "CHG-20261022-01.md").read_text(encoding="utf-8")
+        # CHG-01 已收尾(狀態為驗收完成),runner 會略過;把狀態換回草稿,讓 runner 真的檢查計畫格式
+        src = src[:src.rindex("\n## 狀態")] + "\n## 狀態\n\n草稿(測試用)\n"
         with tempfile.TemporaryDirectory() as tmp:
             repo = FakeRepo(Path(tmp))
             base = repo.commit("初始", {"README.md": "x\n"})
