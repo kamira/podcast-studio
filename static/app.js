@@ -8,7 +8,11 @@
 //   - 所有請求帶 X-Studio-Token(取自 <meta name="studio-token">)。
 //   - Drawflow 的數字 id 送到 API 前一律轉成字串。
 //
-// 設定頁表單(T12):模型、審議席位子頁、還原預設、儲存(422 逐欄顯示);免責說明頁只留位置。
+// 設定頁表單(T12):模型、審議席位子頁、還原預設、儲存(422 逐欄顯示)。
+//
+// CHG-20261022-04 T7:本檔另提供共用工具 `window.Studio`(el、api、toast、uploadFile、watchRun…)與
+// hash 路由登錄(`Studio.addRoute`、`Studio.pageHooks`),首頁、精靈、完整模式與剪輯畫面在
+// project.js、timeline.js、wizard.js;畫布存檔(buildGraph)保留載入時的 steps(carrySteps,修訂 3 R3-2)。
 "use strict";
 
 (function () {
@@ -202,13 +206,20 @@
 
   const FORM_SUBPAGES = ["models", "seats"];   // 共用「還原預設 / 儲存」與提示列的子頁
   let currentPage = null;
+  // 其他模組登錄的路由({re, page, enter(match, entering)})與頁面進出鉤子(page → {enter, leave})
+  const extraRoutes = [];
+  const pageHooks = {};
 
   function showPage(name) {
-    ["home", "settings", "disclaimer"].forEach(function (p) {
-      document.getElementById("page-" + p).hidden = p !== name;
+    document.querySelectorAll("body > section.page").forEach(function (sec) {
+      sec.hidden = sec.dataset.page !== name;
     });
     const entering = currentPage !== name;
+    if (entering && currentPage && pageHooks[currentPage] && pageHooks[currentPage].leave) {
+      pageHooks[currentPage].leave();
+    }
     currentPage = name;
+    if (entering && pageHooks[name] && pageHooks[name].enter) pageHooks[name].enter();
     return entering;
   }
 
@@ -217,6 +228,14 @@
     if (/^#\/disclaimer\/?$/.test(h)) {
       showPage("disclaimer");
       return;
+    }
+    for (const r of extraRoutes) {
+      const hit = r.re.exec(h);
+      if (hit) {
+        const entering = showPage(r.page);
+        r.enter(hit, entering);
+        return;
+      }
     }
     const m = /^#\/settings(?:\/([a-z]+))?\/?$/.exec(h);
     if (!m) {
@@ -237,6 +256,30 @@
     if (sub === "flow") Flow.open();
   }
 
+  // ---------- 精靈步驟的保留規則(修訂 3 R3-2) ----------
+  //
+  // steps:載入時的 steps;present:{載入時的節點 id: 目前畫布上的節點 id}(只含仍在畫布上的節點)。
+  // 回傳存檔用的 steps:各步驟的節點 id 換成目前的 id、已不在畫布上的移除;原本有節點、移除後變空的
+  // 步驟整個刪除;原本就沒有節點的步驟(例:④ 剪輯)保留;格式不認得的步驟原樣保留(由精靈顯示錯誤)。
+  // 載入時沒有 steps(不是陣列)回 undefined,存檔不帶 steps。
+  function carrySteps(steps, present) {
+    if (!Array.isArray(steps)) return undefined;
+    const out = [];
+    steps.forEach(function (step) {
+      const copy = JSON.parse(JSON.stringify(step === undefined ? null : step));
+      if (!step || typeof step !== "object" || !Array.isArray(step.nodes) || step.nodes.length === 0) {
+        out.push(copy);
+        return;
+      }
+      copy.nodes = step.nodes.filter(function (id) {
+        return typeof id === "string" && Object.prototype.hasOwnProperty.call(present, id);
+      }).map(function (id) { return present[id]; });
+      if (copy.nodes.length) out.push(copy);
+    });
+    return out;
+  }
+  // carrySteps 結束
+
   // ---------- 節點畫布 ----------
 
   const Flow = {
@@ -247,6 +290,7 @@
     source: null,
     started: false,
     addOffset: 0,
+    loadedSteps: null,     // 載入時流程圖的 steps(精靈步驟;修訂 3 R3-2)
 
     async open() {
       if (this.started) return;
@@ -827,6 +871,7 @@
     buildGraph() {
       const data = this.editor.drawflow.drawflow[this.editor.module].data;
       const graph = { nodes: [], edges: [] };
+      const present = {};    // 載入時的節點 id → 目前畫布上的 id(只含仍在畫布上的節點)
       Object.keys(data).forEach((key) => {
         const st = this.nodes.get(String(key));
         if (!st) return;
@@ -844,6 +889,7 @@
           });
         }
         graph.nodes.push(node);
+        if (typeof st.origId === "string") present[st.origId] = String(key);
         Object.keys(n.outputs).forEach((cls) => {
           const op = st.outPorts[this.portIndex(cls)];
           n.outputs[cls].connections.forEach((c) => {
@@ -854,6 +900,9 @@
           });
         });
       });
+      // 修訂 3(R3-2):保留載入時的 steps,只移除已不在畫布上的節點 id
+      const steps = carrySteps(this.loadedSteps, present);
+      if (steps !== undefined) graph.steps = steps;
       return graph;
     },
 
@@ -861,6 +910,8 @@
     loadGraph(graph) {
       this.editor.clear();
       this.nodes.clear();
+      // 精靈步驟(修訂 3):載入時的 steps 原樣保留,存檔時由 carrySteps 對應到目前畫布
+      this.loadedSteps = graph && Array.isArray(graph.steps) ? JSON.parse(JSON.stringify(graph.steps)) : null;
       const list = graph && Array.isArray(graph.nodes) ? graph.nodes : [];
       const edges = graph && Array.isArray(graph.edges) ? graph.edges : [];
       const pos = this.autoLayout(list, edges);
@@ -874,7 +925,10 @@
         }
         const p = n.pos && Number.isFinite(n.pos.x) && Number.isFinite(n.pos.y) ? n.pos : pos[n.id];
         const st = this.addNode(n.kind, p.x, p.y, n);
-        if (st) idMap[n.id] = st;
+        if (st) {
+          st.origId = n.id;
+          idMap[n.id] = st;
+        }
       });
       edges.forEach((e) => {
         const from = e && e.from && idMap[e.from.node];
@@ -1538,16 +1592,71 @@
 
   // ---------- 啟動 ----------
 
+  // ---------- 共用工具(T7:給 project.js、timeline.js、wizard.js 使用) ----------
+
+  // 訂閱 /api/run/{id}/events(executor 事件,或專案 synth / render 事件);每則事件呼叫 onEvent,
+  // 收到 finished(或連線中斷且無法重連)時結束,回傳 finished 事件
+  function watchRun(runId, onEvent) {
+    return new Promise(function (resolve) {
+      const es = new EventSource("/api/run/" + encodeURIComponent(runId) + "/events");
+      let done = false;
+      const end = function (ev) {
+        if (done) return;
+        done = true;
+        es.close();
+        resolve(ev);
+      };
+      es.onmessage = function (m) {
+        let ev;
+        try {
+          ev = JSON.parse(m.data);
+        } catch (e) {
+          return;
+        }
+        if (!ev || typeof ev !== "object") return;
+        if (onEvent) onEvent(ev);
+        if (ev.type === "finished") end(ev);
+      };
+      es.onerror = function () {
+        if (es.readyState === EventSource.CLOSED) end({ type: "finished", status: "error", message: "與伺服器的連線中斷" });
+      };
+    });
+  }
+
+  window.Studio = Object.assign(window.Studio || {}, {
+    TOKEN: TOKEN,
+    NAME_RE: WORKFLOW_NAME_RE,         // 專案名稱與工作流程名稱同一套中英日白名單(names.py)
+    NAME_HINT: WORKFLOW_NAME_HINT.replace("工作流程", "專案"),
+    PORT_LABELS: PORT_LABELS,
+    el: el,
+    api: api,
+    errorText: errorText,
+    toast: toast,
+    fileUrl: fileUrl,
+    uploadExt: uploadExt,
+    checkFile: checkFile,
+    uploadFile: uploadFile,
+    draggingFiles: draggingFiles,
+    watchRun: watchRun,
+    isRunning: function () { return !!Flow.runId; },
+    addRoute: function (re, page, enter) { extraRoutes.push({ re: re, page: page, enter: enter }); },
+    pageHooks: pageHooks,
+    route: route,
+  });
+
+  // ---------- 啟動 ----------
+
   function start() {
     Settings.init();
-    document.getElementById("open-settings").addEventListener("click", function () {
-      location.hash = "#/settings";
+    document.querySelectorAll("#open-settings, .open-settings").forEach(function (b) {
+      b.addEventListener("click", function () { location.hash = "#/settings"; });
     });
-    // 檔案沒落在畫布上時不讓瀏覽器直接開啟該檔(會離開本頁)
+    // 檔案沒落在畫布或拖放區([data-drop])上時不讓瀏覽器直接開啟該檔(會離開本頁)
     document.addEventListener("dragover", function (e) {
       if (!draggingFiles(e)) return;
       const canvas = document.getElementById("drawflow");
       if (canvas && canvas.contains(e.target)) return;
+      if (e.target && e.target.closest && e.target.closest("[data-drop]")) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "none";
     });
@@ -1558,6 +1667,7 @@
     route();
   }
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
-  else start();
+  // 其他模組(defer 依序載入)在 DOMContentLoaded 之前登錄路由;一律等 DOMContentLoaded 再啟動
+  if (document.readyState === "complete") start();
+  else document.addEventListener("DOMContentLoaded", start);
 })();
