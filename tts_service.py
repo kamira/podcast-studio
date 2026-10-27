@@ -24,7 +24,8 @@
                                 不等整批結束。就地更新 `project.segments[*].audio`,不存檔(存檔由呼叫端決定);
                                 中途失敗時已完成的句子保留在快取,重跑會命中。
                                 emit 的事件:{"type": "waiting"}(等待其他重型工作)、
-                                {"type": "segment", "id", "seconds", "cached"}。
+                                {"type": "segment", "id", "seconds", "cached", "audio": {"id", "seconds", "key"}}
+                                (DIR-5 統整 M-1:帶該句的音檔,伺服器據此讓合成中途即可試聽)。
   apply_speed(segment, project) -> Path
                                 以 ffmpeg `atempo`(單一濾鏡,argv list)把合成音檔變速,存成
                                 `audio/<audio.id>-s<語速×100>.wav`;同一個「合成快取鍵(audio.id)+ 語速」已存在
@@ -66,7 +67,10 @@ ROOT = Path(__file__).resolve().parent
 WORKER = ROOT / "breezy_worker.py"
 BREEZY = taiwan_ai.BREEZY
 MODEL = breezy_worker.DEFAULT_MODEL
-SENTENCE_TIMEOUT = 120  # 每句逾時(秒);整批逾時 = 句數 × SENTENCE_TIMEOUT
+SENTENCE_TIMEOUT = 120  # 每句逾時(秒)
+MODEL_LOAD_TIMEOUT = 180  # 第一句另給的模型載入額度(秒;CHG 修訂 4,使用者 2026-10-28 核准)
+# 等第一個進度行最多 MODEL_LOAD_TIMEOUT + SENTENCE_TIMEOUT 秒,之後每句 SENTENCE_TIMEOUT 秒;
+# 整批逾時 = MODEL_LOAD_TIMEOUT + 句數 × SENTENCE_TIMEOUT。
 SPEED_TIMEOUT = 120
 STDERR_KEEP = 200
 MAX_MESSAGE = 300
@@ -225,9 +229,11 @@ def _run_worker(voice: Voice, jobs: list[dict], tmp_dir: Path, on_done) -> None:
                                                         stderr_tail.append(ln)), daemon=True)]
         for t in readers:
             t.start()
-        deadline = time.monotonic() + SENTENCE_TIMEOUT * len(jobs)
+        deadline = time.monotonic() + MODEL_LOAD_TIMEOUT + SENTENCE_TIMEOUT * len(jobs)
+        first = True   # 第一句含模型載入,另給 MODEL_LOAD_TIMEOUT
         while True:
-            wait = min(SENTENCE_TIMEOUT, deadline - time.monotonic())
+            limit = SENTENCE_TIMEOUT + (MODEL_LOAD_TIMEOUT if first else 0)
+            wait = min(limit, deadline - time.monotonic())
             if wait <= 0:
                 raise SynthError("✗ 語音合成逾時,已終止")
             try:
@@ -244,6 +250,7 @@ def _run_worker(voice: Voice, jobs: list[dict], tmp_dir: Path, on_done) -> None:
             if jid not in pending:
                 continue
             pending.discard(jid)
+            first = False
             on_done(jid, out_dir / f"{jid}.wav")
         try:
             code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
@@ -281,7 +288,8 @@ def synth(project, emit) -> dict:
         for seg in by_key[key]:
             seg["audio"] = {"id": _audio_id(key), "seconds": seconds, "key": key}
             result["cached" if cached else "synthesized"].append(seg["id"])
-            emit({"type": "segment", "id": seg["id"], "seconds": seconds, "cached": cached})
+            emit({"type": "segment", "id": seg["id"], "seconds": seconds, "cached": cached,
+                  "audio": dict(seg["audio"])})
 
     def seconds_of(path: Path) -> float:
         try:

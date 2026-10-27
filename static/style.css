@@ -415,7 +415,7 @@ body {
 .prop-row { display: flex; gap: 8px; align-items: baseline; }
 .prop-label { color: var(--muted); font-size: 12px; min-width: 36px; }
 .prop-block { display: grid; gap: 4px; }
-.prop-text { width: 100%; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
+.prop-text { white-space: pre-wrap; word-break: break-word; }
 .prop-thumb { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #000; border-radius: 4px; }
 .tone-chars { display: flex; flex-wrap: wrap; gap: 2px; }
 .tone-char { display: grid; justify-items: center; min-width: 22px; padding: 2px; border-radius: 4px; background: var(--bg); }
@@ -486,7 +486,8 @@ body {
 .license-table th { background: var(--bg); font-weight: 600; }
 
 /* 編輯互動(CHG-20261022-04 T8):拖空隙改停頓、拖圖片邊緣、語速選單、停頓輸入、注音彈出框 */
-.tl-gap.is-draggable { cursor: ew-resize; min-width: 8px; z-index: 1; background: rgba(232, 137, 43, .08); }
+/* 點擊範圍至少 12px、以交界為中心(寬度由 edit.js 的 gapBox 設定);層級高於已選取的片段(2) */
+.tl-gap.is-draggable { cursor: ew-resize; min-width: 12px; z-index: 3; background: rgba(232, 137, 43, .08); }
 .tl-gap.is-draggable:hover, .tl-gap.is-draggable:focus-visible, .tl-gap.is-dragging {
   background: rgba(232, 137, 43, .25); border-color: var(--c-audio); outline: none;
 }

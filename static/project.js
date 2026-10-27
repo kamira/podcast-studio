@@ -78,9 +78,14 @@
       return true;
     },
 
+    // 重新讀取專案檢視;同時有多個 reload 時只採用最後送出的那一個(合成期間每句完成都會 reload)
+    reloadSeq: 0,
     async reload() {
       if (!this.name) return;
+      const name = this.name;
+      const seq = ++this.reloadSeq;
       const r = await S.api("GET", this.url());
+      if (seq !== this.reloadSeq || this.name !== name) return;
       if (r.ok && r.data && r.data.project) this.set(r.data);
     },
 
@@ -595,8 +600,9 @@
 
   // ---------- ② 語音 ----------
   //
-  // 逐句合成:POST /api/projects/{p}/synth → SSE(waiting、segment、error、finished);每句完成即更新
-  // 該句狀態,結束時重新讀取專案(伺服器在 finished 前把已合成的句子寫回專案)。
+  // 逐句合成:POST /api/projects/{p}/synth → SSE(waiting、segment、error、finished);每句完成即重新讀取
+  // 專案檢視(伺服器把本次已完成的句子疊在檢視上,DIR-5 統整 M-1),該句立即出現在語音軌並可試聽;
+  // 結束時再讀一次(伺服器在 finished 前把已合成的句子寫回專案)。
 
   const Voice = {
     progress: {},        // 片段 id → 合成中的狀態文字(只在合成期間)
@@ -699,6 +705,7 @@
           this.progress[ev.id] = (ev.cached ? "✓ 沿用 " : "✓ 已合成 ") + sec.toFixed(1) + " 秒";
           status("合成中… " + done + " / " + total + " 句");
           this.render(Store.view);
+          Store.reload();   // 不等整批結束:該句音檔已可試聽,重新讀取後語音軌、試聽按鈕與預覽一起更新
           S.runHook("synth-progress", { running: true, segment: ev.id, seconds: ev.seconds });
         }
         if (ev.type === "error") S.toast(String(ev.message || "合成失敗"), true);

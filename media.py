@@ -235,6 +235,37 @@ def _run_ffmpeg(image_path, audio_path, script, path, srt):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+# ---------- 內容嗅探(CHG-20261022-04 DIR-5 統整 M-5:由 studio_server._sniff_binary 搬來,規則不變) ----------
+#
+# `/api/upload`(studio_server)與「送到素材庫」節點(nodes)共用;依檔頭位元組判斷內容是否與副檔名相符,
+# 不信任副檔名或用戶端 Content-Type。
+
+M4A_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2"})
+SNIFF_BYTES = 16
+
+
+def sniff_binary(ext: str, head: bytes) -> bool:
+    """ext 含開頭的點(例 `.png`);head 為檔頭至少 SNIFF_BYTES 位元組(不足時視為不符)。"""
+    if ext == ".png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if ext in (".jpg", ".jpeg"):
+        return head.startswith(b"\xff\xd8\xff")
+    if ext == ".webp":
+        return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    if ext == ".wav":
+        return head[:4] == b"RIFF" and head[8:12] == b"WAVE"
+    if ext == ".mp3":
+        if head.startswith(b"ID3"):
+            return True
+        if len(head) < 2 or head[0] != 0xFF or head[1] & 0xE0 != 0xE0:
+            return False
+        version, layer = (head[1] >> 3) & 0x03, (head[1] >> 1) & 0x03
+        return version != 0x01 and layer != 0x00   # 保留值不是合法 MPEG 音訊框
+    if ext == ".m4a":
+        return head[4:8] == b"ftyp" and head[8:12] in M4A_BRANDS
+    return False
+
+
 # ---------- 時間軸匯出(CHG-20261022-04 T5) ----------
 
 RENDER_RATE = 48000      # 匯出音軌:單聲道 16 位元 PCM,48 kHz
@@ -390,13 +421,20 @@ def _segment_audio(project) -> list:
     return paths
 
 
-def _decode_pcm(path: Path) -> bytes:
-    """以 ffmpeg 把音檔轉成 RENDER_RATE 單聲道 s16le;輸入以 O_NOFOLLOW 開啟後經 stdin 傳入,argv 不含路徑。"""
+def _decode_argv(seconds: float | None) -> list[str]:
+    """解碼用的 ffmpeg argv;seconds 有值時在輸出前加 `-t <秒數,小數 3 位>`,只解出需要的長度。"""
+    limit = ["-t", f"{seconds:.3f}"] if seconds is not None else []
+    return [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-i", "pipe:0",
+            "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(RENDER_RATE), *limit, "pipe:1"]
+
+
+def _decode_pcm(path: Path, seconds: float | None = None) -> bytes:
+    """以 ffmpeg 把音檔轉成 RENDER_RATE 單聲道 s16le;輸入以 O_NOFOLLOW 開啟後經 stdin 傳入,argv 不含路徑。
+
+    seconds:該片段在 layout 中需要的秒數(DIR-5 統整 M-3);ffmpeg 以 `-t` 截止,不把整個音檔解進記憶體。"""
     fd = _open_nofollow(path)
     try:
-        r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-i", "pipe:0",
-                            "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(RENDER_RATE),
-                            "pipe:1"],
+        r = subprocess.run(_decode_argv(seconds),
                            stdin=fd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                            check=True, timeout=DECODE_TIMEOUT)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
@@ -440,7 +478,7 @@ def _build_audio(paths: list, spans: list, total: int, dest: Path) -> None:
             a, b = _to_sample(a_ms), _to_sample(b_ms)
             _write_silence(w, a - pos)
             need = (b - a) * 2
-            pcm = _decode_pcm(path)[:need]
+            pcm = _decode_pcm(path, (b_ms - a_ms) / 1000)[:need]
             w.writeframes(pcm)
             _write_silence(w, (need - len(pcm)) // 2)
             pos = b

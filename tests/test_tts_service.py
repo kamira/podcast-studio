@@ -56,8 +56,7 @@ FAKE_WORKER = textwrap.dedent('''
     secs = conf.get("seconds", 0.5)
     rate = 16000
     for n, job in enumerate(body["jobs"]):
-        if n:
-            time.sleep(conf.get("delay", 0))
+        time.sleep(conf.get("delay", 0) if n else conf.get("first_delay", 0))
         frames = int(secs * rate)
         with wave.open(os.path.join(out, job["id"] + ".wav"), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
@@ -229,7 +228,7 @@ def test_改回原文字_快取命中_零次合成(env):
     assert out == {"synthesized": [], "cached": [p.segments[1]["id"]]}
     assert p.segments[1]["audio"] == original
     assert env.segment_emits() == [{"type": "segment", "id": p.segments[1]["id"],
-                                    "seconds": original["seconds"], "cached": True}]
+                                    "seconds": original["seconds"], "cached": True, "audio": original}]
 
 
 def test_相同文字的兩句_只合成一次(env):
@@ -334,6 +333,48 @@ def test_逐句emit_不等worker結束(env):
     first_emit = seg_emits[0][0]
     assert first_emit - progress[0]["t"] < 0.5
     assert first_emit < end - 1.5                    # worker 還在合成後兩句時就已送出
+
+
+def test_segment事件帶音檔id(env):
+    """DIR-5 統整 M-1:segment 事件帶 audio(id、seconds、key),伺服器據此讓合成中途即可試聽。"""
+    p = make_project()
+    tts.synth(p, env.emit)
+    evs = env.segment_emits()
+    assert len(evs) == 3
+    for ev, s in zip(evs, p.segments):
+        assert ev["audio"]["id"] == s["audio"]["id"] and ev["audio"]["key"] == s["audio"]["key"]
+        assert ev["audio"]["seconds"] == ev["seconds"]
+        assert (pj.subdir("夜市的味道", "audio") / f"{ev['audio']['id']}.wav").is_file()
+
+
+def test_第一句另給模型載入額度(env, monkeypatch):
+    """CHG 修訂 4(RS-7):第一個進度行可等 MODEL_LOAD_TIMEOUT + SENTENCE_TIMEOUT 秒。"""
+    monkeypatch.setattr(tts, "SENTENCE_TIMEOUT", 1.0)
+    monkeypatch.setattr(tts, "MODEL_LOAD_TIMEOUT", 2.0)
+    env.conf(first_delay=1.8)                         # 超過每句 1 秒,但在 1 + 2 秒內
+    p = make_project(texts=("今天天氣真好。",))
+    out = tts.synth(p, env.emit)
+    assert out["synthesized"] == [p.segments[0]["id"]]
+
+
+def test_第一句超過模型載入額度_逾時(env, monkeypatch):
+    monkeypatch.setattr(tts, "SENTENCE_TIMEOUT", 1.0)
+    monkeypatch.setattr(tts, "MODEL_LOAD_TIMEOUT", 1.0)
+    env.conf(first_delay=3.0)
+    p = make_project(texts=("今天天氣真好。",))
+    with pytest.raises(tts.SynthError, match="逾時"):
+        tts.synth(p, env.emit)
+    assert env.segment_emits() == []
+
+
+def test_第二句起_只給每句額度(env, monkeypatch):
+    monkeypatch.setattr(tts, "SENTENCE_TIMEOUT", 1.0)
+    monkeypatch.setattr(tts, "MODEL_LOAD_TIMEOUT", 2.0)
+    env.conf(delay=2.0)                               # 第一句立即完成,第二句超過每句 1 秒
+    p = make_project(texts=("今天天氣真好。", "我們去夜市吧。"))
+    with pytest.raises(tts.SynthError, match="逾時"):
+        tts.synth(p, env.emit)
+    assert [ev["id"] for ev in env.segment_emits()] == [p.segments[0]["id"]]
 
 
 def test_worker失敗_訊息只取worker的繁中訊息且遮蔽路徑(env):

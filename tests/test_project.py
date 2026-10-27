@@ -119,6 +119,17 @@ def test_pause_defaults_by_break():
         pj.validate(data(defaults={"speed": 1.15, "pause_sentence": 6}))
 
 
+def test_pause_zero_survives_save_and_load(projects):
+    """DIR-5 統整 M-2:停頓 0 秒存檔後讀回仍為 0(不被當成 null 改回預設)。"""
+    p = proj(segments=[seg("一。", **{"break": "sentence", "pause_after": 0}),
+                       seg("二。", **{"break": "sentence"})])
+    pj.save(p)
+    back = pj.load("夜市的味道")
+    assert back.segments[0]["pause_after"] == 0 and back.segments[0]["pause_after"] is not None
+    assert pj.effective_pause(back, back.segments[0]) == 0
+    assert pj.effective_pause(back, back.segments[1]) == 0.4
+
+
 # ---------- 專案名稱 ----------
 
 @pytest.mark.parametrize("name", ["café", "straße", "Ünïcödé", "ＡＢＣ", "한국어", "аbc", "a b", "a.b",

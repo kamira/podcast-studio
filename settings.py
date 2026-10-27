@@ -270,7 +270,8 @@ def _check_voice(d, errors) -> None:
         if k in d and _voice_round(k, d[k]) is None:
             lo, hi = SPEED_RANGE if k == "speed" else PAUSE_RANGE
             unit, step = ("倍", SPEED_STEP) if k == "speed" else ("秒", PAUSE_STEP)
-            errors.append(f"voice_defaults.{k}:必須是 {lo:g}–{hi:g} {unit}的數字(取到 {step})")
+            span = f"{lo:.1f}–{hi:.1f}" if k == "speed" else f"{lo:g}–{hi:g}"   # 語速寫成 0.5–2.0(RS-32)
+            errors.append(f"voice_defaults.{k}:必須是 {span} {unit}的數字(取到 {step})")
 
 
 def validate(cfg, available_models) -> list[str]:
