@@ -84,6 +84,7 @@
 | RS-38 | 派發記錄 T9 | 不帶參數時 canvas 與 editor 兩組都跑;容許一筆預期 409 console error;隔離改動多個模組常數 | 不成立(本機閘因此涵蓋本筆;409 為覆寫確認的正常流程) | — | 無 | T9 |
 | RS-39 | 派發記錄 T1 | 注音格式數字聲調轉換、整合測試指令改用 uv、G2PW 模型缺失時 requests 下載被預檢擋下、jobs 格式由 T1 自訂 | 不成立(T1 已依 DIR-4 合進 main,不屬本批審議;記錄供結構文件 `design.md` worker 介面引用) | 建議 | `docs/structure/design.md` 的 worker 介面寫入 jobs 格式與「模型快取缺失時離線失敗」 | T1 |
 | RS-40 | 派發記錄(使用者 2026-10-27) | 每段聲音黏著程度(連音,限字與字)、每個字詞清晰度、百分比拉桿;後製語調以折線編輯並可設圓弧程度 | 不在本 CHG 範圍 | — | 移出,另開 CHG(見 §7) | — |
+| RS-41 | 統整者本機檢查;DIR-5 第 3 條 | 本報告落點符合 CI `chg` 檢查的 CHG 檔名規則,`plan_check_changed.py` 對本檔失敗,合併 PR 的 CI 必定 fail | 成立 | 否決級(CI 不綠不得合進 main)+ 需使用者決定 | 見 §5 RS-41 | — |
 
 ## 3. 跨 task 共同問題
 
@@ -178,6 +179,11 @@
 - 「## 審議」節依 ledger 規則只寫席位判決;本報告不寫入「## 審議」。
 - 驗收:CHG 派發記錄 T2–T9 每列都有 DIR-5 / CI 說明;`doc_integrity_check` 通過。
 
+### M-10 統整報告落點不得讓合併 PR 的 CI 失敗(RS-41,否決級;依 §5 RS-41 使用者決定)
+
+- 若採建議 (a):DIR-5 第 3 條文字經使用者核准修改後,開發模型以 `git mv` 把本檔搬到新落點,CHG-20261022-04 派發記錄的「DIR-5 統整」列引用新路徑。
+- 驗收:`python3 scripts/ci/plan_check_changed.py --repo . --range origin/main..HEAD` 在整合分支上通過;`doc_integrity_check` 通過。
+
 ## 5. 需使用者決定的項目
 
 | 編號 | 問題 | 選項 | 統整建議 |
@@ -189,6 +195,7 @@
 | RS-22 | 完整模式多一個「匯出」面板 | (a) 保留面板並補記;(b) 改成畫面草稿的頁首「[匯出 MP4]」按鈕 | (a)。理由:修訂 2 完整模式草稿頁首就有「[匯出 MP4]」,Acceptance operation 也在完整模式匯出,功能在範圍內,只是形式不同;改成按鈕要動 T7 / T9 的 DOM 與截圖 |
 | RS-23 | 屬性面板可改句子文字(超出 T8 清單,畫面草稿只顯示) | (a) 取窄移除(M-8);(b) 保留並補記 | (a)。理由:使用者規則「規格寬窄二選一時取窄」;改文字已有文稿面板與 ② 語音兩個入口,第三個入口多一條要同步的路徑 |
 | RS-29 | 語音預設存檔需要 Ollama 可連線 | (a) 「語音預設」子頁存檔不檢查 Ollama(只驗語速、停頓範圍);(b) 維持現況 | (a),但這會讓 `PUT /api/config` 對只含 `voice_defaults` 的請求走不同規則,屬行為變更,需使用者決定;未決定前不列入必修 |
+| RS-41 | 本報告的落點 `docs/changes/CHG-20261022-04-review-summary.md`(DIR-5 第 3 條指定)符合 CI `chg` 檢查的檔名規則 `^docs/changes/CHG-[^/]*\.md$`(`scripts/ci/plan_check_changed.py:39`)。統整者本機實測(2026-10-28):`doc_integrity_check` 補上「風險分級 / 實作者 / ## 狀態」欄後通過;`plan_check_changed.py --range origin/chg/CHG-20261022-04-impl..HEAD` 失敗(「缺 ### Global Constraints 節」「找不到任何 task」)。DIR-5 第 5 條合併 PR 的 CI 四項因此必定 fail | (a) 修改 DIR-5 第 3 條的落點,改成不符合 `CHG-*` 的檔名(例:`docs/changes/review/CHG-20261022-04-summary.md` 或 `docs/changes/DIR5-CHG-20261022-04.md`),開發模型在修正輪以 `git mv` 搬移;(b) 改 `plan_check_changed.py` 排除 `-review-summary.md`(治理基礎設施,需 `infra-approved`) | (a)。理由:只動 knowledge 文字與一個檔名,不動 CI;需使用者核准 DIR-5 文字修改 |
 | C-2 | 合併 PR 審議時 diff 截斷 | (a) 讓 Codex 席讀工作樹或分檔送審(改 `scripts/local_review.py`,需 `infra-approved`);(b) 維持現況,截斷造成的 fail 依 DIR-4 第 2 條交使用者 | 使用者決定;本報告不建議在本 CHG 內改審議工具 |
 
 ## 6. 不列入必修、可併入本輪的建議
