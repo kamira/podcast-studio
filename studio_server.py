@@ -85,6 +85,80 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
   在執行緒池中執行,不阻塞事件迴圈;回應上限 MAX_TAGS_BYTES。
   所有錯誤訊息與 `_warnings` 一律經 `scrub()`,不送本機絕對路徑。
 
+專案 API(CHG-20261022-04 T6;資料模型見 project.py 檔頭,專案目錄由 `project.ROOT` 決定):
+
+  共通:{p} 為專案名稱(`names.py` 中英日白名單,1~64 字;含 `.`、`..`、`%2e%2e`、`/` 一律 400)。
+  本文一律 JSON 物件、上限 MAX_PROJECT_BODY(超過 413、不是 JSON 物件 422、不認得的欄位 422)。
+  錯誤回應 {"error": 繁中訊息, "errors"?: [訊息…], "segments"?: [片段 id…]},一律經 scrub()、不含本機絕對路徑:
+  400 名稱不合規則 / 刪除未確認 / 匯出前仍有未合成片段;404 專案、版本、片段、圖片、素材或上傳檔不存在
+  (segment id、image id、asset id 不符 `^[0-9a-f]{8,32}$` 也是 404);409 名稱已存在 / 已有重型工作
+  在執行;422 資料不合法(注音、停頓、語速、文字上限、非 WAV 取代音檔…);500 專案目錄不安全。
+  「專案檢視」View = {"project": 專案 dict(project.Project.to_dict()),
+                      "layout": timeline.layout() 結果(預覽排程用,欄位見 timeline.py 檔頭),
+                      "forced_breaks": [文稿字元索引](目前的強制停頓位置;改文稿時帶回 PUT 以保留)}
+  修改類端點一律「載入 → 修改 → 存檔」(存檔前舊版移入 history/),回 View + {"version": 這次移入
+  history 的版本 id 或 null};同一專案的修改在本行程內序列化。
+
+  GET    /api/projects                 {"projects": [{"name", "updated": 專案檔修改時間 epoch 秒}]}
+  POST   /api/projects                 {"name", "script"?} → 201 View;文稿依 project.split_segments 切成片段;
+                                       語速與停頓預設取自 `voice_defaults()`(T8 鉤子,目前為 project.DEFAULTS)
+  GET    /api/projects/{p}             View
+  PUT    /api/projects/{p}             存檔:{"script"?, "forced_breaks"?, "defaults"?}(皆可省略;空本文 = 原樣
+                                       再存一次)。帶 script 或 forced_breaks 時重新分句:文字相同的片段依序
+                                       配對沿用 id、停頓、語速、標註與音檔,其他為新片段(沒有音檔);
+                                       forced_breaks 省略時為 [](要保留強制停頓請帶回 View 的 forced_breaks)。
+                                       defaults 為部分更新(鍵同 project.DEFAULTS)
+  DELETE /api/projects/{p}             本文 {"confirm": true}(缺少或不是 true → 400);移到
+                                       `projects/.trash/<名稱>-<時間戳>-<4 碼>/` → {"trashed": true, "name", "trash"};
+                                       該專案正在合成或匯出 → 409
+  GET    /api/projects/{p}/history     {"versions": [版本 id(舊到新)]}
+  POST   /api/projects/{p}/restore     {"version"} → View + {"version", "restored"};還原 = 一次存檔
+                                       (目前版本先移入 history,history 因此多一個檔)
+  PATCH  /api/projects/{p}/segments/{id}
+                                       {"text"?, "pause_after"?, "speed"?, "annotations"?, "split_at"?,
+                                        "merge_next"?, "audio_file"?, "audio"?}(至少一個)→ View(+ "new_segment" /
+                                       "removed_segment"):
+                                       text:不可空、不可含換行,同時改寫文稿中該句的位置;文字改變時標註清空
+                                         (同一請求另帶 annotations 除外),**自錄音檔(audio 沒有 key)一併清除**
+                                         ——錄音已不符新文字,改由合成產生;合成音檔保留,由快取鍵判定需重合成。
+                                       annotations:[{"index", "zhuyin"}](聲調符號格式;非法 → 422);
+                                         改標註時自錄音檔同樣清除。
+                                       pause_after / speed:null 或數值(0~5 秒、0.5~2.0 倍,超出 422)。
+                                       split_at:句內字元索引,在該字之後強制停頓切成兩句(前句 break=forced;
+                                         兩句都沒有音檔);merge_next:true 把強制停頓切出的這句與下一句合併。
+                                       audio_file:`/api/upload` 回傳的 file_id,以自錄音檔取代這一句(修訂 3,R3-6):
+                                         只看前 12 位元組,必須是 RIFF/WAVE,否則 422「取代語音只接受 WAV 音檔」、
+                                         片段不變;長度以 media.wav_seconds() 取得(不轉檔);複製成
+                                         `audio/<新 id>.wav`,audio = {"id", "seconds"}(沒有 key,合成不覆蓋)。
+                                       audio:只能為 null(清除音檔,改回由合成產生)。
+  POST   /api/projects/{p}/assets      {"file_id", "label"?} → View + {"asset": {"id", "kind", "ext", "bytes",
+                                       "label"?}};把上傳檔複製到 `assets/<新 id>.<副檔名>`(素材庫用)
+  POST   /api/projects/{p}/images      {"asset": 圖片素材 id} 或 {"file_id": 上傳的圖片}(擇一),"start"?(預設 0)、
+                                       "end"?(null = 到結尾)→ View + {"image": 新圖片 id}
+  PATCH  /api/projects/{p}/images/{id} {"start"?, "end"?} → View
+  DELETE /api/projects/{p}/images/{id} → View;只移除時間軸項目,不刪素材檔
+  GET    /api/projects/{p}/media/{id}  只依 id 解析:專案素材 → `assets/<id>.<ext>`、片段音檔 → `audio/<id>.wav`;
+                                       resolve() 後必須直接位於該專案的 assets/ 或 audio/(符號連結、他專案的 id、
+                                       不存在 → 404);只送 MEDIA_TYPES 的副檔名,帶 nosniff。送的是合成原檔
+                                       (變速前);預覽以 `<audio>.playbackRate = 語速`(保留音高)播放。
+  POST   /api/projects/{p}/synth       → {"run_id", "events": "/api/run/<run_id>/events"};事件(SSE,格式同 /api/run):
+                                       {"type": "waiting"}、{"type": "segment", "id", "seconds", "cached"}(每句完成)、
+                                       {"type": "error", "message"}、
+                                       {"type": "finished", "status": "ok"|"error", "synthesized", "cached", "saved"}。
+                                       完成(含中途失敗)時把已合成的句子寫回專案:只更新同 id 且合成文字未變、
+                                       期間沒有改成自錄音檔的片段。
+  POST   /api/projects/{p}/render      匯出前檢查:沒有音檔或快取鍵已過期(文字改過)的片段 → 400
+                                       {"error", "segments": [片段 id]};通過 → {"run_id", "events"},事件:
+                                       {"type": "waiting"}、{"type": "render", "status": "started"}、
+                                       {"type": "error", "message", "segments"}、
+                                       {"type": "finished", "status": "ok", "mp4": "outputs/…mp4", "srt": "outputs/…srt"}
+                                       (下載走 `/files/<mp4>`)。
+  POST   /api/annotate                 {"text": 1~500 字}(超過 422)→ {"text", "zhuyin": [每字注音或 null]};
+                                       同步執行,breezy_worker annotate 在 heavy_lock 內、逾時 ANNOTATE_TIMEOUT 秒;
+                                       worker 失敗或逾時 → 500 {"error": 繁中訊息}。
+  synth、render、annotate 與 /api/run 共用同一個「執行中」旗標(Runs.active),第二個一律 409。
+  伺服器啟動(main)時呼叫 `project.startup_cleanup(now)`。`projects/` 不經 `/files/*` 提供。
+
 事件內容與 executor.py 檔頭相同,另有兩點:
   - 字串一律經 `scrub()`:repo 根目錄換成 `<repo>`、家目錄換成 `~`,不把本機絕對路徑送到瀏覽器。
   - 節點輸出值若是 repo 內的檔案路徑,改送相對於 repo 的路徑(例 `outputs/cover-….png`);
@@ -103,17 +177,23 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
 from __future__ import annotations
 
 import asyncio
+import functools
 import hmac
 import html
+import inspect
 import json
 import os
+import re
 import secrets
+import stat
+import subprocess
 import sys
 import threading
 import time
 import traceback
 import uuid
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -124,10 +204,15 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 import executor  # noqa: E402
+import heavy_lock  # noqa: E402
+import media  # noqa: E402
 import names  # noqa: E402
 import nodes  # noqa: E402
+import project as pj  # noqa: E402
 import settings  # noqa: E402
 import taiwan_ai  # noqa: E402
+import timeline  # noqa: E402
+import tts_service  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -618,13 +703,331 @@ def _installed_tools() -> dict:
     }
 
 
+# ---------- 專案 API(CHG-20261022-04 T6) ----------
+
+MAX_PROJECT_BODY = 1024 * 1024   # 專案 API 的 JSON 本文上限(文稿 50000 字以 \uXXXX 跳脫仍在範圍內)
+MAX_ANNOTATE_CHARS = 500
+ANNOTATE_TIMEOUT = 60            # 秒;等待重型工作鎖與 worker 執行各自的上限
+COPY_CHUNK = 1 << 20
+UPLOAD_ID_RE = re.compile(r"uploads/([0-9a-f]{32})\.([a-z0-9]{1,5})", re.ASCII)
+MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp",
+               "wav": "audio/wav", "mp3": "audio/mpeg", "m4a": "audio/mp4",
+               "txt": "text/plain; charset=utf-8", "md": "text/plain; charset=utf-8"}
+WAV_ONLY = "取代語音只接受 WAV 音檔"
+BUSY = "已有語音合成、匯出、注音標註或流程在執行中,請等它結束"
+SEGMENT_PATCH_KEYS = ("text", "pause_after", "speed", "annotations", "split_at", "merge_next",
+                      "audio_file", "audio")
+PROJECT_PUT_KEYS = ("script", "forced_breaks", "defaults")
+
+
+class ApiError(Exception):
+    """專案 API 的可預期錯誤;message 為繁中、不含本機路徑,extra 併入回應本文。"""
+
+    def __init__(self, status: int, message: str, **extra):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.extra = extra
+
+
+class AnnotateError(RuntimeError):
+    """注音標註失敗;訊息為繁中、不含本機絕對路徑。"""
+
+
+def _project_error(e: "pj.ProjectError") -> JSONResponse:
+    if isinstance(e, pj.UnsafePath):
+        print("studio_server:專案目錄不安全(UnsafePath)", file=sys.stderr)
+        return _err("專案目錄不可用", 500)
+    status = 404 if isinstance(e, pj.ProjectNotFound) else 409 if isinstance(e, pj.ProjectExists) else 422
+    errors = _scrub_obj([str(m) for m in e.errors]) or ["專案資料不正確"]
+    return JSONResponse({"error": errors[0], "errors": errors}, status_code=status)
+
+
+def _api_response(e: Exception) -> JSONResponse:
+    if isinstance(e, ApiError):
+        return JSONResponse({"error": scrub(e.message), **_scrub_obj(e.extra)}, status_code=e.status)
+    return _project_error(e)
+
+
+def _guard(fn):
+    """把 ApiError、ProjectError 轉成 JSON 錯誤回應(保留簽章供 FastAPI 解析路徑參數)。"""
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def wrapper(*a, **kw):
+            try:
+                return await fn(*a, **kw)
+            except (ApiError, pj.ProjectError) as e:
+                return _api_response(e)
+    else:
+        @functools.wraps(fn)
+        def wrapper(*a, **kw):
+            try:
+                return fn(*a, **kw)
+            except (ApiError, pj.ProjectError) as e:
+                return _api_response(e)
+    return wrapper
+
+
+def _pname(p) -> str:
+    """路徑或本文中的專案名稱;不合規則(含 `..`、`%2e%2e`、`/`)一律 400。"""
+    try:
+        return pj.check_name(p)
+    except pj.ProjectError:
+        raise ApiError(400, pj.NAME_HINT) from None
+
+
+def _check_item_id(v, what: str) -> str:
+    """伺服器產生的 id(`^[0-9a-f]{8,32}$`);其他輸入一律 404。"""
+    if not isinstance(v, str) or not pj.ID_RE.fullmatch(v):
+        raise ApiError(404, f"找不到這個{what}")
+    return v
+
+
+async def _json(request: Request, limit: int = MAX_PROJECT_BODY, allow_empty: bool = False) -> dict:
+    body = await _read_body(request, limit)
+    if body is None:
+        raise ApiError(413, f"請求內容超過 {limit // 1024} KB")
+    if allow_empty and not body.strip():
+        return {}
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ApiError(422, "請求內容不是合法的 JSON") from None
+    if not isinstance(data, dict):
+        raise ApiError(422, "請求內容必須是 JSON 物件")
+    return data
+
+
+def _only_keys(data: dict, allowed) -> None:
+    unknown = sorted(set(data) - set(allowed), key=str)
+    if unknown:
+        raise ApiError(422, f"不認得的欄位:{', '.join(map(str, unknown))[:200]}")
+
+
+def _spans(script: str, segments: list) -> list:
+    """各片段在文稿中的位置(依序往後找);找不到的片段為 None。"""
+    out, cur = [], 0
+    for s in segments:
+        i = script.find(s["text"], cur)
+        if i < 0:
+            out.append(None)
+            continue
+        out.append((i, i + len(s["text"])))
+        cur = i + len(s["text"])
+    return out
+
+
+def _forced_breaks(proj) -> list[int]:
+    """目前片段的強制停頓位置(文稿字元索引,即 `split_segments` 的 forced_breaks)。"""
+    return [sp[1] - 1 for s, sp in zip(proj.segments, _spans(proj.script, proj.segments))
+            if sp and s.get("break") == "forced"]
+
+
+def _view(proj) -> dict:
+    """GET /api/projects/{p} 與各修改端點共用的回應本體。"""
+    return {"project": proj.to_dict(), "layout": timeline.layout(proj), "forced_breaks": _forced_breaks(proj)}
+
+
+def _new_segment(text: str, brk: str) -> dict:
+    return {"id": pj.new_id(), "text": text, "break": brk, "pause_after": None, "speed": None,
+            "annotations": [], "audio": None}
+
+
+def _resplit(proj, script, forced) -> None:
+    """文稿改寫後重新分句;文字相同的片段(依序配對)沿用 id、停頓、語速、標註與音檔,只有新句沒有音檔。"""
+    pieces = pj.split_segments(script, forced)
+    pool: dict[str, list] = {}
+    for s in proj.segments:
+        pool.setdefault(s["text"], []).append(s)
+    segs = []
+    for p in pieces:
+        olds = pool.get(p["text"])
+        if olds:
+            s = dict(olds.pop(0))
+            s["break"] = p["break"]
+        else:
+            s = _new_segment(p["text"], p["break"])
+        segs.append(s)
+    proj.script = script
+    proj.segments = segs
+
+
+def _external(audio) -> bool:
+    """自錄取代的音檔(audio 沒有 key)。"""
+    return bool(audio) and "key" not in audio
+
+
+def _open_upload(root: Path, file_id) -> tuple[int, str]:
+    """開啟 `/api/upload` 產生的檔案(`uploads/<32 碼>.<副檔名>`),回傳 (fd, 副檔名);以 O_NOFOLLOW 開啟。"""
+    m = UPLOAD_ID_RE.fullmatch(file_id) if isinstance(file_id, str) else None
+    if m is None or f".{m.group(2)}" not in UPLOAD_KINDS:
+        raise ApiError(404, "找不到上傳的檔案")
+    try:
+        updir = _safe_dir(root, "outputs", "uploads", create=False)
+    except FileNotFoundError:
+        raise ApiError(404, "找不到上傳的檔案") from None
+    except OSError:
+        print("studio_server:上傳目錄不安全", file=sys.stderr)
+        raise ApiError(500, "上傳目錄不可用") from None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(updir / f"{m.group(1)}.{m.group(2)}", flags)
+    except OSError:
+        raise ApiError(404, "找不到上傳的檔案") from None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ApiError(404, "找不到上傳的檔案")
+    return fd, m.group(2)
+
+
+def _copy_in(fd: int, dest_dir: Path, ext: str) -> tuple[str, Path, int]:
+    """把已開啟的檔案複製成 `dest_dir/<新 id>.<ext>`(排他建立,不覆寫);回傳 (id, 路徑, 位元組數)。"""
+    for _ in range(8):
+        new = pj.new_id()
+        dest = dest_dir / f"{new}.{ext}"
+        try:
+            out = _open_excl(dest, 0o644)
+            break
+        except FileExistsError:
+            continue
+    else:  # pragma: no cover - 隨機 id 連續撞名
+        raise ApiError(500, "無法建立不重複的檔名")
+    size = 0
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(out, "wb") as f:
+            while True:
+                chunk = os.read(fd, COPY_CHUNK)
+                if not chunk:
+                    break
+                f.write(chunk)
+                size += len(chunk)
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    return new, dest, size
+
+
+def _media_file(name: str, aid: str) -> tuple[Path, str]:
+    """`/api/projects/{p}/media/{aid}`:只依 id 在該專案的素材清單或片段音檔中解析,
+    resolve() 後必須直接位於該專案的 `assets/` 或 `audio/` 內;其他一律 404。"""
+    _check_item_id(aid, "檔案")
+    proj = pj.load(name)
+    found = next(((("assets", a["ext"])) for a in proj.assets if a["id"] == aid), None)
+    if found is None and any((s.get("audio") or {}).get("id") == aid for s in proj.segments):
+        found = ("audio", "wav")
+    if found is None or found[1] not in MEDIA_TYPES:
+        raise ApiError(404, "找不到這個檔案")
+    sub, ext = found
+    try:
+        base = pj.subdir(name, sub)
+    except (FileNotFoundError, pj.ProjectNotFound):
+        raise ApiError(404, "找不到這個檔案") from None
+    path = base / f"{aid}.{ext}"
+    try:
+        if path.is_symlink():
+            raise ApiError(404, "找不到這個檔案")
+        real = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ApiError(404, "找不到這個檔案") from None
+    if real.parent != base or not real.is_file():
+        raise ApiError(404, "找不到這個檔案")
+    return real, MEDIA_TYPES[ext]
+
+
+def _voice_defaults() -> dict:
+    """新專案的語速與停頓預設。
+
+    T8 鉤子:T8 在設定資料庫加入 `voice_defaults` 表後,把本函式改為回傳
+    `settings.load()["voice_defaults"]`(鍵同 `project.DEFAULTS`:speed、pause_comma、pause_sentence、
+    pause_paragraph);在那之前一律用專案模組的預設值。`create_app(voice_defaults=…)` 可換替身。
+    """
+    return dict(pj.DEFAULTS)
+
+
+def annotate_text(text: str, root: Path) -> list:
+    """以 `breezy_worker.py annotate` 產生逐字注音(聲調符號格式,非中文字為 None)。
+
+    輸入檔放 `outputs/.tmp/`(不屬任何專案;`/files/` 不提供點開頭目錄),用完即刪;在 `heavy_lock` 內
+    執行(等鎖與 worker 各最多 ANNOTATE_TIMEOUT 秒);argv list、`env=taiwan_ai.BREEZY_ENV`、
+    `cwd=tools/BreezyVoice`(同 tts_service)。失敗丟 AnnotateError(繁中、不含路徑)。
+    """
+    try:
+        tdir = _safe_dir(root, "outputs", ".tmp", create=True)
+    except OSError:
+        raise AnnotateError("✗ 暫存目錄不可用") from None
+    path = tdir / f"annotate-{uuid.uuid4().hex}.json"
+    try:
+        with os.fdopen(_open_excl(path), "w", encoding="utf-8") as f:
+            json.dump({"text": text}, f, ensure_ascii=False)
+        argv = [str(Path(tts_service.BREEZY) / ".venv" / "bin" / "python"), str(tts_service.WORKER),
+                "annotate", "--input", str(path)]
+        with heavy_lock.heavy_lock(timeout=ANNOTATE_TIMEOUT):
+            r = subprocess.run(argv, cwd=str(tts_service.BREEZY), env=taiwan_ai.BREEZY_ENV,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=ANNOTATE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise AnnotateError("✗ 注音標註逾時,已終止") from None
+    except TimeoutError:
+        raise AnnotateError("✗ 其他重型工作進行中,請稍後再試") from None
+    except OSError:
+        raise AnnotateError("✗ 無法啟動注音標註(請確認 tools/BreezyVoice 已安裝)") from None
+    finally:
+        path.unlink(missing_ok=True)
+    if r.returncode != 0:
+        raise AnnotateError(tts_service._worker_message(r.returncode, r.stderr.splitlines()))
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    try:
+        out = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        out = None
+    if (not isinstance(out, list) or len(out) != len(text)
+            or any(z is not None and not isinstance(z, str) for z in out)):
+        raise AnnotateError("✗ 注音標註結果格式不正確")
+    return out
+
+
+def _render_default(proj):
+    return media.render_timeline(proj, timeline.layout(proj))
+
+
+def _out_relative(path) -> str:
+    """匯出檔的 `/files/` 相對路徑(`outputs/<檔名>`);不在輸出目錄內時只給檔名。"""
+    p = Path(path)
+    try:
+        return "outputs/" + p.resolve().relative_to(Path(taiwan_ai.OUT).resolve()).as_posix()
+    except (ValueError, OSError):
+        return p.name
+
+
+def startup_cleanup(now=None) -> dict:
+    """伺服器啟動時呼叫 `project.startup_cleanup(now)`(修訂 2):清 `.trash/` 滿 30 天者與各專案 `tmp/` 殘留。
+    失敗只記錄、不阻擋啟動;記錄不含本機路徑。"""
+    now = now if now is not None else datetime.now(timezone.utc)
+    try:
+        result = pj.startup_cleanup(now)
+    except Exception as e:
+        print(f"studio_server:啟動清理失敗({type(e).__name__})", file=sys.stderr)
+        return {}
+    print(f"studio_server:啟動清理 回收區刪除 {len(result['trash_removed'])} 項、tmp 清除 "
+          f"{result['tmp_cleared']} 項、警告 {len(result['warnings'])} 則", file=sys.stderr)
+    return result
+
+
 def create_app(runner: Callable | None = None, token: str | None = None,
                static_dir: Path | None = None, root: Path | None = None,
-               ollama_tags: Callable[[], list] | None = None) -> FastAPI:
+               ollama_tags: Callable[[], list] | None = None,
+               synth: Callable | None = None, render: Callable | None = None,
+               annotate: Callable[[str], list] | None = None,
+               voice_defaults: Callable[[], dict] | None = None) -> FastAPI:
     """建立 app。runner 預設為 executor.run(測試可換替身);token 預設每次隨機產生;
     root 為 repo 根目錄(`outputs/`、`workflows/` 所在處),預設本檔所在目錄,測試可指到暫存目錄;
     ollama_tags 為取得 Ollama 已下載模型清單的函式(預設 fetch_ollama_tags,測試可換替身;
-    失敗時應丟 OllamaUnavailable)。設定資料庫的位置由 settings.ROOT 決定。"""
+    失敗時應丟 OllamaUnavailable)。設定資料庫的位置由 settings.ROOT 決定。
+    專案 API(T6)的替身:synth(project, emit)預設 tts_service.synth;render(project) -> (mp4, srt)
+    預設 media.render_timeline(project, timeline.layout(project));annotate(text) -> 注音陣列預設
+    annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8 鉤子)。
+    專案目錄由 project.ROOT 決定(不是 root)。"""
     token = token or secrets.token_urlsafe(32)
     tags_fn = ollama_tags or fetch_ollama_tags
     static_dir = Path(static_dir) if static_dir is not None else STATIC_DIR
@@ -903,8 +1306,441 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 "voices": settings.voice_options(settings.MAX_VOICE_OPTIONS)}
         return JSONResponse(_scrub_obj(body), headers={"Cache-Control": "no-store"})
 
+    # ---------- 專案 API(CHG-20261022-04 T6;回應格式見檔頭) ----------
+
+    synth_fn = synth or tts_service.synth
+    render_fn = render or _render_default
+    annotate_fn = annotate or (lambda text: annotate_text(text, root))
+    defaults_fn = voice_defaults or _voice_defaults
+    plocks: dict[str, threading.Lock] = {}
+    plocks_guard = threading.Lock()
+    jobs: dict[str, str] = {}   # run_id → 執行合成 / 匯出中的專案名稱(比對鍵),刪除專案時檢查
+
+    def plock(name: str) -> threading.Lock:
+        """同一專案的「讀—改—存」一律序列化(本行程內;跨行程的存檔另有 project.py 的檔案鎖)。"""
+        with plocks_guard:
+            return plocks.setdefault(names.fold_name(name), threading.Lock())
+
+    def mutate(name: str, change) -> dict:
+        """載入 → change(project, created) → 存檔(先移舊版入 history);失敗時刪除這次複製進來的檔案。"""
+        created: list[Path] = []
+        with plock(name):
+            proj = pj.load(name)
+            try:
+                extra = change(proj, created) or {}
+                proj = pj.Project.from_dict(proj.to_dict())
+                version = pj.save(proj)
+            except BaseException:
+                for p in created:
+                    p.unlink(missing_ok=True)
+                raise
+        return {**_view(proj), "version": version, **extra}
+
+    def start_job(name: str | None) -> Run:
+        run = runs.start()
+        if run is None:
+            raise ApiError(409, BUSY)
+        if name is not None:
+            jobs[run.id] = names.fold_name(name)
+        return run
+
+    def end_job(run: Run) -> None:
+        jobs.pop(run.id, None)
+        _, done = run.snapshot(0)
+        if not done:
+            run.emit({"type": "finished", "status": "error"})
+        runs.finish(run)
+
+    @app.get("/api/projects")
+    @_guard
+    def api_projects():
+        return JSONResponse({"projects": pj.list_projects()}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/projects")
+    @_guard
+    async def api_project_create(request: Request):
+        data = await _json(request)
+        _only_keys(data, ("name", "script"))
+        name = _pname(data.get("name"))
+        script = data.get("script", "")
+        if not isinstance(script, str):
+            raise ApiError(422, "script 必須是文字")
+
+        def work():
+            with plock(name):
+                return _view(pj.create(name, script, defaults_fn()))
+        return JSONResponse(await run_in_threadpool(work), status_code=201)
+
+    @app.get("/api/projects/{p}")
+    @_guard
+    def api_project_get(p: str):
+        return JSONResponse(_view(pj.load(_pname(p))), headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/projects/{p}")
+    @_guard
+    async def api_project_put(p: str, request: Request):
+        name = _pname(p)
+        data = await _json(request, allow_empty=True)
+        _only_keys(data, PROJECT_PUT_KEYS)
+
+        def change(proj, created):
+            if "defaults" in data:
+                d = data["defaults"]
+                if not isinstance(d, dict):
+                    raise ApiError(422, "defaults 必須是物件")
+                proj.defaults = {**proj.defaults, **d}
+            if "script" in data or "forced_breaks" in data:
+                script = data.get("script", proj.script)
+                forced = data.get("forced_breaks", [])
+                if not isinstance(forced, list):
+                    raise ApiError(422, "forced_breaks 必須是陣列")
+                _resplit(proj, script, forced)
+        return await run_in_threadpool(mutate, name, change)
+
+    @app.delete("/api/projects/{p}")
+    @_guard
+    async def api_project_delete(p: str, request: Request):
+        name = _pname(p)
+        data = await _json(request, allow_empty=True)
+        if data.get("confirm") is not True:
+            raise ApiError(400, "刪除專案需要確認:請帶 {\"confirm\": true}")
+        if names.fold_name(name) in jobs.values():
+            raise ApiError(409, "這個專案正在合成或匯出,請等它結束再刪除")
+
+        def work():
+            with plock(name):
+                return pj.trash(name, confirm=True)
+        return {"trashed": True, "name": name, "trash": await run_in_threadpool(work)}
+
+    @app.get("/api/projects/{p}/history")
+    @_guard
+    def api_project_history(p: str):
+        return JSONResponse({"versions": pj.list_history(_pname(p))}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/projects/{p}/restore")
+    @_guard
+    async def api_project_restore(p: str, request: Request):
+        name = _pname(p)
+        data = await _json(request)
+        _only_keys(data, ("version",))
+        vid = data.get("version")
+
+        def work():
+            with plock(name):
+                version = pj.restore(name, vid)
+                return {**_view(pj.load(name)), "version": version, "restored": vid}
+        return await run_in_threadpool(work)
+
+    @app.patch("/api/projects/{p}/segments/{sid}")
+    @_guard
+    async def api_segment_patch(p: str, sid: str, request: Request):
+        name = _pname(p)
+        _check_item_id(sid, "片段")
+        data = await _json(request)
+        _only_keys(data, SEGMENT_PATCH_KEYS)
+        if not data:
+            raise ApiError(422, "沒有要修改的欄位")
+
+        def change(proj, created):
+            idx = next((i for i, s in enumerate(proj.segments) if s["id"] == sid), None)
+            if idx is None:
+                raise ApiError(404, "找不到這個片段")
+            seg = dict(proj.segments[idx])
+            out = {}
+            if "audio_file" in data:
+                fd, _ = _open_upload(root, data["audio_file"])
+                try:
+                    head = os.pread(fd, 12, 0)
+                    if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+                        raise ApiError(422, WAV_ONLY)
+                    aid, dest, _size = _copy_in(fd, pj.subdir(name, "audio", create=True), "wav")
+                finally:
+                    os.close(fd)
+                created.append(dest)
+                try:
+                    seconds = media.wav_seconds(dest)
+                except ValueError as e:
+                    raise ApiError(422, f"{WAV_ONLY}:{e}") from None
+                seg["audio"] = {"id": aid, "seconds": seconds}
+            if "audio" in data:
+                if data["audio"] is not None:
+                    raise ApiError(422, "audio 只能設為 null(清除音檔,改回由合成產生)")
+                seg["audio"] = None
+            if "text" in data:
+                text = data["text"]
+                if not isinstance(text, str) or not text.strip() or any(c in pj.NEWLINES for c in text):
+                    raise ApiError(422, "片段文字不可為空,也不可含換行")
+                text = text.strip()
+                if text != seg["text"]:
+                    spans = _spans(proj.script, proj.segments)
+                    if spans[idx] is not None:
+                        a, b = spans[idx]
+                        proj.script = proj.script[:a] + text + proj.script[b:]
+                    seg["text"] = text
+                    if "annotations" not in data:
+                        seg["annotations"] = []
+                    if _external(seg.get("audio")) and "audio_file" not in data:
+                        seg["audio"] = None   # 自錄音檔已不符新文字:清除,改由合成產生
+            if "annotations" in data:
+                if seg.get("annotations") != data["annotations"] and _external(seg.get("audio")) \
+                        and "audio_file" not in data:
+                    seg["audio"] = None
+                seg["annotations"] = data["annotations"]
+            for key in ("pause_after", "speed"):
+                if key in data:
+                    seg[key] = data[key]
+            # 先驗證單一片段(注音、停頓、語速不合法 → 422,不存檔)
+            pj.Project.from_dict({**proj.to_dict(), "segments": [seg]})
+            new_segments = [*proj.segments[:idx], seg, *proj.segments[idx + 1:]]
+            if "split_at" in data:
+                i = data["split_at"]
+                if not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(seg["text"]) - 1:
+                    raise ApiError(422, "強制停頓位置必須在句子之內(不可在最後一個字之後)")
+                first, second = seg["text"][:i + 1], seg["text"][i + 1:]
+                if not first.strip() or not second.strip():
+                    raise ApiError(422, "強制停頓會切出空白片段")
+                lead = len(first) - len(first.lstrip())
+                skip = len(second) - len(second.lstrip())
+                anns = seg.get("annotations") or []
+                a = {**seg, "text": first.strip(), "break": "forced", "pause_after": None, "audio": None,
+                     "annotations": [{"index": x["index"] - lead, "zhuyin": x["zhuyin"]}
+                                     for x in anns if x["index"] <= i]}
+                b = {**_new_segment(second.strip(), seg["break"]), "pause_after": seg.get("pause_after"),
+                     "speed": seg.get("speed"),
+                     "annotations": [{"index": x["index"] - (i + 1) - skip, "zhuyin": x["zhuyin"]}
+                                     for x in anns if x["index"] > i]}
+                new_segments[idx:idx + 1] = [a, b]
+                out["new_segment"] = b["id"]
+            elif data.get("merge_next") is True:
+                if seg.get("break") != "forced" or idx + 1 >= len(proj.segments):
+                    raise ApiError(422, "只有強制停頓切出的片段可以與下一句合併")
+                nxt = proj.segments[idx + 1]
+                shift = len(seg["text"])
+                merged = {**seg, "text": seg["text"] + nxt["text"], "break": nxt["break"],
+                          "pause_after": nxt.get("pause_after"), "audio": None,
+                          "annotations": (seg.get("annotations") or []) + [
+                              {"index": x["index"] + shift, "zhuyin": x["zhuyin"]}
+                              for x in nxt.get("annotations") or []]}
+                new_segments[idx:idx + 2] = [merged]
+                out["removed_segment"] = nxt["id"]
+            elif "merge_next" in data and data["merge_next"] is not False:
+                raise ApiError(422, "merge_next 只能是 true 或 false")
+            proj.segments = new_segments
+            return out
+        return await run_in_threadpool(mutate, name, change)
+
+    def add_asset(name: str, proj, created: list, file_id, label, kinds) -> dict:
+        if label is not None and not isinstance(label, str):
+            raise ApiError(422, "label 必須是文字")
+        fd, ext = _open_upload(root, file_id)
+        try:
+            kind = UPLOAD_KINDS[f".{ext}"]
+            if kind not in kinds:
+                raise ApiError(422, "這個檔案類型不能放在這裡")
+            aid, dest, size = _copy_in(fd, pj.subdir(name, "assets", create=True), ext)
+        finally:
+            os.close(fd)
+        created.append(dest)
+        asset = {"id": aid, "kind": kind, "ext": ext, "bytes": size}
+        if label:
+            asset["label"] = label
+        proj.assets = [*proj.assets, asset]
+        return asset
+
+    @app.post("/api/projects/{p}/assets")
+    @_guard
+    async def api_asset_add(p: str, request: Request):
+        name = _pname(p)
+        data = await _json(request)
+        _only_keys(data, ("file_id", "label"))
+
+        def change(proj, created):
+            return {"asset": add_asset(name, proj, created, data.get("file_id"), data.get("label"),
+                                       ("image", "audio", "text"))}
+        return await run_in_threadpool(mutate, name, change)
+
+    @app.post("/api/projects/{p}/images")
+    @_guard
+    async def api_image_add(p: str, request: Request):
+        name = _pname(p)
+        data = await _json(request)
+        _only_keys(data, ("asset", "file_id", "label", "start", "end"))
+        if ("asset" in data) == ("file_id" in data):
+            raise ApiError(422, "請指定 asset(既有圖片素材 id)或 file_id(上傳的圖片)其中之一")
+
+        def change(proj, created):
+            if "file_id" in data:
+                aid = add_asset(name, proj, created, data["file_id"], data.get("label"), ("image",))["id"]
+            else:
+                aid = data["asset"]
+                if not any(a["id"] == aid and a["kind"] == "image" for a in proj.assets):
+                    raise ApiError(404, "找不到這個圖片素材")
+            img = {"id": pj.new_id(), "asset": aid, "start": data.get("start", 0), "end": data.get("end")}
+            proj.images = [*proj.images, img]
+            return {"image": img["id"]}
+        return await run_in_threadpool(mutate, name, change)
+
+    @app.patch("/api/projects/{p}/images/{iid}")
+    @_guard
+    async def api_image_patch(p: str, iid: str, request: Request):
+        name = _pname(p)
+        _check_item_id(iid, "圖片")
+        data = await _json(request)
+        _only_keys(data, ("start", "end"))
+
+        def change(proj, created):
+            idx = next((i for i, m in enumerate(proj.images) if m["id"] == iid), None)
+            if idx is None:
+                raise ApiError(404, "找不到這張圖片")
+            proj.images = [*proj.images[:idx], {**proj.images[idx], **data}, *proj.images[idx + 1:]]
+        return await run_in_threadpool(mutate, name, change)
+
+    @app.delete("/api/projects/{p}/images/{iid}")
+    @_guard
+    def api_image_delete(p: str, iid: str):
+        name = _pname(p)
+        _check_item_id(iid, "圖片")
+
+        def change(proj, created):   # 只移除時間軸項目,不刪素材檔
+            if not any(m["id"] == iid for m in proj.images):
+                raise ApiError(404, "找不到這張圖片")
+            proj.images = [m for m in proj.images if m["id"] != iid]
+        return mutate(name, change)
+
+    @app.get("/api/projects/{p}/media/{aid}")
+    @_guard
+    def api_media(p: str, aid: str):
+        path, ctype = _media_file(_pname(p), aid)
+        return FileResponse(path, media_type=ctype, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/projects/{p}/synth")
+    @_guard
+    def api_synth(p: str):
+        name = _pname(p)
+        pj.load(name)   # 不存在 → 404(不佔執行旗標)
+        run = start_job(name)
+
+        def work():
+            done_ids: list[str] = []
+            snapshot = None
+
+            def emit(ev):
+                if isinstance(ev, dict) and ev.get("type") == "segment":
+                    done_ids.append(ev.get("id"))
+                run.emit(ev)
+
+            status, result = "error", {"synthesized": [], "cached": []}
+            try:
+                with plock(name):
+                    snapshot = pj.load(name)
+                result = synth_fn(snapshot, emit) or result
+                status = "ok"
+            except (tts_service.SynthError, pj.ProjectError) as e:
+                run.emit({"type": "error", "message": str(e)})
+            except Exception as e:
+                print(f"studio_server:語音合成錯誤 {type(e).__name__}", file=sys.stderr)
+                run.emit({"type": "error", "message": "✗ 語音合成失敗"})
+            saved = 0
+            try:   # 已完成的句子一律寫回專案(中途失敗也保留)
+                saved = merge_audio(name, snapshot, done_ids)
+            except pj.ProjectError as e:
+                status = "error"
+                run.emit({"type": "error", "message": f"合成結果無法寫回專案:{e}"})
+            run.emit({"type": "finished", "status": status, "synthesized": result.get("synthesized", []),
+                      "cached": result.get("cached", []), "saved": saved})
+
+        threading.Thread(target=_job_thread, args=(work, run, end_job), name=f"synth-{run.id}",
+                         daemon=True).start()
+        return {"run_id": run.id, "events": f"/api/run/{run.id}/events"}
+
+    def merge_audio(name: str, snapshot, ids: list) -> int:
+        """把合成結果寫回目前的專案:只更新同 id 且合成文字未變的片段;合成期間改成自錄音檔的不覆蓋。"""
+        if snapshot is None or not ids:
+            return 0
+        wanted = set(ids)
+        by_id = {s["id"]: s for s in snapshot.segments if s["id"] in wanted and s.get("audio")}
+        with plock(name):
+            cur = pj.load(name)
+            n = 0
+            for s in cur.segments:
+                w = by_id.get(s["id"])
+                if w is None or _external(s.get("audio")) or s.get("audio") == w["audio"]:
+                    continue
+                if pj.tts_text(s) != pj.tts_text(w):
+                    continue
+                s["audio"] = dict(w["audio"])
+                n += 1
+            if n:
+                pj.save(cur)
+        return n
+
+    @app.post("/api/projects/{p}/render")
+    @_guard
+    def api_render(p: str):
+        name = _pname(p)
+        proj = pj.load(name)
+        if not proj.segments:
+            raise ApiError(400, "✗ 沒有可匯出的語音片段")
+        bad = {s["id"] for s in proj.segments if not s.get("audio")}
+        try:
+            bad |= {s["id"] for s in tts_service.dirty_segments(proj)}
+        except (tts_service.SynthError, KeyError):
+            pass   # 聲線設定不可用時無法判斷舊音檔是否過期,只擋沒有音檔的片段
+        if bad:
+            ids = [s["id"] for s in proj.segments if s["id"] in bad]
+            raise ApiError(400, f"✗ 還有 {len(ids)} 個片段尚未合成(或文字改過需要重新合成),無法匯出",
+                           segments=ids)
+        run = start_job(name)
+
+        def work():
+            try:
+                with heavy_lock.heavy_lock(on_wait=lambda: run.emit({"type": "waiting"})):
+                    run.emit({"type": "render", "status": "started"})
+                    mp4, srt = render_fn(proj)
+                run.emit({"type": "finished", "status": "ok", "mp4": _out_relative(mp4),
+                          "srt": _out_relative(srt)})
+            except media.RenderError as e:
+                run.emit({"type": "error", "message": str(e), "segments": list(e.segments)})
+            except Exception as e:
+                print(f"studio_server:匯出錯誤 {type(e).__name__}", file=sys.stderr)
+                run.emit({"type": "error", "message": "✗ 影片匯出失敗"})
+
+        threading.Thread(target=_job_thread, args=(work, run, end_job), name=f"render-{run.id}",
+                         daemon=True).start()
+        return {"run_id": run.id, "events": f"/api/run/{run.id}/events"}
+
+    @app.post("/api/annotate")
+    @_guard
+    async def api_annotate(request: Request):
+        data = await _json(request)
+        _only_keys(data, ("text",))
+        text = data.get("text")
+        if not isinstance(text, str) or not text:
+            raise ApiError(422, "要標註的文字不可為空")
+        if len(text) > MAX_ANNOTATE_CHARS:
+            raise ApiError(422, f"要標註的文字超過 {MAX_ANNOTATE_CHARS} 字")
+        run = start_job(None)
+        try:
+            zhuyin = await run_in_threadpool(annotate_fn, text)
+            run.emit({"type": "finished", "status": "ok"})
+        except AnnotateError as e:
+            raise ApiError(500, str(e)) from None
+        finally:
+            end_job(run)
+        return {"text": text, "zhuyin": zhuyin}
+
     app.add_middleware(SecurityMiddleware, token=token)
     return app
+
+
+def _job_thread(work, run: "Run", end) -> None:
+    try:
+        work()
+    except Exception as e:   # pragma: no cover - work() 已自行處理預期錯誤
+        print(f"studio_server:背景工作錯誤 {type(e).__name__}", file=sys.stderr)
+        run.emit({"type": "error", "message": "✗ 背景工作失敗"})
+    finally:
+        end(run)
 
 
 def _import_uvicorn():
@@ -914,6 +1750,7 @@ def _import_uvicorn():
 
 def main() -> None:
     uvicorn = _import_uvicorn()
+    startup_cleanup()   # 修訂 2:伺服器啟動時清 `.trash/` 滿 30 天者與各專案 `tmp/` 殘留
     app = create_app()
     print(f"Podcast 工作室:http://{HOST}:{PORT}", file=sys.stderr)
     uvicorn.run(app, host=HOST, port=PORT, proxy_headers=False, server_header=False,
