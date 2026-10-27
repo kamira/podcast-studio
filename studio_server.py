@@ -124,6 +124,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 import executor  # noqa: E402
+import names  # noqa: E402
 import nodes  # noqa: E402
 import settings  # noqa: E402
 import taiwan_ai  # noqa: E402
@@ -156,19 +157,11 @@ CONFIG_EXTRA_KEYS = ("_warnings", "meta")   # GET 回應附加、PUT 時忽略�
 MAX_UPLOAD_NAME = 255
 # 副檔名 → 埠型別;與 file-input 節點接受的副檔名一致
 UPLOAD_KINDS = {ext: kind for kind, exts in nodes.FILE_KINDS.items() for ext in exts}
-# 工作流程名稱(使用者 2026-10-26 指示開放中文,同日追加「只採最低限度 中英日即可」與
-# 「採用unicode編碼能解決大部分的問題」):視為 Unicode 字串,1~64 個字,每個字必須在下列白名單內。
-# 白名單字元以 UTF-8 計最多 3 位元組,64 字加 `.json` 最多 197 位元組,不會超過檔名上限 255。
-MAX_WORKFLOW_NAME = 64
-WORKFLOW_NAME_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
-WORKFLOW_NAME_RANGES = (
-    (0x4E00, 0x9FFF),   # CJK 統一漢字
-    (0x3400, 0x4DBF),   # CJK 統一漢字擴充 A
-    (0x3041, 0x3096),   # 平假名
-    (0x30A1, 0x30FA),   # 片假名(不含中點「・」U+30FB)
-    (0x30FC, 0x30FC),   # 長音符「ー」
-    (0x3005, 0x3005),   # 疊字符「々」
-)
+# 工作流程名稱:中英日白名單,規則與專案名稱共用,單一來源在 `names.py`(CHG-20261022-04 T2 移出;
+# 使用者 2026-10-26 指示開放中文、「只採最低限度 中英日即可」)。
+MAX_WORKFLOW_NAME = names.MAX_NAME
+WORKFLOW_NAME_ASCII = names.NAME_ASCII
+WORKFLOW_NAME_RANGES = names.NAME_RANGES
 WORKFLOW_NAME_HINT = "工作流程名稱只能用中文、日文假名、英文字母、數字、底線、連字號,長度 1 到 64 字"
 M4A_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2"})
 # /files/* 的回應型別:表內的以 inline 送出;不在表內的一律 octet-stream + attachment
@@ -453,33 +446,11 @@ def _safe_dir(root: Path, *parts: str, create: bool) -> Path:
     return expected
 
 
-def _name_char_ok(ch: str) -> bool:
-    if ch in WORKFLOW_NAME_ASCII:
-        return True
-    cp = ord(ch)
-    return any(lo <= cp <= hi for lo, hi in WORKFLOW_NAME_RANGES)
-
-
-def _normalize_name(name) -> str | None:
-    """工作流程名稱檢查;合格回傳原名稱(檔名直接用它),不合格回 None。
-
-    - 名稱視為 Unicode 字串,不做正規化或其他編碼轉換。
-    - 逐字比對明確的中英日白名單(ASCII 英數、`-`、`_`、CJK 統一漢字與擴充 A、平假名、
-      片假名、「ー」、「々」);不用 `\\w` 也不用 Unicode 類別。其餘一律不合格,包含韓文、
-      全形英數、羅馬數字、「・」、空白、`.`、`/`、`\\`、控制字元、單獨的組合記號、零寬字元、
-      全形斜線、方向覆寫字元等(NFD 形式的濁點組合記號 U+3099 也不在白名單內)。
-    - 長度以字數計,1~64。
-    """
-    if not isinstance(name, str) or not 1 <= len(name) <= MAX_WORKFLOW_NAME:
-        return None
-    if not all(_name_char_ok(ch) for ch in name):
-        return None
-    return name
-
-
-def _fold_name(name: str) -> str:
-    """比對「只差大小寫」用的鍵;白名單內只有 ASCII 字母有大小寫之分。"""
-    return name.casefold()
+# 工作流程名稱檢查(規則見 `names.py`):合格回傳原名稱(檔名直接用它),不合格回 None;
+# 只差大小寫的比對鍵為 `_fold_name()`。
+_name_char_ok = names.name_char_ok
+_normalize_name = names.normalize_name
+_fold_name = names.fold_name
 
 
 def _upload_ext(name: str | None) -> str | None:
