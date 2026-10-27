@@ -40,6 +40,8 @@
                                原文 `[` `]` 轉全形;標註以 `字[:注音]` 插入(注音格式同 breezy_worker,聲調符號)
   load(name) -> Project / save(project) -> 版本 id 或 None / list_history(name) / trash(name, confirm=True)
   startup_cleanup(now) -> {"trash_removed", "tmp_cleared", "warnings"}
+  subdir(name, sub, create=False) -> Path
+                               專案的 audio/、assets/、tmp/ 真實路徑(符號連結規則同下;T3 起使用)
 
 符號連結:`projects/`、`.trash/`、專案目錄、`tmp/`、`history/` 本身是符號連結(或解析到別處)時,
 存檔、輪替、清除一律拒絕處理該目錄並記警告,不寫入、不刪除連結目標;`.trash/` 與 `tmp/` 內的
@@ -629,6 +631,25 @@ def _project_dir(root: Path, name: str, create: bool) -> Path:
         return _safe_child(root, name, "專案", create=create)
     except FileNotFoundError:
         raise ProjectError("找不到這個專案") from None
+
+
+SUBDIRS = ("audio", "assets", "tmp")
+
+
+def subdir(name, sub: str, *, create: bool = False) -> Path:
+    """專案子目錄 `projects/<名稱>/<sub>`(audio、assets、tmp)的真實路徑(CHG-20261022-04 T3 起共用)。
+
+    各層一律不得是符號連結、解析後必須在預期位置,不符丟 UnsafePath;create=False 且子目錄不存在時
+    丟 FileNotFoundError,專案不存在時丟 ProjectError。
+    """
+    if sub not in SUBDIRS:
+        raise ValueError(f"不支援的專案子目錄:{sub}")
+    name = check_name(name)
+    try:
+        root = _projects_root(create=create)
+    except FileNotFoundError:
+        raise ProjectError("找不到這個專案") from None
+    return _safe_child(_project_dir(root, name, create=create), sub, sub, create=create)
 
 
 # ---------- 讀寫 ----------
