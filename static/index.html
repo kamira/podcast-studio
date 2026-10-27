@@ -9,18 +9,173 @@
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/vendor/drawflow.min.js" defer></script>
 <script src="/static/app.js" defer></script>
+<script src="/static/project.js" defer></script>
+<script src="/static/timeline.js" defer></script>
+<script src="/static/wizard.js" defer></script>
 </head>
 <body>
 
-<!-- 首頁:兩張卡片(精靈、完整模式)由 CHG-20261022-04 提供;這裡只放頁首與 ⚙ 入口 -->
+<!-- 首頁:恰好兩張卡片(精靈、完整模式)、右上角 ⚙、底部「免責說明與授權」連結;沒有分頁列(CHG-20261022-04 T7) -->
 <section id="page-home" class="page" data-page="home">
   <header class="page-header">
     <h1 class="page-title">Podcast 工作室</h1>
     <button type="button" class="icon-btn" id="open-settings" aria-label="設定" title="設定">⚙</button>
   </header>
   <main class="home-main">
-    <p class="placeholder">首頁卡片(精靈、完整模式)建置中。請由右上角 ⚙ 進入設定,在「進階流程」編排與試跑節點流程。</p>
+    <div class="home-cards">
+      <a class="card" id="card-wizard" href="#/wizard">
+        <span class="card-icon" aria-hidden="true">✦</span>
+        <span class="card-title">精靈</span>
+        <span class="card-desc">一次一步完成一集,只有「上一步 / 下一步」</span>
+      </a>
+      <a class="card" id="card-full" href="#/full">
+        <span class="card-icon" aria-hidden="true">▤</span>
+        <span class="card-title">完整模式</span>
+        <span class="card-desc">文稿、語音、封面、時間軸在同一個畫面編輯</span>
+      </a>
+    </div>
+    <p class="home-recent" id="home-recent" hidden>
+      <span class="recent-label">最近的專案:</span>
+      <span class="recent-name" id="home-recent-name"></span>
+      <a class="recent-link" id="home-recent-wizard" href="#/wizard">▸ 以精靈開啟</a>
+      <a class="recent-link" id="home-recent-full" href="#/full">▸ 以完整模式開啟</a>
+    </p>
   </main>
+  <footer class="page-footer">
+    <a class="footer-link" href="#/disclaimer">免責說明與授權</a>
+  </footer>
+</section>
+
+<!-- 精靈:步驟清單取自 GET /api/workflows/default 的 steps(不寫死);一次只顯示一步,只有上一步 / 下一步 -->
+<section id="page-wizard" class="page" data-page="wizard" hidden>
+  <header class="page-header">
+    <a class="back-link" href="#/">← 首頁</a>
+    <h1 class="page-title">精靈</h1>
+    <span class="proj-label">專案:<span class="proj-name">—</span></span>
+    <button type="button" class="icon-btn open-settings" aria-label="設定" title="設定">⚙</button>
+  </header>
+  <ol class="wizard-steps" id="wizard-steps" aria-label="步驟位置"></ol>
+  <p class="notice notice-err wizard-error" id="wizard-error" role="alert" hidden></p>
+  <div class="wizard-body" id="wizard-body"></div>
+  <div class="wizard-nav" id="wizard-nav" hidden>
+    <button type="button" class="btn" id="wizard-prev">上一步</button>
+    <button type="button" class="btn btn-primary" id="wizard-next">下一步</button>
+  </div>
+</section>
+
+<!-- 完整模式:單一畫面的編輯器,文稿、封面、素材庫、預覽、屬性、時間軸同時可見;沒有步驟 -->
+<section id="page-full" class="page" data-page="full" hidden>
+  <header class="page-header">
+    <a class="back-link" href="#/">← 首頁</a>
+    <h1 class="page-title">完整模式</h1>
+    <div class="project-tools" id="full-tools" hidden>
+      <span class="proj-label">專案:<span class="proj-name">—</span></span>
+      <button type="button" class="btn" id="full-save">存檔</button>
+      <select class="version-select" id="full-versions" aria-label="版本"></select>
+      <button type="button" class="btn" id="full-restore">還原此版本</button>
+      <button type="button" class="btn btn-primary" id="full-render">匯出 MP4</button>
+    </div>
+    <button type="button" class="icon-btn open-settings" aria-label="設定" title="設定">⚙</button>
+  </header>
+  <div class="full-picker" id="full-picker-slot"></div>
+  <div class="full-body" id="full-body">
+    <div class="full-left">
+      <div class="slot" data-slot="script">
+        <section class="panel panel-script" id="panel-script" data-block="script">
+          <h2 class="panel-title">文稿</h2>
+          <div class="panel-row">
+            <label class="field field-grow"><span class="field-label">主題</span>
+              <input type="text" id="script-topic" maxlength="200" autocomplete="off"></label>
+            <button type="button" class="btn" id="script-ai">AI 寫稿</button>
+          </div>
+          <textarea class="script-text" id="script-text" rows="10" maxlength="50000" spellcheck="false"
+                    aria-label="文稿內容" data-drop="script"></textarea>
+          <p class="drop-hint">⇩ 可把 .txt / .md 檔拖到文稿框,取代文稿內容</p>
+          <div class="panel-row">
+            <button type="button" class="btn" id="script-save">存檔文稿</button>
+            <button type="button" class="btn btn-primary" id="script-synth">逐句合成全部</button>
+          </div>
+          <p class="panel-status" id="script-status" role="status" aria-live="polite"></p>
+        </section>
+      </div>
+      <div class="slot" data-slot="library">
+        <section class="panel panel-library" id="panel-library" data-block="library" data-drop="library">
+          <h2 class="panel-title">素材庫</h2>
+          <p class="drop-hint">⇩ 拖檔到這裡</p>
+          <ul class="library-list" id="library-list"></ul>
+        </section>
+      </div>
+    </div>
+    <div class="full-center">
+      <div class="slot" data-slot="preview">
+        <section class="panel panel-preview" id="panel-preview" data-block="preview">
+          <h2 class="panel-title">預覽</h2>
+          <div class="preview-stage" id="preview-stage">
+            <img class="preview-img" id="preview-img" alt="" hidden>
+            <p class="preview-cue" id="preview-cue"></p>
+          </div>
+          <div class="preview-controls">
+            <button type="button" class="btn" id="preview-start" aria-label="回到開頭" title="回到開頭">⏮</button>
+            <button type="button" class="btn btn-primary" id="preview-play" aria-label="播放" title="播放">▶</button>
+            <button type="button" class="btn" id="preview-end" aria-label="跳到結尾" title="跳到結尾">⏭</button>
+            <span class="preview-time" id="preview-time">00:00.0 / 00:00.0</span>
+          </div>
+        </section>
+      </div>
+      <div class="slot" data-slot="cover">
+        <section class="panel panel-cover" id="panel-cover" data-block="cover" data-drop="cover">
+          <h2 class="panel-title">封面</h2>
+          <div class="panel-row">
+            <label class="field field-grow"><span class="field-label">標題</span>
+              <input type="text" id="cover-title" maxlength="200" autocomplete="off"></label>
+            <button type="button" class="btn" id="cover-ai">AI 產生封面</button>
+          </div>
+          <ul class="cover-list" id="cover-list"></ul>
+          <p class="drop-hint">⇩ 可把圖片拖到這裡,加入畫面軌</p>
+          <p class="panel-status" id="cover-status" role="status" aria-live="polite"></p>
+        </section>
+      </div>
+    </div>
+    <div class="full-right">
+      <div class="slot" data-slot="props">
+        <section class="panel panel-props" id="panel-props" data-block="props">
+          <h2 class="panel-title">屬性</h2>
+          <div class="props-body" id="props-body"></div>
+        </section>
+      </div>
+      <div class="slot" data-slot="export"></div>
+    </div>
+    <div class="full-bottom">
+      <div class="slot" data-slot="timeline">
+        <section class="panel panel-timeline" id="panel-timeline" data-block="timeline">
+          <div class="tl-toolbar">
+            <h2 class="panel-title">時間軸</h2>
+            <span class="spacer"></span>
+            <button type="button" class="btn btn-small" id="tl-zoom-out" aria-label="縮小時間軸" title="縮小">－</button>
+            <span class="tl-zoom-label">縮放</span>
+            <button type="button" class="btn btn-small" id="tl-zoom-in" aria-label="放大時間軸" title="放大">＋</button>
+          </div>
+          <div class="tl-frame">
+            <div class="tl-labels" aria-hidden="true">
+              <span class="tl-label tl-label-ruler"></span>
+              <span class="tl-label">字幕</span>
+              <span class="tl-label">語音</span>
+              <span class="tl-label">畫面</span>
+            </div>
+            <div class="tl-scroll" id="tl-scroll">
+              <div class="tl-content" id="tl-content">
+                <div class="tl-ruler" id="tl-ruler" title="點一下移動播放頭"></div>
+                <div class="tl-lane tl-lane-cues" id="tl-cues" data-track="cues"></div>
+                <div class="tl-lane tl-lane-voice" id="tl-voice" data-track="voice" data-drop="voice"></div>
+                <div class="tl-lane tl-lane-images" id="tl-images" data-track="images" data-drop="images"></div>
+                <div class="tl-playhead" id="tl-playhead" aria-hidden="true"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
 </section>
 
 <!-- 設定頁:由首頁右上角 ⚙ 開啟;子頁以連結切換,不是網頁分頁 -->
@@ -178,17 +333,97 @@
   </footer>
 </section>
 
-<!-- 免責說明與授權:頁面內容由 CHG-20261022-04 提供,這裡只放位置 -->
+<!-- 免責說明與授權:由首頁底部或設定頁底部連結開啟的獨立畫面(不是分頁)。
+     授權欄只寫在來源檔中讀得到的內容;讀不到一律標「未知」,不臆測(CHG-20261022-04 修訂 1) -->
 <section id="page-disclaimer" class="page" data-page="disclaimer" hidden>
   <header class="page-header">
     <a class="back-link" href="#/">← 首頁</a>
     <h1 class="page-title">免責說明與授權</h1>
-    <span class="icon-mark" aria-hidden="true"></span>
+    <button type="button" class="icon-btn open-settings" aria-label="設定" title="設定">⚙</button>
   </header>
-  <main class="home-main">
-    <p class="placeholder">「免責說明與授權」頁面尚未提供,將於後續版本加入。</p>
+  <main class="disclaimer-main">
+    <section class="disc-section">
+      <h2 class="section-title">AI 生成內容聲明</h2>
+      <p>文稿、語音、封面由 AI 模型產生,可能有錯誤、偏誤或不當內容。發布前請自行檢查內容是否正確,並確認沒有侵害他人權利。</p>
+    </section>
+    <section class="disc-section">
+      <h2 class="section-title">聲線</h2>
+      <p>以他人聲音作為聲線樣本前,須取得聲音所有人同意;請勿用合成語音冒充他人。</p>
+    </section>
+    <section class="disc-section">
+      <h2 class="section-title">模型與元件授權</h2>
+      <p class="section-hint">授權欄只列出來源檔中載明的內容;找不到來源時標示「未知」,使用前請自行向原作者確認。</p>
+      <table class="license-table" id="license-table">
+        <thead>
+          <tr><th scope="col">元件</th><th scope="col">用途</th><th scope="col">授權</th><th scope="col">來源</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>BreezyVoice 程式碼</td><td>語音合成</td><td>Apache License 2.0</td><td>tools/BreezyVoice/LICENSE</td></tr>
+          <tr><td>MediaTek-Research/BreezyVoice-300M</td><td>語音合成模型</td><td>apache-2.0</td><td>Hugging Face 快取中的模型卡 README.md(license 欄)</td></tr>
+          <tr><td>G2PW 注音模型(tools/BreezyVoice/G2PWModel)</td><td>注音標註</td><td>未知</td><td>未知(目錄內沒有授權檔)</td></tr>
+          <tr><td>bert-base-chinese</td><td>注音標註的分詞器</td><td>未知</td><td>未知(快取中沒有模型卡)</td></tr>
+          <tr><td>mflux-community/flux-1-schnell-mflux-q4(FLUX.1-schnell)</td><td>生圖</td><td>未知</td><td>未知(快取中沒有模型卡)</td></tr>
+          <tr><td>Qwen3.5-9B-Uncensored-HauhauCS-Aggressive</td><td>推理、寫稿</td><td>未知</td><td>未知(Ollama 模型資料與 GGUF 中繼資料沒有授權欄)</td></tr>
+          <tr><td>Qwen3.8-27B-Uncensored-HauhauCS-Aggressive</td><td>重型推理</td><td>未知</td><td>未知(Ollama 模型資料沒有授權欄)</td></tr>
+          <tr><td>Llama-Breeze2-8B-Instruct-text-only</td><td>台灣用語潤飾</td><td>未知</td><td>未知(Ollama 模型資料與 GGUF 中繼資料沒有授權欄)</td></tr>
+          <tr><td>Drawflow 0.0.60</td><td>進階流程的節點畫布</td><td>MIT</td><td>static/vendor/LICENSE.drawflow</td></tr>
+          <tr><td>FFmpeg(imageio-ffmpeg 隨附)</td><td>影音轉檔與匯出</td><td>未知</td><td>未知(repo 內沒有授權檔)</td></tr>
+        </tbody>
+      </table>
+      <p class="section-hint">模型可在設定頁更換;更換後的模型授權請自行查證。</p>
+    </section>
   </main>
+  <footer class="page-footer">
+    <a class="footer-link" href="#/">回到首頁</a>
+  </footer>
 </section>
+
+<!-- 精靈步驟借用的共用面板:專案選擇、② 語音、⑤ 匯出(平時收在這裡,不顯示) -->
+<div class="parking" id="parking" hidden>
+  <section class="panel project-picker" id="project-picker">
+    <h2 class="panel-title">選擇專案</h2>
+    <form class="picker-form" id="picker-form" novalidate>
+      <label class="field field-grow"><span class="field-label">新專案名稱</span>
+        <input type="text" id="picker-name" maxlength="64" autocomplete="off" spellcheck="false"></label>
+      <button type="submit" class="btn btn-primary" id="picker-create">建立</button>
+    </form>
+    <p class="dialog-hint">可用中文、日文假名、英文字母、數字、底線、連字號,1 到 64 字</p>
+    <p class="dialog-error" id="picker-error" role="alert" hidden></p>
+    <h3 class="picker-subtitle">既有專案</h3>
+    <ul class="picker-list" id="picker-list"></ul>
+  </section>
+
+  <section class="panel panel-voice" id="panel-voice" data-block="voice">
+    <h2 class="panel-title">語音</h2>
+    <div class="panel-row">
+      <button type="button" class="btn btn-primary" id="voice-synth">逐句合成</button>
+      <span class="panel-status" id="voice-status" role="status" aria-live="polite"></span>
+    </div>
+    <p class="drop-hint">⇩ 把自己錄的 WAV 音檔拖到某一句上,取代該句</p>
+    <ol class="voice-list" id="voice-list"></ol>
+  </section>
+
+  <section class="panel panel-export" id="panel-export" data-block="export">
+    <h2 class="panel-title">匯出</h2>
+    <p>輸出 1920×1080 的 MP4 影片與 SRT 字幕檔。</p>
+    <div class="panel-row">
+      <button type="button" class="btn btn-primary" id="export-run">匯出 MP4</button>
+    </div>
+    <p class="panel-status" id="export-status" role="status" aria-live="polite"></p>
+    <ul class="export-links" id="export-links"></ul>
+  </section>
+
+  <section class="panel panel-generic" id="panel-generic">
+    <h2 class="panel-title" id="generic-title"></h2>
+    <p class="section-hint" id="generic-note"></p>
+    <ul class="generic-nodes" id="generic-nodes"></ul>
+    <div class="panel-row">
+      <button type="button" class="btn btn-primary" id="generic-run">執行這一步</button>
+    </div>
+    <p class="panel-status" id="generic-status" role="status" aria-live="polite"></p>
+    <div class="generic-outputs" id="generic-outputs"></div>
+  </section>
+</div>
 
 <!-- 工作流程存檔 / 載入對話框(T11);沒有列出流程的端點,載入時輸入名稱 -->
 <dialog id="wf-dialog" class="dialog" aria-labelledby="wf-dialog-title">

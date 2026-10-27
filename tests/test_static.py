@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""前端靜態檔的測試(CHG-20261022-01 P1、T10、T11、T12)。
+"""前端靜態檔的測試(CHG-20261022-01 P1、T10、T11、T12;CHG-20261022-04 T7)。
 
 前端互動由 T14 的 UI 檢查驗證;這裡做靜態檢查。T12 的審議席位規則與 422 欄位對應
 另在有 JS 執行環境(node 或 macOS jsc)時實跑 app.js 的函式,沒有時略過該兩項。
@@ -615,7 +615,8 @@ def test_settings_page_has_actions_notices_and_disclaimer_link():
     for sub in ("models", "seats", "voice", "flow"):
         assert f'href="#/settings/{sub}" data-sub="{sub}"' in html
     disc = _section(_index_text(), "page-disclaimer")
-    assert "← 首頁" in disc and "尚未提供" in disc
+    # CHG-20261022-04 T7 把預留位置換成正式內容(詳見下方 T7 測試)
+    assert "← 首頁" in disc and "尚未提供" not in disc
     assert "http" not in disc
 
 
@@ -637,3 +638,325 @@ def test_app_js_settings_flow():
     assert "this.fill(SETTINGS_DEFAULTS)" in reset and "api(" not in reset
     assert 'location.hash = "#/settings"' in js
     assert "#\\/disclaimer" in js
+
+
+# ---------- CHG-20261022-04 T7:首頁雙卡片、精靈、完整模式、剪輯與預覽、免責頁 ----------
+
+MODULES = ("project.js", "timeline.js", "wizard.js")
+ALL_JS = ("app.js",) + MODULES
+
+
+def _js(name: str) -> str:
+    return (STATIC / name).read_text(encoding="utf-8")
+
+
+def _js_strings(name: str) -> list[str]:
+    """JS 原始碼中的雙引號字串常值(不含整行註解)。"""
+    code = re.sub(r"^\s*//.*$", "", _js(name), flags=re.M)
+    return re.findall(r'"((?:[^"\\\n]|\\.)*)"', code)
+
+
+def _home() -> str:
+    return _section(_index_text(), "page-home")
+
+
+def _wizard_html() -> str:
+    return _section(_index_text(), "page-wizard")
+
+
+def _full_html() -> str:
+    return _section(_index_text(), "page-full")
+
+
+def _parking_html() -> str:
+    html = _index_text()
+    i = html.index('<div class="parking" id="parking"')
+    return html[i:html.index("\n</div>", i)]
+
+
+def test_t7_modules_loaded_from_static_in_order():
+    srcs = re.findall(r'<script src="([^"]+)" defer></script>', _index_text())
+    assert srcs == ["/static/vendor/drawflow.min.js", "/static/app.js", "/static/project.js",
+                    "/static/timeline.js", "/static/wizard.js"]
+    for name in MODULES:
+        assert (STATIC / name).is_file(), name
+
+
+@pytest.mark.parametrize("name", ALL_JS)
+def test_t7_js_is_csp_and_xss_safe(name):
+    js = _js(name)
+    for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(",
+                "new Function", "setTimeout(\"", "setInterval(\"", "http://", "https://",
+                "setAttribute(\"style\"", "FormData"):
+        assert bad not in js, (name, bad)
+    assert not re.search(r'["\']tab["\']', js), name
+
+
+@pytest.mark.parametrize("name", ALL_JS)
+def test_t7_js_only_requests_local_paths(name):
+    # 字串常值不含任何外部位址;請求一律是同源的 /api/、/files/(專案 API 以 Store.url() 組出 /api/projects/…)
+    for s in _js_strings(name):
+        assert "://" not in s and not s.startswith("//"), (name, s)
+    code = _js(name)
+    pat = r'\b(?:(?:fetch|EventSource)\(\s*|api\(\s*"[A-Z]+",\s*)"([^"]*)"'
+    for m in re.finditer(pat, code):
+        assert m.group(1).startswith(("/api/", "/files/")), (name, m.group(1))
+
+
+def test_home_has_exactly_two_cards_with_titles():
+    home = _home()
+    cards = re.findall(r'<a class="card" id="([^"]+)" href="([^"]+)">(.*?)</a>', home, re.S)
+    assert len(re.findall(r'class="card"', home)) == 2
+    assert len(cards) == 2
+    titles = [re.search(r'<span class="card-title">([^<]*)</span>', body).group(1) for _, _, body in cards]
+    assert titles == ["精靈", "完整模式"]
+    assert [href for _, href, _ in cards] == ["#/wizard", "#/full"]
+
+
+def test_cards_route_to_wizard_and_full_pages():
+    js = _js("wizard.js")
+    assert re.search(r'S\.addRoute\(WIZARD_RE, "wizard"', js)
+    assert re.search(r'S\.addRoute\(FULL_RE, "full"', js)
+    wiz = re.compile(re.search(r"const WIZARD_RE = /(.*)/;", js).group(1).replace(r"\/", "/"))
+    full = re.compile(re.search(r"const FULL_RE = /(.*)/;", js).group(1).replace(r"\/", "/"))
+    assert wiz.match("#/wizard") and wiz.match("#/wizard/%E5%A4%9C/3") and not wiz.match("#/full")
+    assert full.match("#/full") and full.match("#/full/abc") and not full.match("#/wizard")
+    html = _index_text()
+    assert '<section id="page-wizard" class="page" data-page="wizard"' in html
+    assert '<section id="page-full" class="page" data-page="full"' in html
+    # app.js 的路由以 data-page 切換頁面,其他模組登錄的路由在預設(首頁)之前比對
+    app = _app_js()
+    assert 'document.querySelectorAll("body > section.page")' in app and "extraRoutes" in app
+
+
+def test_home_has_one_settings_icon_in_header():
+    home = _home()
+    assert len(re.findall(r'aria-label="設定"', home)) == 1
+    header = home[home.index("<header"):home.index("</header>")]
+    assert re.search(r'<button\b[^>]*\baria-label="設定"[^>]*>⚙</button>', header)
+
+
+def test_home_footer_has_one_disclaimer_link_and_settings_too():
+    home = _home()
+    assert home.count('href="#/disclaimer"') == 1
+    footer = home[home.index("<footer"):home.index("</footer>")]
+    assert re.search(r'<a [^>]*href="#/disclaimer"[^>]*>免責說明與授權</a>', footer)
+    settings_html = _settings_html()
+    assert settings_html.count('href="#/disclaimer"') == 1
+    assert re.search(r'<a [^>]*href="#/disclaimer"[^>]*>免責說明與授權</a>', settings_html)
+
+
+def test_no_tabs_anywhere():
+    html = _index_text()
+    assert not re.search(r'role\s*=\s*["\']tab(list|panel)?["\']', html)
+    assert not re.search(r'class="[^"]*\btabs?\b[^"]*"', html)
+    assert not re.search(r'class="[^"]*\btab-', html)
+
+
+def test_full_mode_has_six_blocks_and_no_prev_next():
+    full = _full_html()
+    blocks = dict(re.findall(r'<section class="panel [^"]*" id="panel-([a-z]+)" data-block="([a-z]+)"', full))
+    assert set(blocks) == {"script", "cover", "library", "preview", "props", "timeline"}
+    titles = re.findall(r'<h2 class="panel-title">([^<]+)</h2>', full)
+    for t in ("文稿", "封面", "素材庫", "預覽", "屬性", "時間軸"):
+        assert t in titles, t
+    assert "上一步" not in full and "下一步" not in full
+    assert "wizard-nav" not in full
+
+
+def test_wizard_has_only_prev_next_and_no_hardcoded_steps():
+    wiz = _wizard_html()
+    assert '<button type="button" class="btn" id="wizard-prev">上一步</button>' in wiz
+    assert '<button type="button" class="btn btn-primary" id="wizard-next">下一步</button>' in wiz
+    for label in ("文稿", "語音", "封面", "剪輯", "匯出"):
+        assert label not in wiz, label
+    js = _js("wizard.js")
+    assert "S.Flows.workflow(true)" in js and "checkSteps(wf.graph.steps)" in js
+    assert "this.steps = wf.graph.steps" in js
+    assert 'S.api("GET", "/api/workflows/default")' in _js("project.js")
+    for name in ALL_JS:
+        code = _js(name)
+        # 不發清單請求(修訂 3 R3-1:不新增 GET /api/workflows 清單端點)
+        assert not re.search(r'"/api/workflows/?"\s*[,)]', code), name
+        assert not re.search(r'\[\s*"文稿"\s*,\s*"語音"', code), name
+
+
+def test_wizard_shows_error_instead_of_fallback_steps():
+    js = _js("wizard.js")
+    enter = js[js.index("async enter(m) {"):js.index("renderSteps() {")]
+    assert "this.showError(" in enter and "RESTORE_HINT" in enter
+    assert "git checkout -- workflows/default.json" in js
+    assert 'id="wizard-error"' in _wizard_html()
+
+
+def test_no_local_word_or_arrow_sequence_in_pages():
+    for part in (_home(), _wizard_html(), _full_html(), _section(_index_text(), "page-disclaimer"),
+                 _parking_html()):
+        assert "本機" not in part
+        assert "→" not in part
+    for name in MODULES:
+        for s in _js_strings(name):
+            assert "本機" not in s and "→" not in s, (name, s)
+
+
+def test_build_graph_keeps_steps():
+    js = _app_js()
+    build = js[js.index("    buildGraph() {"):js.index("    loadGraph(graph) {")]
+    assert "carrySteps(this.loadedSteps, present)" in build and "graph.steps = steps" in build
+    load = js[js.index("    loadGraph(graph) {"):js.index("    autoLayout(list, edges) {")]
+    assert "this.loadedSteps = " in load and "st.origId = n.id" in load
+
+
+def _run_js_funcs(parts: list[tuple[str, str, str]], body: str):
+    """從 static/*.js 取出 (檔名, 起始字串, 結束標記) 之間的純函式,在 JS 執行環境實跑 body(設定 result)。"""
+    rt = _js_runtime()
+    if rt is None:
+        pytest.skip("沒有 JS 執行環境(node / jsc)")
+    code = []
+    for name, start, end in parts:
+        js = _js(name)
+        code.append(js[js.index(start):js.index(end)])
+    script = "\n".join(code + [body, 'var __out = (typeof print === "function") ? print : console.log;',
+                               "__out(JSON.stringify(result));"])
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "t.js"
+        f.write_text(script, encoding="utf-8")
+        r = subprocess.run(rt + [str(f)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+CARRY = [("app.js", "function carrySteps(", "// carrySteps 結束")]
+
+
+def _default_steps():
+    return json.loads((ROOT / "workflows" / "default.json").read_text(encoding="utf-8"))["steps"]
+
+
+def test_carry_steps_drops_removed_nodes_and_emptied_steps():
+    steps = _default_steps()
+    cover = next(s for s in steps if s["id"] == "cover")["nodes"]
+    ids = [n for s in steps for n in s["nodes"] if n not in cover]
+    present = {old: str(i + 1) for i, old in enumerate(ids)}       # 畫布重新編號後的 id
+    got = _run_js_funcs(CARRY, "var result = carrySteps(" + json.dumps(steps) + ", "
+                        + json.dumps(present) + ");")
+    assert [s["id"] for s in got] == ["script", "voice", "edit", "export"]
+    edit = next(s for s in got if s["id"] == "edit")
+    assert edit["nodes"] == [] and edit["label"] == "剪輯" and "note" in edit
+    script = next(s for s in got if s["id"] == "script")
+    assert script["nodes"] == [present[n] for n in ("topic", "write-script", "taiwanize")]
+
+
+def test_carry_steps_keeps_partial_steps_and_handles_missing():
+    steps = _default_steps()
+    present = {"topic": "1", "taiwanize": "3", "speak": "4", "title": "5", "make-video": "9"}
+    got = _run_js_funcs(CARRY, "var result = [carrySteps(" + json.dumps(steps) + ", " + json.dumps(present)
+                        + "), carrySteps(null, {}) === undefined, carrySteps(undefined, {}) === undefined, "
+                        "carrySteps([{\"id\": \"x\"}, 5], {})];")
+    kept, none1, none2, odd = got
+    assert [s["id"] for s in kept] == ["script", "voice", "cover", "edit", "export"]
+    assert kept[0]["nodes"] == ["1", "3"] and kept[2]["nodes"] == ["5"]
+    assert none1 is True and none2 is True
+    assert odd == [{"id": "x"}, 5]          # 格式不認得的步驟原樣保留,交給精靈顯示錯誤
+
+
+def test_check_steps_accepts_default_and_rejects_bad_shapes():
+    cases = [_default_steps(), None, [], {"steps": 1}, [{"id": "a", "nodes": []}],
+             [{"id": "a", "label": "甲", "nodes": "x"}], [{"label": "甲", "nodes": []}],
+             [{"id": "a", "label": "甲", "nodes": []}, {"id": "a", "label": "乙", "nodes": []}]]
+    got = _run_js_funcs([("wizard.js", "function checkSteps(", "// 精靈步驟檢查結束")],
+                        "var result = " + json.dumps(cases, ensure_ascii=True) + ".map(function (c) { return checkSteps(c); });")
+    assert got[0] == ""
+    assert all(isinstance(m, str) and m and re.search(r"[一-鿿]", m) for m in got[1:])
+
+
+def test_preview_schedule_matches_export_rules():
+    images = [{"id": "a", "file": "A", "start": 0, "end": 10}, {"id": "b", "file": "B", "start": 3, "end": 6},
+              {"id": "c", "file": "C", "start": 12, "end": 14}]
+    segs = [{"id": "s1", "start": 0, "end": 1.5}, {"id": "s2", "start": 1.5, "end": 1.5},
+            {"id": "s3", "start": 1.9, "end": 3}]
+    cues = [{"segment": "s1", "start": 0, "end": 1.5, "text": "hello"}]
+    body = ("var I = " + json.dumps(images) + ", S2 = " + json.dumps(segs) + ", C = " + json.dumps(cues) + ";\n"
+            "function f(m) { return m ? (m.file || m.text || m.id) : null; }\n"
+            "var result = [2, 4, 6, 7, 11, 13, 14].map(function (t) { return f(activeImage(I, t)); })"
+            ".concat([0.5, 1.5, 1.7, 2].map(function (t) { return f(activeSegment(S2, t)); }))"
+            ".concat([0.2, 1.6].map(function (t) { return f(activeCue(C, t)); }));")
+    got = _run_js_funcs([("timeline.js", "function activeSegment(", "// 預覽排程結束")], body)
+    # 後開始的圖蓋過先前的圖;沒有圖的時段為黑畫面(null);長度 0 的片段與停頓處不出聲
+    assert got[:7] == ["A", "B", "A", "A", None, "C", None]
+    assert got[7:11] == ["s1", None, None, "s3"]
+    assert got[11:] == ["hello", None]
+
+
+def test_preview_uses_layout_and_playback_rate():
+    js = _js("timeline.js")
+    assert "this.audio.playbackRate = speed" in js
+    assert "Store.mediaUrl(seg.audio.id)" in js
+    assert "activeImage(lay.images, t)" in js and "activeCue(lay.cues, t)" in js
+    assert "activeSegment(this.layout().segments, this.t)" in js
+
+
+def test_editor_leaves_hooks_for_t8():
+    tl = _js("timeline.js")
+    for needed in ('"tl-gap"', "gap.dataset.after = prev.id", '"tl-edge tl-edge-" + edge', "h.dataset.edge = edge",
+                   '"speed")', '"pause")', 'tone.dataset.hook = "tone"', 'range.dataset.hook = "image-range"',
+                   'S.runHook("segment-props"', 'S.runHook("image-props"', 'S.runHook("timeline"'):
+        assert needed in tl, needed
+    pj_js = _js("project.js")
+    assert 'speed.dataset.hook = "speed"' in pj_js and 'S.runHook("voice-row"' in pj_js
+    assert "S.hook = function (name, fn)" in pj_js
+
+
+def test_wizard_steps_accept_dropped_files():
+    pj_js = _js("project.js")
+    tl = _js("timeline.js")
+    # 文稿:.txt/.md;語音:WAV 取代一句(伺服器只收 RIFF/WAVE);封面與畫面軌:圖片;素材庫:白名單檔
+    assert 'TEXT_EXTS = [".txt", ".md"]' in pj_js
+    assert 'S.uploadExt(file && file.name) !== ".wav"' in pj_js and "{ audio_file: up.file_id }" in pj_js
+    assert 'Store.mutate("POST", "/images", body)' in pj_js
+    assert 'Store.mutate("POST", "/assets"' in pj_js
+    assert "S.replaceAudio(target.dataset.segment, files[0])" in tl
+    # 上傳一律經 app.js 的 uploadFile(原始位元組 + ?name=,帶權杖)
+    for name in MODULES:
+        assert "/api/upload" not in _js(name), name
+
+
+def _license_rows() -> list[list[str]]:
+    disc = _section(_index_text(), "page-disclaimer")
+    table = disc[disc.index('<table class="license-table"'):disc.index("</table>")]
+    assert re.findall(r"<th[^>]*>([^<]*)</th>", table) == ["元件", "用途", "授權", "來源"]
+    rows = re.findall(r"<tr>(.*?)</tr>", table[table.index("<tbody>"):], re.S)
+    return [re.findall(r"<td>([^<]*)</td>", r) for r in rows]
+
+
+def test_disclaimer_page_content_and_license_table():
+    disc = _section(_index_text(), "page-disclaimer")
+    assert "AI 生成內容聲明" in disc and "同意" in disc and "聲線" in disc
+    rows = _license_rows()
+    assert len(rows) >= 5
+    for cells in rows:
+        assert len(cells) == 4 and all(c.strip() for c in cells), cells
+        # 每列都有來源欄;授權取不到時授權與來源都標「未知」
+        assert cells[3].startswith("未知") == (cells[2] == "未知"), cells
+    by_name = {c[0]: c for c in rows}
+    drawflow = next(v for k, v in by_name.items() if k.startswith("Drawflow"))
+    assert drawflow[2] == "MIT" and drawflow[3] == "static/vendor/LICENSE.drawflow"
+    assert (VENDOR / "LICENSE.drawflow").read_text(encoding="utf-8").startswith("MIT License")
+    breezy = by_name["BreezyVoice 程式碼"]
+    assert breezy[2] == "Apache License 2.0" and breezy[3] == "tools/BreezyVoice/LICENSE"
+    lic_file = ROOT / "tools" / "BreezyVoice" / "LICENSE"
+    if lic_file.is_file():   # tools/ 不入 git;本機有時才比對
+        assert "Apache License" in lic_file.read_text(encoding="utf-8")[:200]
+
+
+def test_disclaimer_opened_by_links_not_tabs():
+    assert _index_text().count('href="#/disclaimer"') == 2          # 首頁底部、設定頁底部
+    assert "#\\/disclaimer" in _app_js()
+
+
+def test_served_t7_modules(client):
+    for name in MODULES:
+        r = client.get("/static/" + name)
+        assert r.status_code == 200, name
+        assert "javascript" in r.headers["content-type"]
+        assert r.headers["content-security-policy"] == ss.CSP
