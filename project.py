@@ -39,6 +39,9 @@
   escape_text(text) / tts_text(segment) -> str
                                原文 `[` `]` 轉全形;標註以 `字[:注音]` 插入(注音格式同 breezy_worker,聲調符號)
   load(name) -> Project / save(project) -> 版本 id 或 None / list_history(name) / trash(name, confirm=True)
+  (T6 補)create(name, script, defaults) / list_projects() / load_version(name, 版本 id) / restore(name, 版本 id)
+                               ProjectNotFound(不存在,伺服器回 404)、ProjectExists(已存在,回 409)
+                               皆為 ProjectError 的子類別
   startup_cleanup(now) -> {"trash_removed", "tmp_cleared", "warnings"}
   subdir(name, sub, create=False) -> Path
                                專案的 audio/、assets/、tmp/ 真實路徑(符號連結規則同下;T3 起使用)
@@ -109,6 +112,7 @@ NEWLINES = frozenset("\r\n")
 HANZI_RANGES = ((0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0xF900, 0xFAFF), (0x20000, 0x323AF))
 STAMP_RE = r"\d{8}-\d{6}-\d{3}"
 HISTORY_RE = re.compile(rf"({STAMP_RE})-[0-9a-f]{{4}}\.json", re.ASCII)
+VERSION_RE = re.compile(rf"{STAMP_RE}-[0-9a-f]{{4}}", re.ASCII)
 TRASH_RE = re.compile(rf"(.+)-({STAMP_RE})-[0-9a-f]{{4}}")
 NAME_HINT = "專案名稱只能用中文、日文假名、英文字母、數字、底線、連字號,長度 1 到 64 字"
 LINK_TRIES = 16
@@ -131,6 +135,14 @@ class ProjectError(ValueError):
 
 class UnsafePath(ProjectError):
     """專案資料目錄是符號連結或解析到別處。"""
+
+
+class ProjectNotFound(ProjectError):
+    """專案(或指定的版本)不存在(CHG-20261022-04 T6:伺服器據此回 404)。"""
+
+
+class ProjectExists(ProjectError):
+    """新增專案時已有同名(含只差大小寫)的專案(T6:伺服器據此回 409)。"""
 
 
 # ---------- 基本檢查 ----------
@@ -625,12 +637,12 @@ def _project_dir(root: Path, name: str, create: bool) -> Path:
     """專案目錄;已有只差大小寫的其他專案時一律拒絕(不分大小寫的檔案系統上兩者是同一個目錄)。"""
     if _case_variant(root, name) is not None:
         if create:
-            raise ProjectError("已有只差大小寫的同名專案,請改用其他名稱")
-        raise ProjectError("找不到這個專案(已有只差大小寫的其他專案)")
+            raise ProjectExists("已有只差大小寫的同名專案,請改用其他名稱")
+        raise ProjectNotFound("找不到這個專案(已有只差大小寫的其他專案)")
     try:
         return _safe_child(root, name, "專案", create=create)
     except FileNotFoundError:
-        raise ProjectError("找不到這個專案") from None
+        raise ProjectNotFound("找不到這個專案") from None
 
 
 SUBDIRS = ("audio", "assets", "tmp")
@@ -648,7 +660,7 @@ def subdir(name, sub: str, *, create: bool = False) -> Path:
     try:
         root = _projects_root(create=create)
     except FileNotFoundError:
-        raise ProjectError("找不到這個專案") from None
+        raise ProjectNotFound("找不到這個專案") from None
     return _safe_child(_project_dir(root, name, create=create), sub, sub, create=create)
 
 
@@ -659,7 +671,7 @@ def _read_project_file(path: Path) -> dict:
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
-        raise ProjectError("找不到這個專案") from None
+        raise ProjectNotFound("找不到這個專案") from None
     except OSError:
         raise ProjectError("專案檔無法讀取(可能是符號連結)") from None
     with os.fdopen(fd, "rb") as f:
@@ -683,7 +695,7 @@ def load(name) -> Project:
     try:
         root = _projects_root(create=False)
     except FileNotFoundError:
-        raise ProjectError("找不到這個專案") from None
+        raise ProjectNotFound("找不到這個專案") from None
     data = _read_project_file(_project_dir(root, name, create=False) / PROJECT_FILE)
     _check_version(data.get("schema_version"))
     if data.get("name") != name:
@@ -799,6 +811,72 @@ def list_history(name) -> list[str]:
     return [fn[:-len(".json")] for _, _, fn in _history_entries(hdir)]
 
 
+def load_version(name, vid) -> Project:
+    """讀 `history/<版本 id>.json`(T6 還原版本用);版本 id 格式不對或不存在丟 ProjectNotFound。"""
+    name = check_name(name)
+    if not isinstance(vid, str) or not VERSION_RE.fullmatch(vid):
+        raise ProjectNotFound("找不到這個版本")
+    try:
+        pdir = _project_dir(_projects_root(create=False), name, create=False)
+        hdir = _safe_child(pdir, "history", "history", create=False)
+    except FileNotFoundError:
+        raise ProjectNotFound("找不到這個版本") from None
+    try:
+        data = _read_project_file(hdir / f"{vid}.json")
+    except ProjectNotFound:
+        raise ProjectNotFound("找不到這個版本") from None
+    _check_version(data.get("schema_version"))
+    if data.get("name") != name:
+        raise ProjectError("版本檔的名稱與專案不符,拒絕還原")
+    return Project.from_dict(data)
+
+
+def restore(name, vid) -> str | None:
+    """還原版本 = 一次存檔:先把目前版本移入 history/,再原子寫入該版本的內容;回傳 save() 的版本 id。"""
+    return save(load_version(name, vid))
+
+
+def create(name, script: str = "", defaults: dict | None = None) -> Project:
+    """新增專案:文稿依 `split_segments` 切成片段(id 由伺服器產生);已有同名(含只差大小寫)丟 ProjectExists。"""
+    name = check_name(name)
+    pieces = split_segments(script)
+    proj = Project(name=name, script=script, defaults=dict(defaults or DEFAULTS),
+                   segments=[{"id": new_id(), "text": p["text"], "break": p["break"], "pause_after": None,
+                              "speed": None, "annotations": [], "audio": None} for p in pieces])
+    proj = Project.from_dict(proj.to_dict())
+    root = _projects_root(create=True)
+    if _case_variant(root, name) is not None or os.path.lexists(root / name):
+        raise ProjectExists("已有同名的專案,請改用其他名稱")
+    save(proj)
+    return proj
+
+
+def list_projects() -> list[dict]:
+    """列出 `projects/` 下有專案檔的專案:[{"name", "updated": 專案檔修改時間(epoch 秒)}],依名稱排序。
+
+    點開頭的項目(`.trash/` 等)、名稱不合規則、符號連結、沒有一般檔案 project.json 的目錄一律略過。
+    """
+    try:
+        root = _projects_root(create=False)
+    except FileNotFoundError:
+        return []
+    out = []
+    with os.scandir(root) as it:
+        entries = sorted(it, key=lambda e: e.name)
+    for entry in entries:
+        if entry.name.startswith(".") or names.normalize_name(entry.name) is None:
+            continue
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        try:
+            st = os.lstat(Path(entry.path) / PROJECT_FILE)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            out.append({"name": entry.name, "updated": st.st_mtime})
+    return out
+
+
 def trash(name, *, confirm, now: float | None = None) -> str:
     """把專案移到 `projects/.trash/<名稱>-<時間戳>-<4 碼隨機>/`;confirm 必須為 True,不覆蓋既有項目。"""
     if confirm is not True:
@@ -807,7 +885,7 @@ def trash(name, *, confirm, now: float | None = None) -> str:
     try:
         root = _projects_root(create=False)
     except FileNotFoundError:
-        raise ProjectError("找不到這個專案") from None
+        raise ProjectNotFound("找不到這個專案") from None
     pdir = _project_dir(root, name, create=False)
     tdir = _safe_child(root, TRASH_NAME, TRASH_NAME, create=True)
     with _project_lock(pdir):
