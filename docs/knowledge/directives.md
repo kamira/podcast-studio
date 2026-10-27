@@ -121,6 +121,9 @@
   5. 以一個 PR 將整合分支合進 main;該 PR 跑完整本機審議與 CI 四項,merge 條件同 DIR-4 第 1 條(否決席無 fail、全部席位有回答、CI 全綠);不適用時停下問使用者。
   6. 修正後仍有否決席 fail 時,依 DIR-4 第 2 條交使用者。
 - 原因:使用者指示(2026-10-27,原話):「目前審議調整為全部修改完後再進行個別審議,並且審議完後再統一整理全部審議一次 統整報告再由開發的model進行修改」;補充:「目前審議調整為全部修改完後再進行個別審議,並且審議完後再統一由單一模型整理全部審議一次 統整報告再由開發的model進行修改」
-- 修訂(2026-10-28):第 1 條補明 task PR 不跑 CI、CI 於合併 PR 執行;第 3 條報告落點改為 `docs/changes/review/`。依據:CHG-20261022-04 DIR-5 統整報告 RS-1、RS-41,使用者 2026-10-28 指示照報告建議處理(原話節錄:「RS-41 change the DIR-5 report location and git mv the file; RS-1 add the CI wording to DIR-5」)。
 - 信度:使用者確認(整合分支機制、統整報告落點與預設統整模型為 agent 補上的執行細節,使用者可推翻)
 - 狀態:生效
+- 歷史:
+  - 2026-10-28 修訂(第 1 條補明 task PR 不跑 CI、CI 於合併 PR 執行;第 3 條報告落點改為 `docs/changes/review/`。依據:CHG-20261022-04 DIR-5 統整報告 RS-1、RS-41,使用者 2026-10-28 指示照報告建議處理(原話節錄:「RS-41 change the DIR-5 report location and git mv the file; RS-1 add the CI wording to DIR-5」)。)原敘述:
+    - 第 1 條:施工期:由 main 開整合分支 `chg/<CHG-ID>-impl`;每個 task 仍各開一個 PR(DIR-2 第 1 條),但 base 為整合分支,施工期不跑本機審議、不合進 main。
+    - 第 3 條(落點句):報告寫在整合分支的 `docs/changes/<CHG-ID>-review-summary.md`。
