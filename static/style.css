@@ -465,7 +465,7 @@ body {
 /* ② 語音 */
 .voice-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .voice-row {
-  display: grid; grid-template-columns: 48px minmax(0, 1fr) 150px 140px 40px; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: 48px minmax(0, 1fr) 200px 140px 40px; gap: 10px; align-items: center;
   padding: 6px 8px; border-radius: 6px; background: var(--bg);
 }
 .voice-no { color: var(--muted); }
@@ -484,3 +484,41 @@ body {
 .license-table { width: 100%; border-collapse: collapse; background: var(--panel); }
 .license-table th, .license-table td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
 .license-table th { background: var(--bg); font-weight: 600; }
+
+/* 編輯互動(CHG-20261022-04 T8):拖空隙改停頓、拖圖片邊緣、語速選單、停頓輸入、注音彈出框 */
+.tl-gap.is-draggable { cursor: ew-resize; min-width: 8px; z-index: 1; background: rgba(232, 137, 43, .08); }
+.tl-gap.is-draggable:hover, .tl-gap.is-draggable:focus-visible, .tl-gap.is-dragging {
+  background: rgba(232, 137, 43, .25); border-color: var(--c-audio); outline: none;
+}
+.tl-gap[data-value]::after, .tl-img[data-value]::after {
+  content: attr(data-value); position: absolute; top: -16px; left: 0; padding: 0 4px; border-radius: 3px;
+  background: var(--fg); color: #fff; font-size: 11px; white-space: nowrap; pointer-events: none;
+}
+.tl-img[data-value] { overflow: visible; }
+.tl-edge { cursor: ew-resize; touch-action: none; z-index: 1; }
+.tl-edge:hover, .tl-edge.is-dragging { background: rgba(46, 158, 91, .7); }
+.tl-gap { touch-action: none; }
+.speed-select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.voice-speed.has-editor { display: flex; align-items: center; gap: 6px; }
+.speed-prefix { color: var(--muted); }
+.prop-value.has-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pause-input, .range-input { width: 72px; font: inherit; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; }
+.prop-unit { color: var(--muted); font-size: 12px; }
+.range-field { display: flex; align-items: center; gap: 6px; }
+.tone-char.is-clickable { cursor: pointer; border: 1px solid transparent; }
+.tone-char.is-clickable:hover, .tone-char.is-clickable:focus-visible { border-color: var(--accent); outline: none; }
+.tone-hint { margin: 2px 0 0; font-size: 11px; }
+.tone-popup {
+  position: absolute; z-index: 20; width: 260px; padding: 10px 12px; display: grid; gap: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+}
+.tone-head { display: flex; align-items: center; justify-content: space-between; }
+.tone-title { font-size: 14px; }
+.tone-auto, .tone-error { margin: 0; font-size: 12px; }
+.tone-auto { color: var(--muted); }
+.tone-error { color: var(--err); min-height: 0; }
+.tone-error:empty { display: none; }
+.tone-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; font-size: 13px; }
+.tone-choice, .tone-light, .tone-custom { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+.tone-input { width: 90px; font: inherit; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; }
+.tone-actions { display: flex; justify-content: flex-end; gap: 6px; }

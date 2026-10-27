@@ -11,6 +11,7 @@
 <script src="/static/app.js" defer></script>
 <script src="/static/project.js" defer></script>
 <script src="/static/timeline.js" defer></script>
+<script src="/static/edit.js" defer></script>
 <script src="/static/wizard.js" defer></script>
 </head>
 <body>
@@ -192,7 +193,7 @@
     <a class="subnav-link" href="#/settings/flow" data-sub="flow">進階流程</a>
   </nav>
 
-  <!-- 設定表單(T12):模型與審議席位兩個子頁共用提示列與「還原預設 / 儲存」;
+  <!-- 設定表單(T12):模型、審議席位與語音預設(CHG-20261022-04 T8)三個子頁共用提示列與「還原預設 / 儲存」;
        欄位以 data-field 對應 settings.DEFAULTS 的鍵(tests/test_static.py 檢查) -->
   <div class="settings-notices" id="cfg-notices" hidden>
     <p class="notice notice-info" id="cfg-loading">讀取設定中…</p>
@@ -290,8 +291,23 @@
     </section>
   </div>
 
-  <div class="subpage" data-sub="voice" hidden>
-    <p class="placeholder">「語音預設」的欄位將於後續版本加入;目前的聲線設定在「模型」子頁。</p>
+  <!-- 語音預設(CHG-20261022-04 T8):存設定資料庫的 voice_defaults 表;新專案的語速與停頓預設取自這裡 -->
+  <div class="subpage settings-sub" data-sub="voice" hidden>
+    <section class="settings-section">
+      <h2 class="section-title">語音預設</h2>
+      <p class="section-hint">新專案的語速與停頓預設 · 語速 0.5–2.0 倍(取到 0.05),停頓 0–5 秒(取到 0.1) · 聲線在「模型」子頁</p>
+      <div class="role-row">
+        <label class="field field-num"><span class="field-label">語速(倍)</span>
+          <input type="number" data-field="voice_defaults.speed" data-kind="num" min="0.5" max="2" step="0.05" inputmode="decimal"></label>
+        <label class="field field-num"><span class="field-label">逗號停頓(秒)</span>
+          <input type="number" data-field="voice_defaults.pause_comma" data-kind="num" min="0" max="5" step="0.1" inputmode="decimal"></label>
+        <label class="field field-num"><span class="field-label">句號停頓(秒)</span>
+          <input type="number" data-field="voice_defaults.pause_sentence" data-kind="num" min="0" max="5" step="0.1" inputmode="decimal"></label>
+        <label class="field field-num"><span class="field-label">段落停頓(秒)</span>
+          <input type="number" data-field="voice_defaults.pause_paragraph" data-kind="num" min="0" max="5" step="0.1" inputmode="decimal"></label>
+      </div>
+      <p class="section-hint">已建立的專案保留各自的預設,不受這裡影響;逗號停頓用於「強制停頓」切開的句子。</p>
+    </section>
   </div>
 
   <!-- 設定 › 進階流程:節點畫布 -->

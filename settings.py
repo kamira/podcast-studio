@@ -15,8 +15,11 @@
   save(cfg) -> None              先做結構檢查(不含模型是否已下載),不合格丟 ValueError
                                  (args[0] 為錯誤清單);cfg 若帶 `_warnings` 會先移除再檢查。
                                  合格才以 `BEGIN IMMEDIATE` 單一交易整批改寫 roles、review_seats
-                                 (任何例外 → ROLLBACK)。路徑不安全、資料庫不是 SQLite、版本不明
-                                 時丟 ValueError,不寫入、不覆寫、不重建。
+                                 (cfg 帶 voice_defaults 時一併改寫;省略則不動)(任何例外 → ROLLBACK)。
+                                 路徑不安全、資料庫不是 SQLite、版本不明時丟 ValueError,不寫入、
+                                 不覆寫、不重建。第 1 版資料庫在同一個交易內先升級再存入。
+                                 語速取到 0.05、停頓取到 0.1 後才寫入;超出範圍(語速 0.5–2.0、
+                                 停頓 0–5)丟 ValueError。
   validate(cfg, available_models) -> list[str]
                                  回傳逐欄的繁體中文錯誤訊息;空清單代表合格。
                                  available_models 為 Ollama 已下載的模型名稱集合;
@@ -26,10 +29,30 @@
   voice_options() -> list[str]   (T9)VOICE_DIRS 下可選的 .wav 聲線檔(repo 相對路徑,
                                  不跟隨符號連結;每筆都能通過 validate 的路徑規則)。
 
-資料庫(schema v1):
+load() 與 save() 的回傳 / 輸入結構(CHG-20261022-04 T8 起):{"roles", "review_seats", "voice_defaults"};
+voice_defaults = {"speed", "pause_comma", "pause_sentence", "pause_paragraph"}(鍵同 project.DEFAULTS)。
+
+資料庫(schema v2;CHG-20261022-04 T8 由 v1 升級):
   meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)        schema_version、imported_from、imported_at
   roles(role TEXT PRIMARY KEY, config TEXT NOT NULL)      config 為該角色鍵值的 JSON
   review_seats(seat TEXT PRIMARY KEY, model TEXT NOT NULL)
+  voice_defaults(key TEXT PRIMARY KEY, value REAL NOT NULL)   (v2 新增)語速與三種停頓預設
+
+升級 v1 → v2(安全影響 prod-migration):load() 唯讀探測到 schema_version = 1 時,取初始化鎖、
+在鎖內再唯讀探測一次,仍為 1 才以讀寫模式開啟,於單一 `BEGIN IMMEDIATE` 交易內:交易內再讀一次
+版本(另一行程已升到 2 就略過)→ 建 voice_defaults 表 → 寫入預設值 → meta.schema_version 改為 2。
+不改 roles、review_seats 任何列。交易內任何例外一律 ROLLBACK,資料庫維持 v1,load() 回傳 v1 的
+roles、review_seats 加程式內語音預設與 `_warnings`(WARN_DB_UPGRADE),下次 load() 再試。
+版本不是 1 或 2 的資料庫照舊不讀不寫(位元組不變)。升級可重複執行:已是 2 的資料庫不再寫入。
+新建與一次性匯入的資料庫直接建為 v2。
+
+回滾(git revert 本筆後,舊版程式讀到 schema_version = 2 會回預設值):先把資料庫備份到 repo 外
+(`sqlite3 config/studio.db ".backup '<repo 外路徑>/studio.db.bak'"`),停止網頁與 MCP 伺服器,再於
+單一交易內降回 v1:
+  sqlite3 config/studio.db "BEGIN IMMEDIATE; DROP TABLE voice_defaults;
+    UPDATE meta SET value = '1' WHERE key = 'schema_version'; COMMIT;"
+roles、review_seats 不受影響;語音預設回到各專案自己的 defaults 與 project.DEFAULTS。
+此步驟由使用者執行或核准後執行。
 
 開啟規則:既有資料庫一律先以唯讀 URI(`mode=ro`)讀 `meta.schema_version`,此階段不下任何
 PRAGMA;只有版本已知、或新建(沒有任何表)的資料庫,才以讀寫模式開啟並設定
@@ -38,8 +61,8 @@ PRAGMA;只有版本已知、或新建(沒有任何表)的資料庫,才以讀寫�
 寫死在本檔。
 
 初始化鎖(依 PR #37 審議新增):資料庫不存在或還沒有任何表時,建立檔案、第一次匯入或存入、
-失敗時清理,一律在跨行程鎖 `config/.studio.db.lock`(`fcntl.flock(LOCK_EX)`,不入 git、不刪除)
-內進行;版本已知的既有資料庫一般讀寫不取這把鎖。
+失敗時清理,以及 v1 → v2 升級(T8),一律在跨行程鎖 `config/.studio.db.lock`
+(`fcntl.flock(LOCK_EX)`,不入 git、不刪除)內進行;v2 的既有資料庫一般讀寫不取這把鎖。
 
 安全影響 (c) 跨模組信任:模型名稱必須在 Ollama 清單內;聲線檔限
 `tools/BreezyVoice/data/` 與 `outputs/uploads/` 之下;否決席不得為 glm4(DIR-1 第 6 條)。
@@ -51,20 +74,23 @@ import contextlib
 import copy
 import fcntl
 import json
+import math
 import os
 import sqlite3
 import stat
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "models.json"  # 只作一次性匯入來源(T3 起移出 git)
 DB_PATH = Path("config") / "studio.db"  # 相對於 ROOT
 
-SCHEMA_VERSION = "1"
-KNOWN_SCHEMA_VERSIONS = frozenset({SCHEMA_VERSION})
+SCHEMA_VERSION = "2"           # CHG-20261022-04 T8:新增 voice_defaults 表(1 → 2)
+SCHEMA_V1 = "1"
+KNOWN_SCHEMA_VERSIONS = frozenset({SCHEMA_V1, SCHEMA_VERSION})
 IMPORTED_FROM = "config/models.json"
 BUSY_TIMEOUT_MS = 5000
 
@@ -92,6 +118,14 @@ WARN_INVALID = "設定檔內容不合法,已使用預設值"
 WARN_UNSAFE_PATH = "設定檔路徑不安全(符號連結或位於 repo 外),已使用預設值"
 WARN_DB_UNREADABLE = "設定資料庫無法讀取,已使用預設值"
 WARN_DB_VERSION = "設定資料庫版本不明,已使用預設值"
+WARN_DB_UPGRADE = "設定資料庫升級失敗(仍為第 1 版),語音預設暫用程式內預設值"
+
+# 語音預設(CHG-20261022-04 T8;鍵與範圍同 project.DEFAULTS、project.normalize_speed / normalize_pause)
+VOICE_KEYS = ("speed", "pause_comma", "pause_sentence", "pause_paragraph")
+SPEED_RANGE = (0.5, 2.0)
+SPEED_STEP = "0.05"
+PAUSE_RANGE = (0.0, 5.0)
+PAUSE_STEP = "0.1"
 
 # 值取自 taiwan_ai.py 原有常數:MODELS、HEAVY_REASON、生圖模型名稱,以及聲線檔與逐字稿(生圖與聲線
 # 的常數於 CHG-20261026-01 T1、T2 移除,預設值只留在這裡;media.generate_image() 與 taiwan_ai.speak()
@@ -132,6 +166,13 @@ DEFAULTS: dict = {
         "compliance": CODEX,
         "security": CODEX,
         "consistency": "glm4:latest",
+    },
+    # 語速 1.15×(修訂 1 代決);停頓:逗號 0.0、句號 0.4、段落 0.8 秒(代決);同 project.DEFAULTS
+    "voice_defaults": {
+        "speed": 1.15,
+        "pause_comma": 0.0,
+        "pause_sentence": 0.4,
+        "pause_paragraph": 0.8,
     },
 }
 
@@ -205,12 +246,51 @@ def _voice_path_error(value: str) -> str | None:
     return "聲線檔必須位於 " + " 或 ".join(f"{d}/" for d in VOICE_DIRS) + " 之下"
 
 
+def _voice_round(key: str, v) -> float | None:
+    """語速取到 0.05、停頓取到 0.1(四捨五入);不是有限數字(含 bool)或超出範圍回 None。"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    step = Decimal(SPEED_STEP if key == "speed" else PAUSE_STEP)
+    lo, hi = SPEED_RANGE if key == "speed" else PAUSE_RANGE
+    r = (Decimal(repr(float(v))) / step).to_integral_value(rounding=ROUND_HALF_UP) * step
+    if not Decimal(repr(lo)) <= r <= Decimal(repr(hi)):
+        return None
+    return float(r)
+
+
+def normalize_voice(d: dict) -> dict:
+    """回傳四捨五入後的語音預設(只用於已通過 validate 的值)。"""
+    return {k: _voice_round(k, d[k]) for k in VOICE_KEYS}
+
+
+def _check_voice(d, errors) -> None:
+    if not _check_keys(d, VOICE_KEYS, "voice_defaults", errors):
+        return
+    for k in VOICE_KEYS:
+        if k in d and _voice_round(k, d[k]) is None:
+            lo, hi = SPEED_RANGE if k == "speed" else PAUSE_RANGE
+            unit, step = ("倍", SPEED_STEP) if k == "speed" else ("秒", PAUSE_STEP)
+            errors.append(f"voice_defaults.{k}:必須是 {lo:g}–{hi:g} {unit}的數字(取到 {step})")
+
+
 def validate(cfg, available_models) -> list[str]:
-    """驗證設定,回傳逐欄的錯誤清單(繁體中文)。available_models 為 None 時不檢查模型是否已下載。"""
+    """驗證設定,回傳逐欄的錯誤清單(繁體中文)。available_models 為 None 時不檢查模型是否已下載。
+
+    頂層必須有 roles、review_seats;voice_defaults(T8)可省略——省略時 save() 不改動資料庫裡的語音預設。
+    """
     errors: list[str] = []
     avail = None if available_models is None else set(available_models)
-    if not _check_keys(cfg, ("roles", "review_seats"), "設定", errors):
+    if not isinstance(cfg, dict):
+        errors.append("設定:必須是物件")
         return errors
+    for k in cfg:
+        if k not in ("roles", "review_seats", "voice_defaults"):
+            errors.append(f"設定.{k}:未知的設定鍵")
+    for k in ("roles", "review_seats"):
+        if k not in cfg:
+            errors.append(f"設定.{k}:缺少此設定")
+    if "voice_defaults" in cfg:
+        _check_voice(cfg["voice_defaults"], errors)
 
     roles = cfg.get("roles")
     if "roles" in cfg and _check_keys(roles, tuple(_ROLE_KEYS), "roles", errors):
@@ -270,12 +350,14 @@ def validate(cfg, available_models) -> list[str]:
 # ---- 儲存層(T3 修訂 2:SQLite) ----
 
 _NEW = "new"      # 沒有任何資料表的資料庫(剛由本模組建立,或空檔)
-_KNOWN = "known"  # meta.schema_version 為已知版本
+# 版本已知時 _schema_state() 回傳版本字串本身(SCHEMA_V1 或 SCHEMA_VERSION)
 
+_VOICE_TABLE = "CREATE TABLE IF NOT EXISTS voice_defaults (key TEXT PRIMARY KEY, value REAL NOT NULL)"
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS roles (role TEXT PRIMARY KEY, config TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS review_seats (seat TEXT PRIMARY KEY, model TEXT NOT NULL)",
+    _VOICE_TABLE,
 )
 
 
@@ -348,7 +430,8 @@ def _db_path_error() -> str | None:
 
 
 def _schema_state(con: sqlite3.Connection) -> str:
-    """回傳 _NEW 或 _KNOWN;有表但沒有 meta、或 schema_version 不明時丟 _DbError(WARN_DB_VERSION)。"""
+    """回傳 _NEW 或版本字串(SCHEMA_V1 / SCHEMA_VERSION);有表但沒有 meta、或 schema_version 不明時
+    丟 _DbError(WARN_DB_VERSION)。"""
     if con.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0:
         return _NEW
     has_meta = con.execute(
@@ -359,13 +442,13 @@ def _schema_state(con: sqlite3.Connection) -> str:
     row = con.execute("SELECT value FROM meta WHERE key = ?", ("schema_version",)).fetchone()
     if row is None or row[0] not in KNOWN_SCHEMA_VERSIONS:
         raise _DbError(WARN_DB_VERSION)
-    return _KNOWN
+    return row[0]
 
 
 def _probe(db: Path) -> str:
     """以唯讀 URI 開啟既有資料庫,只讀 schema_version;此階段不下任何 PRAGMA、不寫入。
 
-    回傳 _NEW 或 _KNOWN;非 SQLite、損壞或版本不明時丟 _DbError。
+    回傳 _NEW 或版本字串;非 SQLite、損壞或版本不明時丟 _DbError。
     """
     last = None
     for attempt in range(3):
@@ -521,12 +604,40 @@ def _seat_rows(cfg: dict) -> list[tuple[str, str]]:
     return [(seat, model) for seat, model in cfg["review_seats"].items()]
 
 
+def _voice_rows(voice: dict) -> list[tuple[str, float]]:
+    return [(k, v) for k, v in normalize_voice(voice).items()]
+
+
+def _write_voice(con: sqlite3.Connection, voice: dict) -> None:
+    con.execute("DELETE FROM voice_defaults")
+    con.executemany("INSERT INTO voice_defaults (key, value) VALUES (?, ?)", _voice_rows(voice))
+
+
 def _write_config(con: sqlite3.Connection, cfg: dict) -> None:
-    """整批改寫兩表;只在 BEGIN IMMEDIATE 交易內呼叫。"""
+    """整批改寫 roles、review_seats;cfg 帶 voice_defaults 時一併改寫該表。只在 BEGIN IMMEDIATE 交易內呼叫。"""
     con.execute("DELETE FROM roles")
     con.executemany("INSERT INTO roles (role, config) VALUES (?, ?)", _role_rows(cfg))
     con.execute("DELETE FROM review_seats")
     con.executemany("INSERT INTO review_seats (seat, model) VALUES (?, ?)", _seat_rows(cfg))
+    if "voice_defaults" in cfg:
+        _write_voice(con, cfg["voice_defaults"])
+
+
+def _upgrade_v1_v2(con: sqlite3.Connection) -> None:
+    """schema 1 → 2:只新增 voice_defaults 表、寫入預設值、把 meta.schema_version 改為 2。
+
+    不動 roles、review_seats 的任何列。只在 BEGIN IMMEDIATE 交易內、確認版本仍為 1 之後呼叫;
+    任何例外由 _immediate() rollback(SQLite 的 CREATE TABLE 也在交易內),資料庫維持 v1。
+    """
+    con.execute(_VOICE_TABLE)
+    _write_voice(con, DEFAULTS["voice_defaults"])
+    con.execute("UPDATE meta SET value = ? WHERE key = ?", (SCHEMA_VERSION, "schema_version"))
+
+
+def _upgrade_body(con: sqlite3.Connection) -> None:
+    """升級交易本體:在交易內重新讀版本,另一行程已升級(版本 2)就略過,只升一次。"""
+    if _schema_state(con) == SCHEMA_V1:
+        _upgrade_v1_v2(con)
 
 
 def _create_schema(con: sqlite3.Connection) -> None:
@@ -552,7 +663,9 @@ def _import_body(cfg: dict):
             return  # 另一行程已匯入,略過
         _create_schema(con)
         _write_config(con, cfg)
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if "voice_defaults" not in cfg:   # T8 以前的 models.json 沒有語音預設
+            _write_voice(con, DEFAULTS["voice_defaults"])
+        now =datetime.now(timezone.utc).isoformat(timespec="seconds")
         con.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", [
             ("schema_version", SCHEMA_VERSION),
             ("imported_from", IMPORTED_FROM),
@@ -563,19 +676,28 @@ def _import_body(cfg: dict):
 
 def _save_body(cfg: dict):
     def body(con: sqlite3.Connection) -> None:
-        if _schema_state(con) == _NEW:
+        state = _schema_state(con)
+        if state == _NEW:
             _create_schema(con)
             con.execute("INSERT INTO meta (key, value) VALUES (?, ?)",
                         ("schema_version", SCHEMA_VERSION))
+            if "voice_defaults" not in cfg:
+                _write_voice(con, DEFAULTS["voice_defaults"])
+        elif state == SCHEMA_V1:
+            _upgrade_v1_v2(con)   # 升級與存入在同一個交易內
         _write_config(con, cfg)
     return body
 
 
 def _read(con: sqlite3.Connection) -> dict:
-    """在同一個讀取交易內讀出 meta、roles、review_seats(同一份快照)。"""
+    """在同一個讀取交易內讀出 meta、roles、review_seats、voice_defaults(同一份快照)。
+
+    第 1 版(只會在升級失敗時讀到)沒有 voice_defaults 表,語音預設以程式內預設值補上。
+    """
     con.execute("BEGIN")
     try:
-        if _schema_state(con) != _KNOWN:
+        version = _schema_state(con)
+        if version not in KNOWN_SCHEMA_VERSIONS:
             raise _DbError(WARN_DB_VERSION)
         roles = {}
         for role, raw in con.execute("SELECT role, config FROM roles"):
@@ -584,13 +706,18 @@ def _read(con: sqlite3.Connection) -> dict:
             except (TypeError, ValueError):
                 raise _DbError(WARN_INVALID) from None
         seats = {seat: model for seat, model in con.execute("SELECT seat, model FROM review_seats")}
+        if version == SCHEMA_V1:
+            voice = copy.deepcopy(DEFAULTS["voice_defaults"])
+        else:
+            voice = {k: v for k, v in con.execute("SELECT key, value FROM voice_defaults")}
     finally:
         if con.in_transaction:
             con.execute("ROLLBACK")
-    return {"roles": roles, "review_seats": seats}
+    return {"roles": roles, "review_seats": seats, "voice_defaults": voice}
 
 
-def _load_known(db: Path) -> dict:
+def _load_known(db: Path, extra_warning: str | None = None) -> dict:
+    """讀版本已知的資料庫;extra_warning(升級失敗)會放進回傳的 `_warnings`(同時寫 stderr)。"""
     try:
         con = _open_rw(db)
         try:
@@ -603,7 +730,41 @@ def _load_known(db: Path) -> dict:
         return _fallback(WARN_DB_UNREADABLE)
     if validate(cfg, None):
         return _fallback(WARN_INVALID)
+    cfg["voice_defaults"] = normalize_voice(cfg["voice_defaults"])
+    if extra_warning:
+        print("[settings] " + extra_warning + "(" + str(_db_file()) + ")", file=sys.stderr)
+        cfg["_warnings"] = [extra_warning]
     return cfg
+
+
+def _load_v1(db: Path) -> dict:
+    """第 1 版資料庫:在初始化鎖內重新唯讀探測,仍為第 1 版才以 BEGIN IMMEDIATE 單一交易升級。
+
+    鎖內重新探測、交易內再讀一次版本,網頁與 MCP 同時第一次 load() 時只升一次。
+    取不到鎖或路徑不安全 → 預設值 + `_warnings`(同其他路徑);期間版本變成不明 → 同版本不明;
+    升級交易失敗 → rollback(資料庫維持 v1),回傳 v1 的 roles、review_seats + 程式內語音預設 + `_warnings`。
+    """
+    try:
+        with _init_lock():
+            if _probe(db) == SCHEMA_V1:
+                con = _open_rw(db)
+                try:
+                    _immediate(con, _upgrade_body)
+                finally:
+                    con.close()
+    except _DbError as e:
+        if e.args[0] in (WARN_UNSAFE_PATH, WARN_DB_VERSION):
+            return _fallback(e.args[0])
+        return _load_known(db, WARN_DB_UPGRADE)
+    except Exception:
+        return _load_known(db, WARN_DB_UPGRADE)
+    return _load_known(db)
+
+
+def _load_existing(db: Path, state: str) -> dict:
+    if state == SCHEMA_V1:
+        return _load_v1(db)
+    return _load_known(db)
 
 
 def _import_source() -> tuple[dict | None, str | None]:
@@ -633,7 +794,7 @@ def _create_or_import(db: Path, body, imported_ok: bool):
     """
     created = None
     if db.exists():
-        if _probe(db) == _KNOWN and imported_ok:
+        if _probe(db) != _NEW and imported_ok:
             return False
     else:
         created = _create_db_file(db)
@@ -662,8 +823,8 @@ def load() -> dict:
             state = _probe(db)
         except _DbError as e:
             return _fallback(e.args[0])
-        if state == _KNOWN:
-            return _load_known(db)
+        if state != _NEW:
+            return _load_existing(db, state)
     # 資料庫不存在,或存在但沒有任何表(另一行程正在建立或曾中斷)
     src, warning = _import_source()
     if warning:
@@ -677,7 +838,11 @@ def load() -> dict:
         return _fallback(e.args[0])
     except Exception:
         return _fallback(WARN_DB_UNREADABLE)
-    return _load_known(db)
+    try:
+        state = _probe(db)
+    except _DbError as e:
+        return _fallback(e.args[0])
+    return _load_existing(db, state)
 
 
 META_KEYS = ("imported_from", "imported_at")  # load_meta() 對外提供的 meta 鍵(不含 schema_version)
@@ -696,7 +861,7 @@ def load_meta() -> dict:
     if not db.exists():
         return {}
     try:
-        if _probe(db) != _KNOWN:
+        if _probe(db) == _NEW:
             return {}
         con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True,
                               timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
@@ -772,15 +937,15 @@ def save(cfg) -> None:
     if msg:
         raise ValueError([msg])
     try:
-        if db.exists() and _probe(db) == _KNOWN:
-            # 版本已知的既有資料庫:一般寫入,不取初始化鎖
+        if db.exists() and _probe(db) == SCHEMA_VERSION:
+            # 目前版本的既有資料庫:一般寫入,不取初始化鎖
             con = _open_rw(db)
             try:
                 _immediate(con, _save_body(cfg))
             finally:
                 con.close()
             return
-        # 資料庫不存在或還沒有任何表:建立與第一次存入在初始化鎖內進行
+        # 資料庫不存在、還沒有任何表或仍為第 1 版:建立、升級與存入在初始化鎖內同一個交易進行
         with _init_lock():
             _create_or_import(db, _save_body(cfg), imported_ok=False)
     except _DbError as e:  # 非 SQLite、損壞或版本不明 → 不寫入、不覆寫、不重建

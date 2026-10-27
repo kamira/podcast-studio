@@ -25,6 +25,7 @@
     ["輸入", ["text-input", "file-input"]],
     ["文字", ["write-script", "revise", "taiwanize", "cover-prompt"]],
     ["媒體", ["speak", "generate-image", "add-title", "make-video"]],
+    ["專案", ["send-to-library"]],
   ];
 
   // 輸出埠由參數決定的節點:file-input 只有 kind 對應的一個輸出埠(同 nodes.py dynamic_outputs)
@@ -204,7 +205,7 @@
 
   // ---------- 頁面切換(hash 路由,不是網頁分頁) ----------
 
-  const FORM_SUBPAGES = ["models", "seats"];   // 共用「還原預設 / 儲存」與提示列的子頁
+  const FORM_SUBPAGES = ["models", "seats", "voice"];   // 共用「還原預設 / 儲存」與提示列的子頁(voice:T8)
   let currentPage = null;
   // 其他模組登錄的路由({re, page, enter(match, entering)})與頁面進出鉤子(page → {enter, leave})
   const extraRoutes = [];
@@ -1293,14 +1294,15 @@
   // 欄位一律以 data-field="roles.reason.model" 這類路徑對應 settings.DEFAULTS 的鍵。
 
   // 預設值:settings.DEFAULTS 的 JSON 副本(「還原預設」用;tests/test_static.py 檢查與 settings.DEFAULTS 相等)
-  const SETTINGS_DEFAULTS = {"roles": {"reason": {"model": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M", "think": true, "num_ctx": 16384}, "reason_heavy": {"model": "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M", "think": true, "num_ctx": 16384}, "taiwan": {"model": "hf.co/mradermacher/Llama-Breeze2-8B-Instruct-text-only-GGUF:Q4_K_M", "think": null, "num_ctx": 16384}, "image": {"model": "mflux-community/flux-1-schnell-mflux-q4", "steps": 4}, "voice": {"wav": "tools/BreezyVoice/data/example.wav", "text": "在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。"}}, "review_seats": {"risk": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M", "impact": "glm4:latest", "drift": "qwen3:8b", "compliance": "codex", "security": "codex", "consistency": "glm4:latest"}};
+  const SETTINGS_DEFAULTS = {"roles": {"reason": {"model": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M", "think": true, "num_ctx": 16384}, "reason_heavy": {"model": "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M", "think": true, "num_ctx": 16384}, "taiwan": {"model": "hf.co/mradermacher/Llama-Breeze2-8B-Instruct-text-only-GGUF:Q4_K_M", "think": null, "num_ctx": 16384}, "image": {"model": "mflux-community/flux-1-schnell-mflux-q4", "steps": 4}, "voice": {"wav": "tools/BreezyVoice/data/example.wav", "text": "在密碼學中，加密是將明文資訊改變為難以讀取的密文內容，使之不可讀的方法。只有擁有解密方法的對象，經由解密過程，才能將密文還原為正常可讀的內容。"}}, "review_seats": {"risk": "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M", "impact": "glm4:latest", "drift": "qwen3:8b", "compliance": "codex", "security": "codex", "consistency": "glm4:latest"}, "voice_defaults": {"speed": 1.15, "pause_comma": 0.0, "pause_sentence": 0.4, "pause_paragraph": 0.8}};
 
   // 審議席位規則:與 settings.validate 一致(CODEX、VETO_SEATS、SEATS、PAUSED_REVIEW_MODELS、
   // 否決席不得用 glm4:*);tests/test_static.py 比對常數,並在有 JS 執行環境時實跑 seatAllows
   const SEAT_RULES = {"codex": "codex", "veto_seats": ["risk", "security", "compliance"], "seats": ["risk", "impact", "drift", "compliance", "security", "consistency"], "paused": ["hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M"], "veto_banned_prefix": "glm4:"};
 
-  // 數值欄位範圍:同 settings.NUM_CTX_RANGE、STEPS_RANGE、MAX_TEXT_LEN(tests/test_static.py 檢查)
-  const FIELD_LIMITS = {"num_ctx": [2048, 65536], "steps": [1, 8], "text_max": 20000, "name_max": 300};
+  // 數值欄位範圍:同 settings.NUM_CTX_RANGE、STEPS_RANGE、MAX_TEXT_LEN,以及語音預設的
+  // SPEED_RANGE / SPEED_STEP、PAUSE_RANGE / PAUSE_STEP(CHG-20261022-04 T8;tests/test_static.py 檢查)
+  const FIELD_LIMITS = {"num_ctx": [2048, 65536], "steps": [1, 8], "text_max": 20000, "name_max": 300, "speed": [0.5, 2.0], "speed_step": 0.05, "pause": [0.0, 5.0], "pause_step": 0.1};
 
   const OLLAMA_DOWN_TEXT = "Ollama 未啟動,無法儲存模型設定";
   const CODEX_LABEL = "Codex";
@@ -1478,6 +1480,8 @@
         if (f.dataset.kind === "think") v = v === "true" ? true : v === "false" ? false : null;
         // 整數欄位:不是整數就原樣送出,由伺服器回 422 指出欄位
         else if (f.dataset.kind === "int" && /^-?\d+$/.test(String(v).trim())) v = parseInt(String(v).trim(), 10);
+        // 小數欄位(語音預設):不是數字就原樣送出,由伺服器回 422 指出欄位
+        else if (f.dataset.kind === "num" && /^-?\d+(\.\d+)?$/.test(String(v).trim())) v = Number(String(v).trim());
         setPath(out, f.dataset.field, v);
       });
       return out;

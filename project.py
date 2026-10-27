@@ -40,6 +40,8 @@
                                原文 `[` `]` 轉全形;標註以 `字[:注音]` 插入(注音格式同 breezy_worker,聲調符號)
   load(name) -> Project / save(project) -> 版本 id 或 None / list_history(name) / trash(name, confirm=True)
   (T6 補)create(name, script, defaults) / list_projects() / load_version(name, 版本 id) / restore(name, 版本 id)
+  (T8 補)update(name, change) -> (Project, 版本 id, change 的回傳值)
+                               載入、修改、驗證、存檔全程持專案層級鎖(網頁 API 與「送到素材庫」節點共用)
                                ProjectNotFound(不存在,伺服器回 404)、ProjectExists(已存在,回 409)
                                皆為 ProjectError 的子類別
   startup_cleanup(now) -> {"trash_removed", "tmp_cleared", "warnings"}
@@ -783,21 +785,54 @@ def save(project: Project) -> str | None:
     專案目錄、history/ 是符號連結或解析到別處時拒絕存檔(丟 UnsafePath 並記警告),不寫入連結目標。
     """
     data = validate(project.to_dict())
-    payload = _dump(data)
     name = data["name"]
     warnings: list[str] = []
     try:
         root = _projects_root(create=True)
         pdir = _project_dir(root, name, create=True)
         with _project_lock(pdir):
-            hdir = _safe_child(pdir, "history", "history", create=True)
-            vid = _archive_current(pdir, hdir)
-            _write_atomic(pdir, payload)
-            _rotate(pdir, warnings)
+            return _save_locked(pdir, data, warnings)
     except UnsafePath as e:
         _warn(warnings, f"專案「{name}」拒絕存檔:{e.errors[0]}")
         raise
+
+
+def _save_locked(pdir: Path, data: dict, warnings: list) -> str | None:
+    """已持有專案鎖時的存檔本體(舊檔移入 history/ → 原子寫入 → 輪替)。"""
+    payload = _dump(data)
+    hdir = _safe_child(pdir, "history", "history", create=True)
+    vid = _archive_current(pdir, hdir)
+    _write_atomic(pdir, payload)
+    _rotate(pdir, warnings)
     return vid
+
+
+def update(name, change):
+    """「載入 → change(project) → 驗證 → 存檔」全程持專案層級鎖(CHG-20261022-04 T8)。
+
+    跨執行緒也跨行程序列化同一專案的修改,避免兩處各自載入後互相覆蓋(例:「送到素材庫」節點與
+    網頁的修改同時發生)。change 可原地修改 project 並回傳任意值;change 或驗證丟例外時不存檔。
+    回傳 (存檔後的 Project, 版本 id 或 None, change 的回傳值)。專案不存在丟 ProjectNotFound。
+    """
+    name = check_name(name)
+    try:
+        root = _projects_root(create=False)
+    except FileNotFoundError:
+        raise ProjectNotFound("找不到這個專案") from None
+    pdir = _project_dir(root, name, create=False)
+    warnings: list[str] = []
+    try:
+        with _project_lock(pdir):
+            proj = load(name)
+            extra = change(proj)
+            data = validate(proj.to_dict())
+            if data["name"] != name:
+                raise ProjectError("不能在修改時改變專案名稱")
+            vid = _save_locked(pdir, data, warnings)
+    except UnsafePath as e:
+        _warn(warnings, f"專案「{name}」拒絕存檔:{e.errors[0]}")
+        raise
+    return Project.from_dict(data), vid, extra
 
 
 def list_history(name) -> list[str]:

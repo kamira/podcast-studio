@@ -260,7 +260,7 @@ def test_只有合法JSON時第一次load匯入且之後只讀資料庫(env):
     assert got == c and "_warnings" not in got
     assert db(env).is_file()
     meta = dict(query(env, "SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "1"
+    assert meta["schema_version"] == "2"   # CHG-20261022-04 T8(修訂 3):一次性匯入直接建為 v2
     assert meta["imported_from"] == "config/models.json"
     assert meta["imported_at"]
     assert settings.CONFIG_PATH.read_bytes() == json_before  # 原檔不刪不改
@@ -864,3 +864,257 @@ def test_初始化鎖檔是符號連結時不讀不寫(env, tmp_path_factory):
     assert target.read_bytes() == b"keep"
     assert not db(env).exists()
     assert sorted(x.name for x in outside.iterdir()) == ["target"]
+
+
+# ---- CHG-20261022-04 T8:語音預設(voice_defaults 表)與 schema 1 → 2 升級 ----
+
+VOICE_DEFAULTS = {"speed": 1.15, "pause_comma": 0.0, "pause_sentence": 0.4, "pause_paragraph": 0.8}
+
+
+def _v1_db(path: Path, c: dict) -> None:
+    """建立 T8 以前格式的 v1 資料庫(只有 meta、roles、review_seats),內容為 c。"""
+    path.parent.mkdir(exist_ok=True)
+    con = sqlite3.connect(path)
+    with con:
+        con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        con.execute("CREATE TABLE roles (role TEXT PRIMARY KEY, config TEXT NOT NULL)")
+        con.execute("CREATE TABLE review_seats (seat TEXT PRIMARY KEY, model TEXT NOT NULL)")
+        con.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", [
+            ("schema_version", "1"), ("imported_from", "config/models.json"),
+            ("imported_at", "2026-10-26T00:00:00+00:00")])
+        con.executemany("INSERT INTO roles (role, config) VALUES (?, ?)",
+                        [(r, json.dumps(v, ensure_ascii=False, sort_keys=True)) for r, v in c["roles"].items()])
+        con.executemany("INSERT INTO review_seats (seat, model) VALUES (?, ?)", list(c["review_seats"].items()))
+    con.close()
+
+
+def _tables(root: Path) -> set[str]:
+    return {r[0] for r in query(root, "SELECT name FROM sqlite_master WHERE type = ?", ("table",))}
+
+
+def _voice_rows(root: Path) -> dict:
+    return dict(query(root, "SELECT key, value FROM voice_defaults"))
+
+
+def test_DEFAULTS含語音預設且與專案模組一致(env):
+    import project
+    assert settings.DEFAULTS["voice_defaults"] == VOICE_DEFAULTS == project.DEFAULTS
+    assert settings.SCHEMA_VERSION == "2"
+
+
+def test_v1資料庫第一次load升為v2且既有列不變_語音預設為預設值(env):
+    c = changed()
+    c["review_seats"]["drift"] = "glm4:latest"
+    _v1_db(db(env), c)
+    before = table_rows(env)
+    got = settings.load()
+    assert "_warnings" not in got
+    assert got == {**c, "voice_defaults": VOICE_DEFAULTS}
+    meta = dict(query(env, "SELECT key, value FROM meta"))
+    assert meta["schema_version"] == "2"
+    assert meta["imported_at"] == "2026-10-26T00:00:00+00:00"   # 其他 meta 不動
+    assert table_rows(env) == before   # roles、review_seats 內容不變
+    assert _voice_rows(env) == VOICE_DEFAULTS
+    assert settings.load_meta() == {"imported_from": "config/models.json",
+                                    "imported_at": "2026-10-26T00:00:00+00:00"}
+
+
+def test_已是v2時不再升級(env, monkeypatch):
+    _v1_db(db(env), changed())
+    settings.load()
+    con = sqlite3.connect(db(env))
+    with con:
+        con.execute("UPDATE voice_defaults SET value = ? WHERE key = ?", (1.5, "speed"))
+    con.close()
+
+    def boom(con):
+        raise AssertionError("v2 資料庫不得再升級")
+
+    monkeypatch.setattr(settings, "_upgrade_v1_v2", boom)
+    for _ in range(3):
+        got = settings.load()
+        assert "_warnings" not in got and got["voice_defaults"]["speed"] == 1.5
+
+
+@pytest.mark.parametrize("fail_at", ["_write_voice", "_voice_rows"])
+def test_升級交易中途丟例外時仍為v1且回傳帶警告(env, monkeypatch, capsys, fail_at):
+    c = changed()
+    _v1_db(db(env), c)
+    before = table_rows(env)
+    original = getattr(settings, fail_at)
+
+    def boom(*a):
+        raise RuntimeError("模擬升級中途失敗")
+
+    monkeypatch.setattr(settings, fail_at, boom)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_UPGRADE]
+    assert got == {**c, "voice_defaults": VOICE_DEFAULTS}   # v1 內容 + 程式內語音預設
+    assert settings.WARN_DB_UPGRADE in capsys.readouterr().err
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "1"
+    assert "voice_defaults" not in _tables(env)   # CREATE TABLE 也一併 rollback
+    assert table_rows(env) == before
+    # 下次 load() 再試即升級成功
+    monkeypatch.setattr(settings, fail_at, original)
+    got = settings.load()
+    assert "_warnings" not in got and got["voice_defaults"] == VOICE_DEFAULTS
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+
+
+def test_版本3的資料庫照舊不讀不寫(env):
+    _rollback_journal_db(db(env), "3")
+    before = sha(db(env))
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_VERSION]
+    assert got == settings.DEFAULTS
+    with pytest.raises(ValueError):
+        settings.save(changed())
+    assert sha(db(env)) == before
+    assert not any(p.exists() for p in sidecars(env))
+
+
+def test_v1資料庫上save在同一交易內升級並存入(env):
+    _v1_db(db(env), cfg())
+    c = changed()
+    c["voice_defaults"] = {"speed": 1.3, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.0}
+    settings.save(c)
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert settings.load() == c
+
+
+def test_v1資料庫上save失敗時仍為v1且兩表不變(env, monkeypatch):
+    _v1_db(db(env), cfg())
+    before = table_rows(env)
+
+    def boom(c):
+        raise RuntimeError("模擬存入中途失敗")
+
+    monkeypatch.setattr(settings, "_seat_rows", boom)
+    with pytest.raises(RuntimeError):
+        settings.save(changed())
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "1"
+    assert "voice_defaults" not in _tables(env)
+    assert table_rows(env) == before
+
+
+@pytest.mark.parametrize("key,value", [
+    ("speed", 2.5), ("speed", 0.45), ("speed", 2.05), ("pause_sentence", 5.5), ("pause_comma", -0.1),
+    ("pause_paragraph", 5.06), ("speed", True), ("speed", "1.2"), ("speed", None), ("speed", float("nan")),
+])
+def test_語速或停頓超出範圍的save丟ValueError且不動資料庫(env, key, value):
+    settings.save(changed())
+    before = (table_rows(env), _voice_rows(env))
+    c = changed()
+    c["voice_defaults"] = dict(VOICE_DEFAULTS, **{key: value})
+    with pytest.raises(ValueError) as e:
+        settings.save(c)
+    assert any(m.startswith(f"voice_defaults.{key}:") for m in e.value.args[0]), e.value.args
+    assert (table_rows(env), _voice_rows(env)) == before
+
+
+def test_語速取到0點05_停頓取到0點1(env):
+    c = changed()
+    c["voice_defaults"] = {"speed": 1.23, "pause_comma": 0.04, "pause_sentence": 5.04, "pause_paragraph": 2}
+    assert settings.validate(c, None) == []
+    settings.save(c)
+    assert settings.load()["voice_defaults"] == {"speed": 1.25, "pause_comma": 0.0, "pause_sentence": 5.0,
+                                                 "pause_paragraph": 2.0}
+
+
+def test_語音預設的鍵必須恰為四個(env):
+    c = changed()
+    c["voice_defaults"] = {"speed": 1.2, "pause_comma": 0.0, "pause_sentence": 0.4, "volume": 1}
+    errs = settings.validate(c, None)
+    assert any(e.startswith("voice_defaults.volume") for e in errs)
+    assert any(e.startswith("voice_defaults.pause_paragraph") for e in errs)
+    c["voice_defaults"] = [1.2]
+    assert settings.validate(c, None)
+
+
+def test_save省略語音預設時保留資料庫內的值(env):
+    c = changed()
+    c["voice_defaults"] = dict(VOICE_DEFAULTS, speed=1.4)
+    settings.save(c)
+    without = {k: v for k, v in changed(reason="glm4:latest").items() if k != "voice_defaults"}
+    settings.save(without)
+    got = settings.load()
+    assert got["roles"]["reason"]["model"] == "glm4:latest"
+    assert got["voice_defaults"]["speed"] == 1.4
+
+
+def test_新建資料庫沒帶語音預設時寫入預設值(env):
+    settings.save({k: v for k, v in changed().items() if k != "voice_defaults"})
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert _voice_rows(env) == VOICE_DEFAULTS
+
+
+def test_資料庫語音預設不合法時回預設值(env):
+    settings.save(changed())
+    con = sqlite3.connect(db(env))
+    with con:
+        con.execute("UPDATE voice_defaults SET value = ? WHERE key = ?", (9.0, "speed"))
+    con.close()
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_INVALID]
+    assert got == settings.DEFAULTS
+
+
+def test_T8以前格式的models_json匯入為v2且語音預設為預設值(env):
+    old = {k: v for k, v in changed().items() if k != "voice_defaults"}
+    write_json(env, old)
+    got = settings.load()
+    assert "_warnings" not in got
+    assert got == {**old, "voice_defaults": VOICE_DEFAULTS}
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert _voice_rows(env) == VOICE_DEFAULTS
+
+
+def test_models_json帶語音預設時一併匯入(env):
+    c = changed()
+    c["voice_defaults"] = dict(VOICE_DEFAULTS, pause_sentence=0.6)
+    write_json(env, c)
+    assert settings.load() == c
+    assert _voice_rows(env)["pause_sentence"] == 0.6
+
+
+CHILD_UPGRADE_ONCE = CHILD_PRELUDE + textwrap.dedent("""
+    import os
+    real = settings._upgrade_v1_v2
+    def counted(con):
+        real(con)
+        fd = os.open(str(root / "upgrades.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.write(fd, b"x\\n")
+        os.close(fd)
+    settings._upgrade_v1_v2 = counted
+    print(json.dumps(settings.load(), ensure_ascii=False))
+""")
+
+
+@pytest.mark.parametrize("round_", range(3))
+def test_兩個子行程同時觸發升級只升一次(env, round_):
+    c = changed()
+    _v1_db(db(env), c)
+    before = table_rows(env)
+    code = CHILD_UPGRADE_ONCE.format(repo=str(REPO), root=str(env))
+    results = _run_pair(env, [code, code])
+    for rc, out, err in results:
+        assert rc == 0, err
+        assert "database is locked" not in err and "[settings]" not in err
+        assert json.loads(out) == {**c, "voice_defaults": VOICE_DEFAULTS}   # 皆沒有 _warnings
+    assert (env / "upgrades.log").read_text().splitlines() == ["x"]
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert table_rows(env) == before
+    assert _voice_rows(env) == VOICE_DEFAULTS
+
+
+def test_升級時初始化鎖檔是符號連結則不讀不寫(env, tmp_path_factory):
+    _v1_db(db(env), changed())
+    before = sha(db(env))
+    outside = tmp_path_factory.mktemp("outside_lock_v1")
+    target = outside / "target"
+    target.write_bytes(b"keep")
+    (env / "config" / ".studio.db.lock").symlink_to(target)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
+    assert got == settings.DEFAULTS
+    assert sha(db(env)) == before and target.read_bytes() == b"keep"

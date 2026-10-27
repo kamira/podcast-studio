@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""前端靜態檔的測試(CHG-20261022-01 P1、T10、T11、T12;CHG-20261022-04 T7)。
+"""前端靜態檔的測試(CHG-20261022-01 P1、T10、T11、T12;CHG-20261022-04 T7、T8)。
 
 前端互動由 T14 的 UI 檢查驗證;這裡做靜態檢查。T12 的審議席位規則與 422 欄位對應
 另在有 JS 執行環境(node 或 macOS jsc)時實跑 app.js 的函式,沒有時略過該兩項。
@@ -642,7 +642,7 @@ def test_app_js_settings_flow():
 
 # ---------- CHG-20261022-04 T7:首頁雙卡片、精靈、完整模式、剪輯與預覽、免責頁 ----------
 
-MODULES = ("project.js", "timeline.js", "wizard.js")
+MODULES = ("project.js", "timeline.js", "edit.js", "wizard.js")   # edit.js:CHG-20261022-04 T8
 ALL_JS = ("app.js",) + MODULES
 
 
@@ -677,7 +677,7 @@ def _parking_html() -> str:
 def test_t7_modules_loaded_from_static_in_order():
     srcs = re.findall(r'<script src="([^"]+)" defer></script>', _index_text())
     assert srcs == ["/static/vendor/drawflow.min.js", "/static/app.js", "/static/project.js",
-                    "/static/timeline.js", "/static/wizard.js"]
+                    "/static/timeline.js", "/static/edit.js", "/static/wizard.js"]
     for name in MODULES:
         assert (STATIC / name).is_file(), name
 
@@ -960,3 +960,163 @@ def test_served_t7_modules(client):
         assert r.status_code == 200, name
         assert "javascript" in r.headers["content-type"]
         assert r.headers["content-security-policy"] == ss.CSP
+
+
+# ---------- CHG-20261022-04 T8:停頓、聲調、語速、畫面軌編輯與語音預設 ----------
+
+EDIT_FUNCS = [("edit.js", "  const SPEED_MIN = 0.5;", "  // 純函式結束")]
+
+
+def _edit_fn(name: str) -> str:
+    """edit.js 中某個 function 的原始碼(到下一個同層的 function 或區段為止)。"""
+    js = _js("edit.js")
+    i = js.index(f"  function {name}(")
+    j = js.find("\n  function ", i + 1)
+    k = js.find("\n  // ----------", i + 1)
+    ends = [x for x in (j, k) if x != -1]
+    return js[i:min(ends) if ends else len(js)]
+
+
+def test_voice_subpage_has_four_fields_and_shares_form_actions():
+    html = _settings_html()
+    voice = html[html.index('data-sub="voice" hidden>'):html.index('data-sub="flow" hidden')]
+    assert "placeholder" not in voice.split("\n")[0] and "將於後續版本加入" not in html
+    for key in settings.VOICE_KEYS:
+        assert re.search(rf'data-field="voice_defaults\.{key}" data-kind="num"', voice), key
+    assert re.search(r'data-field="voice_defaults\.speed" data-kind="num" min="0\.5" max="2" step="0\.05"', voice)
+    for key in ("pause_comma", "pause_sentence", "pause_paragraph"):
+        assert re.search(rf'data-field="voice_defaults\.{key}" data-kind="num" min="0" max="5" step="0\.1"', voice)
+    assert '<div class="subpage settings-sub" data-sub="voice" hidden>' in html
+    js = _app_js()
+    assert 'const FORM_SUBPAGES = ["models", "seats", "voice"];' in js
+    # 小數欄位以 Number() 送出,不合格的原樣送出由伺服器 422
+    assert 'f.dataset.kind === "num"' in js
+
+
+def test_js_voice_limits_match_settings():
+    lim = _js_json_const("FIELD_LIMITS")
+    assert tuple(lim["speed"]) == settings.SPEED_RANGE and lim["speed_step"] == float(settings.SPEED_STEP)
+    assert tuple(lim["pause"]) == settings.PAUSE_RANGE and lim["pause_step"] == float(settings.PAUSE_STEP)
+    assert _js_json_const("SETTINGS_DEFAULTS")["voice_defaults"] == settings.DEFAULTS["voice_defaults"]
+
+
+def test_voice_defaults_errors_map_to_fields():
+    c = copy.deepcopy(settings.DEFAULTS)
+    c["voice_defaults"]["speed"] = 2.5
+    c["voice_defaults"]["pause_comma"] = "x"
+    errs = settings.validate(c, None)
+    fields = set(_data_fields(_settings_html()))
+    for e in errs:
+        key = e.split(":", 1)[0]
+        assert re.fullmatch(r"[a-z_]+(\.[a-z_]+)+", key) and key in fields, e
+
+
+def test_palette_lists_send_to_library():
+    js = _app_js()
+    assert '["專案", ["send-to-library"]]' in js
+
+
+def test_edit_js_uses_t7_hooks_and_elements():
+    js = _js("edit.js")
+    for hook in ("voice-row", "segment-props", "image-props", "timeline"):
+        assert f'S.hook("{hook}"' in js, hook
+    for needed in ('[data-hook="speed"]', '[data-hook="pause"]', '[data-hook="tone"]', '[data-hook="image-range"]',
+                   ".tone-char[data-index]", ".tl-gap[data-after]", ".tl-img .tl-edge[data-edge]",
+                   "gap.dataset.after", "h.dataset.edge"):
+        assert needed in js, needed
+    # 修改一律經 Store(伺服器驗證並回傳新的專案檢視)
+    for needed in ("Store.patchSegment(seg.id, { speed:", "Store.patchSegment(seg.id, { pause_after: value })",
+                   "Store.patchSegment(after, { pause_after: value })", "Store.patchImage(id, body)",
+                   "{ annotations: withAnnotation(", 'S.api("POST", "/api/annotate", { text: text })'):
+        assert needed in js, needed
+
+
+def test_speed_change_only_patches_and_never_synthesizes():
+    sel = _edit_fn("speedSelect")
+    assert "patchSegment" in sel
+    assert "synth" not in sel.lower() and "/api/" not in sel
+
+
+def test_tone_apply_resynthesizes_only_dirty_segments():
+    js = _js("edit.js")
+    apply = js[js.index("    async apply(z) {"):js.index("  function mountTone(")]
+    assert "S.Voice.synth()" in apply and "S.isRunning()" in apply
+
+
+def test_edit_js_renders_text_with_text_content_only():
+    js = _js("edit.js")
+    assert ".textContent" in js
+    for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", ".html(", "document.write"):
+        assert bad not in js, bad
+
+
+def test_speed_menu_values_run_in_js():
+    got = _run_js_funcs(EDIT_FUNCS, "var result = speedOptions();")
+    assert got[0] == {"value": "", "label": "預設"}
+    values = [o["value"] for o in got[1:]]
+    expected = [f"{n / 100:.2f}" for n in range(50, 201, 5)]
+    assert values == expected and len(values) == 31
+    assert [o["label"] for o in got[1:]] == [v + "×" for v in expected]
+
+
+def test_speed_value_and_drag_math_run_in_js():
+    got = _run_js_funcs(EDIT_FUNCS, """var result = {
+      sv: [speedValue(null), speedValue(1.3), speedValue(1.15), speedValue(2)],
+      pause: [pauseFromDrag(0.4, 66, 60), pauseFromDrag(0.4, -100, 60), pauseFromDrag(4.8, 600, 60),
+              pauseFromDrag(0.0, 2, 60), pauseFromDrag(0.4, 0, 60)],
+      edge: [edgeFromDrag({start: 0, end: 10}, "start", 120, 60), edgeFromDrag({start: 2, end: 3}, "start", 600, 60),
+             edgeFromDrag({start: 2, end: 10}, "start", -600, 60), edgeFromDrag({start: 2, end: 10}, "end", -1200, 60),
+             edgeFromDrag({start: 2, end: 10}, "end", 33, 60)]
+    };""")
+    assert got["sv"] == ["", "1.30", "1.15", "2.00"]
+    assert got["pause"] == [1.5, 0, 5, 0, 0.4]
+    assert got["edge"] == [2, 2.9, 0, 2.1, 10.6]
+
+
+def _py_zhuyin_ok(z: str) -> bool:
+    import breezy_worker
+    return breezy_worker.marked_to_digit(z) is not None
+
+
+ZHUYIN_SAMPLES = ["ㄏㄠˇ", "ㄏㄠˋ", "˙ㄉㄜ", "ㄉㄜ˙", "˙ㄉㄜ˙", "ㄐㄧㄣ", "ㄓㄨㄤˋ", "ㄓㄨㄤㄤㄤˋ", "", "hao3",
+                  "ㄏㄠ3", "ˇ", "ㄏㄠˇˇ", "ㄏ ㄠ", "ㄏㄠ[:x]"]
+
+
+def test_zhuyin_check_agrees_with_worker():
+    got = _run_js_funcs(EDIT_FUNCS, "var result = " + json.dumps(ZHUYIN_SAMPLES, ensure_ascii=True)
+                        + ".map(zhuyinOk);")
+    assert got == [_py_zhuyin_ok(z) for z in ZHUYIN_SAMPLES]
+
+
+def test_tone_variants_and_annotations_run_in_js():
+    got = _run_js_funcs(EDIT_FUNCS, """var result = {
+      v: toneVariants("ㄏㄠˇ").map(function (x) { return x.zhuyin; }),
+      light: toneVariants("˙ㄉㄜ").map(function (x) { return x.zhuyin; }),
+      bad: toneVariants("abc"),
+      add: withAnnotation([{index: 5, zhuyin: "ㄏㄠˇ"}], 2, "ㄏㄠˋ"),
+      replace: withAnnotation([{index: 2, zhuyin: "ㄏㄠˇ"}], 2, "ㄏㄠˋ"),
+      clear: withAnnotation([{index: 2, zhuyin: "ㄏㄠˇ"}, {index: 3, zhuyin: "ㄉㄜ˙"}], 2, null),
+      hanzi: [isHanzi("好"), isHanzi("a"), isHanzi("，"), isHanzi("𠀋")]
+    };""")
+    assert got["v"] == ["ㄏㄠ", "ㄏㄠˊ", "ㄏㄠˇ", "ㄏㄠˋ", "˙ㄏㄠ"]
+    assert got["light"] == ["ㄉㄜ", "ㄉㄜˊ", "ㄉㄜˇ", "ㄉㄜˋ", "˙ㄉㄜ"]
+    assert got["bad"] == []
+    assert got["add"] == [{"index": 2, "zhuyin": "ㄏㄠˋ"}, {"index": 5, "zhuyin": "ㄏㄠˇ"}]
+    assert got["replace"] == [{"index": 2, "zhuyin": "ㄏㄠˋ"}]
+    assert got["clear"] == [{"index": 3, "zhuyin": "ㄉㄜ˙"}]
+    assert got["hanzi"] == [True, False, False, True]
+    for z in got["v"] + got["light"]:
+        assert _py_zhuyin_ok(z), z
+
+
+def test_tone_popup_has_auto_choices_custom_light_clear_apply():
+    js = _js("edit.js")
+    for needed in ('"「" + ch + "」的念法"', '"自動:"', '"自訂:"', '"輕聲"', '"清除"', '"套用"',
+                   'setAttribute("role", "dialog")', 'radio.type = "radio"', 'this.light.type = "checkbox"'):
+        assert needed in js, needed
+
+
+def test_drag_handles_suppress_click_and_use_pointer_capture():
+    js = _js("edit.js")
+    assert "setPointerCapture" in js and "suppressClick" in js
+    assert 'content.addEventListener("click"' in js

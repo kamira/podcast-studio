@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 import heavy_lock as hl
 import media
 import project as pj
+import settings
 import studio_server as ss
 import taiwan_ai
 import tts_service as tts
@@ -127,6 +128,8 @@ def env(tmp_path, monkeypatch):
     (e.fake / "worker.py").write_text(FAKE_WORKER, encoding="utf-8")
     (e.repo / "voice" / "voice.wav").write_bytes(pcm_wav(0.2))
     monkeypatch.setattr(pj, "ROOT", e.repo)
+    monkeypatch.setattr(settings, "ROOT", e.repo)   # T8:新專案的語音預設讀設定資料庫(不碰 repo 內的 config/)
+    monkeypatch.setattr(settings, "CONFIG_PATH", e.repo / "config" / "models.json")
     monkeypatch.setattr(taiwan_ai, "ROOT", e.repo)
     monkeypatch.setattr(taiwan_ai, "OUT", e.repo / "outputs")
     monkeypatch.setattr(hl, "ROOT", e.repo)
@@ -286,6 +289,24 @@ def test_create_uses_voice_defaults_hook(env):
     view = create(c)
     assert view["project"]["defaults"]["speed"] == 1.3
     assert view["project"]["defaults"]["pause_sentence"] == 0.6
+
+
+def test_new_project_defaults_come_from_settings_voice_defaults(client, env):
+    """T8:預設的 _voice_defaults() 讀設定資料庫的 voice_defaults(設定頁「語音預設」)。"""
+    import copy
+    cfg = copy.deepcopy(settings.DEFAULTS)
+    cfg["voice_defaults"] = {"speed": 1.4, "pause_comma": 0.1, "pause_sentence": 0.7, "pause_paragraph": 1.2}
+    settings.save(cfg)
+    view = create(client)
+    assert view["project"]["defaults"] == cfg["voice_defaults"]
+    assert ss._voice_defaults() == cfg["voice_defaults"]
+
+
+def test_voice_defaults_fall_back_to_project_defaults(env, monkeypatch):
+    monkeypatch.setattr(settings, "load", lambda: {"voice_defaults": {"speed": 9}})
+    assert ss._voice_defaults() == pj.DEFAULTS
+    monkeypatch.setattr(settings, "load", lambda: {})
+    assert ss._voice_defaults() == pj.DEFAULTS
 
 
 def test_create_rejects_bad_script_with_422(client):

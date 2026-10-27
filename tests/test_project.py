@@ -605,3 +605,65 @@ def test_startup_cleanup_clears_tmp_and_keeps_project_data(projects):
 def test_startup_cleanup_without_projects_dir(repo):
     assert pj.startup_cleanup(BASE) == {"trash_removed": [], "tmp_cleared": 0, "warnings": []}
     assert not (repo / "projects").exists()
+
+
+# ---------- update()(CHG-20261022-04 T8:載入—修改—存檔全程持專案鎖) ----------
+
+def test_update修改後存檔並回傳版本與change的回傳值(repo):
+    pj.create("夜市的味道", "第一句。")
+    got, vid, extra = pj.update("夜市的味道", lambda p: p.defaults.update(speed=1.3) or "改好了")
+    assert extra == "改好了" and vid is not None
+    assert got.defaults["speed"] == 1.3 == pj.load("夜市的味道").defaults["speed"]
+    assert vid in pj.list_history("夜市的味道")
+
+
+def test_update的change丟例外時不存檔(repo):
+    pj.create("夜市的味道", "第一句。")
+    before = pj.list_history("夜市的味道")
+
+    def boom(p):
+        p.defaults["speed"] = 1.9
+        raise RuntimeError("中途失敗")
+
+    with pytest.raises(RuntimeError):
+        pj.update("夜市的味道", boom)
+    assert pj.load("夜市的味道").defaults["speed"] == pj.DEFAULTS["speed"]
+    assert pj.list_history("夜市的味道") == before
+
+
+def test_update驗證不過時不存檔且不能改名(repo):
+    pj.create("夜市的味道", "第一句。")
+    with pytest.raises(pj.ProjectError):
+        pj.update("夜市的味道", lambda p: p.defaults.update(speed=5))
+    with pytest.raises(pj.ProjectError):
+        pj.update("夜市的味道", lambda p: setattr(p, "name", "別的名字"))
+    assert pj.load("夜市的味道").defaults["speed"] == pj.DEFAULTS["speed"]
+
+
+def test_update專案不存在丟ProjectNotFound(repo):
+    with pytest.raises(pj.ProjectNotFound):
+        pj.update("沒有這個", lambda p: None)
+
+
+def test_兩個執行緒同時update不會互相覆蓋(repo):
+    pj.create("夜市的味道", "第一句。")
+    n = 8
+    barrier = threading.Barrier(n)
+    errors = []
+
+    def add(i):
+        def change(p):
+            p.assets = [*p.assets, {"id": f"{i:08x}{'0' * 8}", "kind": "text", "ext": "txt", "bytes": i}]
+        try:
+            barrier.wait(5)
+            pj.update("夜市的味道", change)
+        except Exception as e:  # pragma: no cover - 失敗時記錄
+            errors.append(e)
+
+    threads = [threading.Thread(target=add, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert errors == []
+    assert sorted(a["bytes"] for a in pj.load("夜市的味道").assets) == list(range(n))
