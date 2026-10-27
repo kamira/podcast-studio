@@ -65,7 +65,7 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
 設定 API(T9;模型設定一律只經 `settings.load()` / `save()` / `validate()` / `load_meta()`
 / `voice_options()`,本檔不直接開啟設定資料庫或一次性匯入來源):
 
-  GET  /api/config               `settings.load()` 的結果(roles、review_seats,讀取失敗時另有
+  GET  /api/config               `settings.load()` 的結果(roles、review_seats、voice_defaults,讀取失敗時另有
                                  `_warnings`)加上 `meta`:{"imported_from", "imported_at"}
                                  (`settings.load_meta()`;只在沒有 `_warnings` 時提供,否則為 {})。
   PUT  /api/config               本文為設定 JSON(可直接送回 GET 的內容;`_warnings`、`meta` 會被忽略),
@@ -101,7 +101,7 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
 
   GET    /api/projects                 {"projects": [{"name", "updated": 專案檔修改時間 epoch 秒}]}
   POST   /api/projects                 {"name", "script"?} → 201 View;文稿依 project.split_segments 切成片段;
-                                       語速與停頓預設取自 `voice_defaults()`(T8 鉤子,目前為 project.DEFAULTS)
+                                       語速與停頓預設取自 `voice_defaults()`(T8:設定資料庫的 voice_defaults)
   GET    /api/projects/{p}             View
   PUT    /api/projects/{p}             存檔:{"script"?, "forced_breaks"?, "defaults"?}(皆可省略;空本文 = 原樣
                                        再存一次)。帶 script 或 forced_breaks 時重新分句:文字相同的片段依序
@@ -936,13 +936,20 @@ def _media_file(name: str, aid: str) -> tuple[Path, str]:
 
 
 def _voice_defaults() -> dict:
-    """新專案的語速與停頓預設。
+    """新專案的語速與停頓預設:設定資料庫的 `voice_defaults`(CHG-20261022-04 T8,設定頁「語音預設」)。
 
-    T8 鉤子:T8 在設定資料庫加入 `voice_defaults` 表後,把本函式改為回傳
-    `settings.load()["voice_defaults"]`(鍵同 `project.DEFAULTS`:speed、pause_comma、pause_sentence、
-    pause_paragraph);在那之前一律用專案模組的預設值。`create_app(voice_defaults=…)` 可換替身。
+    經 `settings.load()` 讀取(鍵同 `project.DEFAULTS`:speed、pause_comma、pause_sentence、pause_paragraph;
+    讀取失敗時 settings 已回程式內預設值)。內容不合專案模組的規則時改用 `project.DEFAULTS`。
+    `create_app(voice_defaults=…)` 可換替身。
     """
-    return dict(pj.DEFAULTS)
+    voice = settings.load().get("voice_defaults")
+    if not isinstance(voice, dict) or set(voice) != set(pj.DEFAULTS):
+        return dict(pj.DEFAULTS)
+    try:
+        return {"speed": pj.normalize_speed(voice["speed"]),
+                **{k: pj.normalize_pause(voice[k]) for k in pj.DEFAULTS if k != "speed"}}
+    except pj.ProjectError:
+        return dict(pj.DEFAULTS)
 
 
 def annotate_text(text: str, root: Path) -> list:
@@ -1026,7 +1033,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     失敗時應丟 OllamaUnavailable)。設定資料庫的位置由 settings.ROOT 決定。
     專案 API(T6)的替身:synth(project, emit)預設 tts_service.synth;render(project) -> (mp4, srt)
     預設 media.render_timeline(project, timeline.layout(project));annotate(text) -> 注音陣列預設
-    annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8 鉤子)。
+    annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8:讀設定資料庫)。
     專案目錄由 project.ROOT 決定(不是 root)。"""
     token = token or secrets.token_urlsafe(32)
     tags_fn = ollama_tags or fetch_ollama_tags
@@ -1322,14 +1329,14 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             return plocks.setdefault(names.fold_name(name), threading.Lock())
 
     def mutate(name: str, change) -> dict:
-        """載入 → change(project, created) → 存檔(先移舊版入 history);失敗時刪除這次複製進來的檔案。"""
+        """載入 → change(project, created) → 存檔(先移舊版入 history);失敗時刪除這次複製進來的檔案。
+
+        (T8)載入到存檔全程經 `pj.update()` 持專案層級鎖,與「送到素材庫」節點的修改互相序列化。
+        """
         created: list[Path] = []
         with plock(name):
-            proj = pj.load(name)
             try:
-                extra = change(proj, created) or {}
-                proj = pj.Project.from_dict(proj.to_dict())
-                version = pj.save(proj)
+                proj, version, extra = pj.update(name, lambda proj: change(proj, created) or {})
             except BaseException:
                 for p in created:
                     p.unlink(missing_ok=True)

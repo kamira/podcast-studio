@@ -13,7 +13,7 @@
   NodeSpec                       kind、label、inputs、outputs、params、heavy、run;
                                  `output_ports(params)` 回傳該參數下實際產生的輸出埠(file-input 依 kind);
                                  `spec_dict()` 回傳可 JSON 序列化的宣告(不含 run)
-  REGISTRY: dict[str, NodeSpec]  十種節點
+  REGISTRY: dict[str, NodeSpec]  十一種節點(CHG-20261022-04 T8 新增「送到素材庫」send-to-library)
 
 約定:
   - 文字輸出是字串;圖片、音訊、影片輸出是 `taiwan_ai.OUT`(outputs/)下檔案的路徑字串。
@@ -24,11 +24,15 @@
 from __future__ import annotations
 
 import math
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 import media
+import names
+import project as pj
 import taiwan_ai as tai
 
 PORT_TYPES = frozenset({"text", "image", "audio", "video"})
@@ -279,6 +283,126 @@ def _make_video(inputs, params):
     return {"video": str(media.make_video(image, audio, script))}
 
 
+# ---------- 送到素材庫(CHG-20261022-04 T8) ----------
+#
+# 把接進來的文字、圖片、音訊登記成專案素材(`projects/<名稱>/assets/<新 id>.<副檔名>` + project.json 的
+# assets),供精靈與完整模式的素材庫使用。安全:
+#   - 專案名稱以 names.py 的中英日白名單檢查;專案必須已存在(不建立專案)。
+#   - 圖片與音訊只接受 outputs/ 之下的一般檔案:解析後必須在 outputs/ 內,以 O_NOFOLLOW 開啟,
+#     副檔名在專案素材白名單(project.ASSET_EXTS)內,單檔不超過 LIBRARY_MAX_BYTES。
+#   - 複製到 assets/ 一律排他建立新檔(不覆寫),專案只記素材 id、不記路徑;
+#     登記經 project.update() 在專案鎖內完成,驗證(素材數量與總量上限)失敗時刪除本次複製的檔案。
+
+LIBRARY_MAX_BYTES = 200 * 1024 * 1024   # 同 studio_server.MAX_UPLOAD
+LIBRARY_TEXT_LABEL = "文字(由流程送入)"
+COPY_CHUNK = 1 << 20
+
+
+def _library_source(value, kind: str) -> tuple[int, str, str]:
+    """把節點輸入的檔案路徑解析成 outputs/ 之下的一般檔案;回傳 (已開啟的 fd, 副檔名, 顯示名稱)。"""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("輸入的檔案路徑不正確")
+    base = tai.OUT.resolve()
+    p = Path(value)
+    try:
+        real = (p if p.is_absolute() else base / p).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError("找不到要送到素材庫的檔案") from None
+    if not real.is_relative_to(base) or real == base:
+        raise ValueError("只能把 outputs/ 之下的檔案送到素材庫")
+    ext = real.suffix.lower().lstrip(".")
+    if ext not in pj.ASSET_EXTS[kind]:
+        raise ValueError(f"副檔名 .{ext} 不能當成{'圖片' if kind == 'image' else '音訊'}素材")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(real, flags)
+    except OSError:
+        raise ValueError("無法讀取要送到素材庫的檔案") from None
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > LIBRARY_MAX_BYTES:
+        os.close(fd)
+        raise ValueError(f"只能送出 {LIBRARY_MAX_BYTES // 1024 ** 2} MB 以內的一般檔案")
+    label = "".join(c for c in real.name if ord(c) >= 32 and ord(c) != 127)[:pj.MAX_LABEL] or None
+    return fd, ext, label
+
+
+def _copy_into(assets: Path, ext: str, write) -> tuple[str, Path, int]:
+    """在 assets/ 排他建立 `<新 id>.<ext>` 並以 write(f) 寫入;回傳 (id, 路徑, 位元組數)。"""
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    for _ in range(8):
+        aid = pj.new_id()
+        dest = assets / f"{aid}.{ext}"
+        try:
+            fd = os.open(dest, flags, 0o644)
+            break
+        except FileExistsError:
+            continue
+    else:  # pragma: no cover - 隨機 id 連續撞名
+        raise ValueError("無法建立不重複的素材檔名")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            write(f)
+            size = f.tell()
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    return aid, dest, size
+
+
+def _send_to_library(inputs, params):
+    name = params["project"]
+    if names.normalize_name(name) is None:
+        raise ValueError("請輸入要送入的專案名稱(" + pj.NAME_HINT + ")")
+    text = inputs.get("text")
+    if text is not None and not isinstance(text, str):
+        raise ValueError("文字輸入不正確")
+    text = text if text and text.strip() else None
+    if text is not None and len(text) > MAX_TEXT:
+        raise ValueError(f"文字超過 {MAX_TEXT} 字")
+    files = [(kind, inputs.get(kind)) for kind in ("image", "audio") if inputs.get(kind)]
+    if text is None and not files:
+        raise ValueError("請至少接上一個要送到素材庫的輸入(文字、圖片或音訊)")
+    pj.load(name)   # 專案必須已存在(不存在丟 ProjectNotFound,為 ValueError)
+    opened = []
+    try:
+        for kind, value in files:
+            opened.append((kind, *_library_source(value, kind)))
+        created: list[Path] = []
+
+        def change(proj):
+            assets = pj.subdir(name, "assets", create=True)
+            added = []
+            for kind, fd, ext, label in opened:
+                def write(f, fd=fd):
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    while chunk := os.read(fd, COPY_CHUNK):
+                        f.write(chunk)
+                aid, dest, size = _copy_into(assets, ext, write)
+                created.append(dest)
+                added.append({"id": aid, "kind": kind, "ext": ext, "bytes": size,
+                              **({"label": label} if label else {})})
+            if text is not None:
+                aid, dest, size = _copy_into(assets, "txt", lambda f: f.write(text.encode("utf-8")))
+                created.append(dest)
+                added.append({"id": aid, "kind": "text", "ext": "txt", "bytes": size,
+                              "label": LIBRARY_TEXT_LABEL})
+            proj.assets = [*proj.assets, *added]
+            return added
+
+        try:
+            _, _, added = pj.update(name, change)
+        except BaseException:
+            for p in created:
+                p.unlink(missing_ok=True)
+            raise
+    finally:
+        for _, fd, _, _ in opened:
+            os.close(fd)
+    kinds = "、".join(dict.fromkeys({"image": "圖片", "audio": "音訊", "text": "文字"}[a["kind"]] for a in added))
+    return {"text": f"已把 {len(added)} 個素材({kinds})送到專案「{name}」的素材庫"}
+
+
 # ---------- 登錄表 ----------
 
 def _p_text(label, max_len=MAX_TEXT, default=""):
@@ -322,6 +446,13 @@ _SPECS = [
               "script": Port("text", required=False, label="字幕文案")},
              {"video": Port("video", label="影片")},
              {"subtitles": Param("bool", "加入字幕", default=True)}, True, _make_video),
+    NodeSpec("send-to-library", "送到素材庫",
+             {"text": Port("text", required=False, label="文字"),
+              "image": Port("image", required=False, label="圖片"),
+              "audio": Port("audio", required=False, label="音訊")},
+             {"text": Port("text", label="結果")},
+             {"project": Param("str", "專案名稱", default="", max_len=names.MAX_NAME)},
+             False, _send_to_library),
 ]
 
 REGISTRY: dict[str, NodeSpec] = {s.kind: s for s in _SPECS}
