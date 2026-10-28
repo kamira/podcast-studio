@@ -6,6 +6,8 @@
 > 2026-10-28 依 CHG-20261028-01 結構文件更新:設計決策表新增「Codex 席以 PR head 唯讀檢視讀完整程式」。
 > 2026-10-28 依 CHG-20261028-02 結構文件更新:設計決策表新增「審議席改為意見、單一統整席判定」;「本機審議閘」列改記 gate 驗判定留言。
 
+> 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 T1~T9 與修正為準):新增專案 API 契約、`breezy_worker` 介面(jobs 格式、stdout 進度行、G2PW `num_workers = 0`、環境由 `tts_service` 傳入 `taiwan_ai.BREEZY_ENV`)、合成快取鍵、`project` / `timeline` / `tts_service` / `names` 元件、`media.render_timeline` 與 `media.sniff_binary`;設計決策表加入本筆決策(含修訂 2 合成粒度與實測依據);畫布存檔改為保留 `steps`。
+
 ## 關鍵元件
 
 | 元件 | 責任 | 對外介面/契約 | 等級 |
@@ -26,10 +28,18 @@
 | `media.make_video(image, audio, script="")` | ffmpeg:loop 圖 + 音訊(+ mov_text 字幕),`-r 10 -tune stillimage`,`-shortest`;以檔頭前 12 位元組判斷音檔為 RIFF/WAVE(不看副檔名)時,在輸出檔名前加 `-t <wav_seconds(),小數 3 位>`,影片軌與音軌長度差 ≤ 0.1 秒 | `outputs/podcast-<stamp>.mp4`(+ 同名 `.srt`) | 〔觀察〕CHG-20261026-01 T5;非 WAV 不加 `-t`(片尾可能多出靜止畫面),帶字幕時讀不到長度而失敗(ADP-7) |
 | `heavy_lock.heavy_lock(timeout=None, on_wait=None)` | 跨行程排他鎖 `outputs/.heavy.lock`(`fcntl.flock(LOCK_EX)`);被占用時呼叫一次 `on_wait()` 再每 0.05 秒重試 | context manager;`timeout` 秒數逾時丟 `TimeoutError`;`outputs/` 或鎖檔是符號連結丟 `OSError`;鎖檔不讀不寫不刪 | 〔觀察〕ADP-2 的處理(T4) |
 | `local_models_mcp.busy()` | 重讀設定 → `heavy_lock(on_wait=…)` → `redirect_stdout(stderr)` | context manager;等待時寫 stderr | 〔觀察〕 |
+| `safe_fs`(`open_dir` / `open_child` / `open_file` / `open_path` / `open_or_create` / `create_excl` / `lstat` / `entries` / `unlink` / `rmtree` / `rename` / `replace` / `link` / `closing`) | 自受信根目錄(呼叫端給的固定目錄,例 `project.ROOT`、`outputs/`、`static/`)以 `dir_fd` 逐層 `O_NOFOLLOW` 開啟;名稱一律單一路徑元件(空、`.`、`..`、含 `/` 或 NUL 丟 `ValueError`);任一層是符號連結或不是預期種類丟 `UnsafePathError`(`OSError` 子類別),不存在丟 `FileNotFoundError`;`rmtree` 以 fd 遞迴,遇符號連結只 unlink 連結本身;`open_or_create` 以「先開、不存在再 `O_EXCL` 建立」迴圈取代 `O_CREAT`(macOS 上多行程 `openat(O_CREAT \| O_NOFOLLOW)` 實測偶發 ENOENT) | 回傳 fd(呼叫端關閉);訊息不含本機路徑 | 〔觀察〕CHG-20261022-04 DIR-5 修正 4 |
 | `settings`(`load` / `save` / `validate` / `load_meta` / `voice_options`) | 模型設定的唯一存取點,儲存層為 SQLite `config/studio.db` | 見下方「設定模組介面」 | 〔觀察〕 |
 | `nodes.REGISTRY` | 十種節點的宣告與 `run()`,包住 `taiwan_ai` / `media` | 見下方「節點登錄表」 | 〔觀察〕 |
 | `executor.validate(graph)` / `run(graph, emit, cancel=None)` | 驗證流程圖;依拓撲順序在呼叫端執行緒執行並以 `emit(dict)` 推送事件 | 見下方「流程圖格式與執行事件」 | 〔觀察〕 |
-| `studio_server.create_app(...)` / `main()` | FastAPI app;`main()` 以 uvicorn 綁 `127.0.0.1:7860` | 見下方「HTTP API」 | 〔觀察〕 |
+| `studio_server.create_app(...)` / `main()` | FastAPI app;`main()` 以 uvicorn 綁 `127.0.0.1:7860`,啟動時呼叫 `project.startup_cleanup()` | 見下方「HTTP API」「專案 API」 | 〔觀察〕 |
+| `names`(`name_char_ok`、`normalize_name`、`fold_name`) | 工作流程名稱與專案名稱共用的中英日白名單(1~64 字、逐字比對,不做正規化);只差大小寫的比對鍵 | 不合格回錯誤;規則單一來源 | 〔觀察〕CHG-20261022-04 T2 |
+| `project`(`Project`、`validate`、`split_segments`、`tts_text`、`load` / `save` / `update` / `restore` / `trash`、`startup_cleanup`、`subdir`) | 專案資料模型與存取:分句(句尾標點、換行、強制停頓)、停頓與語速正規化、標註驗證與 `字[:注音]` 產生、原子寫入 + history 10 版、`.trash/` 30 天、專案層級鎖 | 不合法丟 `ProjectError`(繁中 `.errors`);`ProjectNotFound`(404)、`ProjectExists`(409);見 `data.md`「專案資料」 | 〔觀察〕CHG-20261022-04 T2、T6、T8 |
+| `timeline.layout(project)` | 純函式:片段起訖(變速後長度 + 停頓)、字幕 cue(超過 24 字切段)、畫面軌起訖、總長(不含片尾停頓) | `{segments:[{id,start,end}], cues:[{segment,start,end,text}], images:[{id,file,start,end}], duration}`;沒有音檔的片段長度 0、不丟錯 | 〔觀察〕CHG-20261022-04 T4;預覽與匯出共用 |
+| `tts_service`(`load_voice`、`cache_key`、`dirty_segments`、`synth`、`apply_speed`) | 只合成髒片段、內容雜湊快取、逐句 emit、語速後製(ffmpeg `atempo`,單一濾鏡) | `synth(project, emit)` 就地更新片段 `audio`、不存檔,回 `{"synthesized", "cached"}`;每句 emit `{"type": "segment", "id", "seconds", "cached", "audio"}`;`apply_speed(segment, project)` 回變速後音檔路徑;失敗丟 `SynthError`(繁中、不含路徑) | 〔觀察〕CHG-20261022-04 T3;`audio` 欄位為 DIR-5 修正 M-1 |
+| `breezy_worker.py` | 在 BreezyVoice venv 執行的子程序:`synth`(逐句合成、模型載入一次)、`annotate`(逐字注音) | 見下方「BreezyVoice worker 介面」 | 〔觀察〕CHG-20261022-04 T1 |
+| `media.render_timeline(project, layout)` | 依 layout 匯出 MP4 + SRT;片段音檔經 `tts_service.apply_speed` 取變速後檔案、以 `O_NOFOLLOW` 開啟經 stdin 交給 ffmpeg 解碼(以 `-t` 截在片段需要的長度);畫面以 concat demuxer 依 0.1 秒格排程 | `(mp4, srt)`;輸出以 `taiwan_ai.reserve()` 佔位;未合成或路徑不安全丟 `RenderError`(`.segments` 列出片段);逾時 max(600, 音訊秒數 × 2) 秒 | 〔觀察〕CHG-20261022-04 T5;`-t` 解碼截止為 DIR-5 修正 M-3 |
+| `media.sniff_binary(ext, head)` | 依檔頭位元組判斷內容與副檔名是否相符(png、jpg、webp、wav、mp3、m4a) | `/api/upload` 與「送到素材庫」節點共用,規則單一來源 | 〔觀察〕DIR-5 修正 M-5(由 `studio_server._sniff_binary` 搬出,規則不變) |
 
 〔觀察〕設定中的 `roles.image`(`model`、`steps`)與 `roles.voice`(`wav`、`text`)由 `media.generate_image()`、`taiwan_ai.speak()` 在每次呼叫時經 `taiwan_ai.role_config()` → `settings.load()` 讀取(CHG-20261026-01 T1、T2);網頁節點與 MCP 工具共用這兩個函式,MCP 不需另改即跟上。`--base-model` 仍固定 `schnell`,設定頁沒有對應欄位〔觀察〕;換成 dev 系模型時以錯誤基底執行(CHG-20261026-01 代決 3)。
 
@@ -144,7 +154,7 @@ classDiagram
 - 流程圖:`{"nodes": [{"id": 字串, "kind", "params", "pinned"?, "outputs"?, "pos"?}], "edges": [{"from": {"node", "port"}, "to": {"node", "port"}}]}`;`executor.validate` 只讀 `nodes`、`edges`,其他頂層鍵(例如 `workflows/default.json` 的 `steps`)與節點的 `pos` 不影響驗證。
 - 驗證錯誤 `Error(node_id, port, message)`:未知種類、未宣告的參數、參數不合格(`Param.check`)、型別不符、有環、必填未接、格式錯誤、節點數超過 100;釘住的節點只能是「全部輸出埠為 text」且每個輸出都有字串編輯值(≤ 20000 字)。
 - 事件:`started`(拓撲順序)→ 每個節點 `running` / `waiting` / `done`(outputs)/ `error` / `skipped`(`pinned` 或 `upstream`)/ `cancelled` → `finished`(`ok` / `error` / `cancelled`)。
-- `workflows/default.json` 另有頂層 `steps`:`[{"id", "label", "nodes": [節點 id…], "note"?}]`,定義步驟精靈預設步驟 ① 文稿 ② 語音 ③ 封面 ④ 剪輯 ⑤ 匯出(④ 沒有節點,屬 CHG-20261022-04);前端畫布存檔(`buildGraph()`)目前不保留 `steps`。
+- `workflows/default.json` 另有頂層 `steps`:`[{"id", "label", "nodes": [節點 id…], "note"?}]`,定義步驟精靈預設步驟 ① 文稿 ② 語音 ③ 封面 ④ 剪輯 ⑤ 匯出(④ 沒有節點,屬 CHG-20261022-04);精靈只讀 `GET /api/workflows/default` 的 `steps`(不新增清單端點,修訂 3 R3-1);前端畫布存檔(`buildGraph()`)保留載入時的 `steps`,移除已不在畫布上的節點 id,原本有節點、移除後變空的步驟刪除,原本就沒有節點的步驟保留(修訂 3 R3-2)。
 
 ### 節點登錄表(〔觀察〕`nodes.py`)
 
@@ -160,7 +170,9 @@ classDiagram
 | `generate-image` | `prompt: text` | `image` | `width`、`height`(256–2048,16 倍數;預設 1360×768) | 是 |
 | `add-title` | `image: image`、`title: text` | `image` | — | 否 |
 | `make-video` | `image: image`、`audio: audio`、`script: text`(選填) | `video` | `subtitles`(預設 true) | 是 |
+| `send-to-library` | `text`、`image`、`audio`(皆選填,至少一個) | `text`(結果訊息) | `project`(專案名稱,`names.py` 白名單;專案須已存在) | 否 |
 
+- 〔觀察〕`send-to-library`(CHG-20261022-04 T8):文字存成 `.txt`;圖片與音訊只收 `outputs/` 之下的一般檔案——檔案本身與其在 `outputs/` 之下的每一層目錄都不得是符號連結(解析前逐層 `lstat`,DIR-5 修正 M-4)、解析後在 `outputs/` 內、`O_NOFOLLOW` 開啟、副檔名在 `project.ASSET_EXTS`、≤ 200 MB、檔頭經 `media.sniff_binary` 與副檔名相符(DIR-5 修正 M-5);複製到 `assets/<新 id>` 後經 `project.update()` 登記,失敗刪除複製檔。
 - 〔觀察〕埠型別只有 `text`、`image`、`audio`、`video`;文字輸出是字串,其餘是 `outputs/` 下的檔案路徑。節點本身不取重型鎖,由 `executor` 對 `heavy=True` 的節點包 `heavy_lock()`。
 - 〔觀察〕`write-script` 只做推理模型起稿(字數 = 分鐘 × 250),台灣用語潤飾拆成 `taiwanize` 節點(舊版 `write_script` 一次做完)。
 
@@ -196,6 +208,40 @@ classDiagram
 - mflux:`--model <roles.image.model> --base-model schnell --steps <roles.image.steps> --width --height --prompt --output`;環境變數為目前環境加 `HF_HUB_OFFLINE=1`(CHG-20261026-01 T2)
 - ffmpeg(imageio-ffmpeg 內附):`-y -loop 1 -i <圖> -i <音>`(+ `-i <srt> -map 0:v -map 1:a -map 2:s -c:s mov_text -metadata:s:s:0 language=chi`)`-vf scale…,pad… -c:v libx264 -tune stillimage -r 10 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest`(WAV 時再加 `-t <秒數>`)`<輸出>`(CHG-20261026-01 T5)
 - BreezyVoice:`single_inference.py --content_to_synthesize --speaker_prompt_audio_path <roles.voice.wav 絕對路徑> --speaker_prompt_text_transcription <roles.voice.text> --output_path`,cwd = `tools/BreezyVoice`;環境變數只有 `PYTHONUTF8`、`PATH`、`HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`(ADP-12)
+- BreezyVoice worker(CHG-20261022-04):`tools/BreezyVoice/.venv/bin/python breezy_worker.py synth --jobs <json> --out <dir>` 或 `annotate --input <json>`,argv list、cwd = `tools/BreezyVoice`、`env = taiwan_ai.BREEZY_ENV`(見下節)
+
+### 專案 API(〔觀察〕`studio_server.py` 檔頭;CHG-20261022-04 T6)
+
+沿用同一個安全中介層(Host / Origin / Token);{p} 為專案名稱(`names.py` 白名單,含 `.`、`..`、`%2e%2e`、`/` 一律 400)。本文一律 JSON 物件(上限 `MAX_PROJECT_BODY`,不認得的欄位 422)。錯誤 `{"error", "errors"?, "segments"?}`,經 `scrub()`、不含本機絕對路徑。修改類端點一律「載入 → 修改 → 存檔(舊版移入 history)」並回「專案檢視」View = `{"project", "layout", "forced_breaks"}` + `"version"`。
+
+| 方法與路徑 | 輸入 | 成功 | 錯誤 |
+|------------|------|------|------|
+| `GET /api/projects` | — | `{"projects": [{"name", "updated"}]}` | — |
+| `POST /api/projects` | `{"name", "script"?}` | 201 View;語速與停頓預設取自設定資料庫 `voice_defaults` | 400 名稱;409 已存在;422 |
+| `GET /api/projects/{p}` | — | View(合成期間疊上本次已完成的句子,不存檔,DIR-5 修正 M-1) | 404 |
+| `PUT /api/projects/{p}` | `{"script"?, "forced_breaks"?, "defaults"?}` | View;帶 script 或 forced_breaks 時重新分句,文字相同的片段沿用 id、停頓、語速、標註與音檔 | 422 |
+| `DELETE /api/projects/{p}` | `{"confirm": true}` | 移到 `.trash/<名稱>-<時間戳>-<4 碼>/` | 400 未確認;409 合成或匯出中 |
+| `GET /api/projects/{p}/history` / `POST …/restore` | `{"version"}` | 版本清單 / View(還原 = 一次存檔) | 404 |
+| `PATCH /api/projects/{p}/segments/{id}` | `{"text"?, "pause_after"?, "speed"?, "annotations"?, "split_at"?, "merge_next"?, "audio_file"?, "audio"?}` | View;改文字或標註時清除自錄音檔;`audio_file` 以上傳的 WAV 取代該句(只看前 12 位元組 RIFF/WAVE,長度以 `media.wav_seconds()` 取得) | 404;422(注音、停頓、語速、非 WAV「取代語音只接受 WAV 音檔」) |
+| `POST /api/projects/{p}/assets` | `{"file_id", "label"?}` | View + `{"asset"}`(素材庫匯入;CHG 修訂 4 補記) | 404;422 |
+| `POST /api/projects/{p}/images` | `{"asset"}` 或 `{"file_id"}`,`start`?、`end`? | View + `{"image"}` | 404;422 |
+| `PATCH` / `DELETE /api/projects/{p}/images/{id}` | `{"start"?, "end"?}` / — | View;刪除只移除時間軸項目,不刪素材檔(CHG 修訂 4 補記) | 404;422 |
+| `GET /api/projects/{p}/media/{id}` | — | 只依 id 解析到該專案 `assets/<id>.<ext>` 或 `audio/<id>.wav`(含合成中途已完成、尚未寫回的音檔);白名單副檔名、`nosniff`;送合成原檔(變速前),預覽以 `playbackRate` 套語速 | 404:不存在、他專案、符號連結 |
+| `POST /api/projects/{p}/synth` | — | `{"run_id", "events"}`;SSE 事件 waiting、segment(`id`、`seconds`、`cached`、`audio`)、error、finished(`status`、`synthesized`、`cached`、`saved`);結束(含中途失敗)時一次寫回,只更新同 id、合成文字未變、期間沒改成自錄音檔的片段 | 404;409 已有工作 |
+| `POST /api/projects/{p}/render` | — | `{"run_id", "events"}`;finished 帶 `mp4`、`srt`(`outputs/…`) | 400 未合成或過期片段(`segments` 列出);409 |
+| `POST /api/annotate` | `{"text": 1~500 字}` | `{"text", "zhuyin": [每字注音或 null]}`;`heavy_lock` 內執行,逾時 60 秒 | 422;500 worker 失敗;409 |
+
+- 〔觀察〕synth、render、annotate 與 `/api/run` 共用同一個「執行中」旗標(`Runs.active`),第二個一律 409;`projects/` 不經 `/files/*` 提供。
+- 〔觀察〕合成中途可試聽(DIR-5 修正 M-1):伺服器在該次合成期間以記憶體記錄「已完成、尚未寫回」的片段音檔(`{片段 id: (合成當時的含標註文字, audio)}`),疊到 View、layout 與 media 端點上;前端收到 segment 事件即重新讀取 View。結束時一次 `merge_audio()` 寫回後清除記錄,一次合成最多新增一個 history 版本。
+
+### BreezyVoice worker 介面(〔觀察〕`breezy_worker.py`、`tts_service.py`;CHG-20261022-04 T1、T3)
+
+- `synth --jobs <json> --out <dir>`:jobs 檔 = `{"prompt_wav": 聲線檔絕對路徑, "prompt_text": 聲線逐字稿(必填,不走 Whisper 後備), "model"?: 預設 MediaTek-Research/BreezyVoice-300M, "jobs": [{"id": ^[0-9a-f]{8,32}$, "text": 1–500 字}]}`;jobs 檔由 `tts_service` 寫在 `projects/<名稱>/tmp/`(`O_EXCL`、`O_NOFOLLOW`、0600),用完即刪,使用者文字不進 argv。
+- `CustomCosyVoice` 只建構一次;`G2PWConverter` 建立後把 `num_workers` 屬性設為 0(建構子把 0 當假值忽略);每句各自呼叫 `single_inference`,寫完 `<out>/<id>.wav` 即在 stdout 印一行 `{"id", "seconds"}`;全部完成後寫 `<out>/result.json`。標註以聲調符號書寫,送進 BreezyVoice 前轉成數字聲調。
+- `annotate --input <json>`:`{"text": 1–500 字}` → stdout 一個 JSON 陣列(每字聲調符號格式注音,非中文字 null);只用 G2PW。
+- 環境由 `tts_service` 直接傳入 `taiwan_ai.BREEZY_ENV`(含 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`,修訂 3 R3-3,ADP-12);模型快取缺失時離線失敗(結束碼 3,訊息提示需在建置期允許連網時先下載一次),不下載。結束碼:2 輸入不合法、3 模型載入失敗、4 合成失敗;錯誤訊息繁中、不含本機絕對路徑。
+- 逾時(`tts_service`):第一個進度行最多等 `MODEL_LOAD_TIMEOUT`(180 秒,含模型載入)+ `SENTENCE_TIMEOUT`(120 秒),之後每句 120 秒;整批上限 = 180 + 句數 × 120 秒;逾時即終止子程序(CHG 修訂 4,RS-7)。
+- 合成快取鍵 = SHA-256(JSON 陣列 [含標註的合成文字, 聲線檔 SHA-256, 聲線逐字稿 SHA-256, 模型名]);合成音檔以鍵前 32 碼內容定址存於 `audio/`,命中即重用;變速結果以「音檔 id + 語速」另存 `audio/<id>-s<語速×100>.wav`。聲線每次 `synth()` 經 `taiwan_ai.role_config("voice")` 讀一次。
 
 ## 設計決策與取捨
 
@@ -255,6 +301,19 @@ classDiagram
 | WAV 長度自寫 RIFF/WAVE 解析 | 自寫 `struct` 解析 vs imageio-ffmpeg | imageio-ffmpeg 只附 `ffmpeg`、沒有 `ffprobe`,改用要另開子程序解析文字;自寫不加依賴、精度為取樣等級 | 〔觀察〕CHG-20261026-01 代決 10 |
 | WAV 加 `-t <秒數>` 並保留 `-shortest`;非 WAV 沿用 | `-shortest` vs `-t` vs `-shortest -t` vs `+shortest` 旗標 | 實測 `-loop 1` + `-shortest` 對 17 秒的聲音產出約 50 秒的影片;`-t` 才能截止 | 〔觀察〕CHG-20261026-01 代決 11、12 |
 | 壞檔丟繁中 `ValueError`、訊息不含路徑 | 沿用 `wave.Error` vs 自訂 | 節點與 MCP 會把錯誤訊息顯示給使用者 | 〔觀察〕CHG-20261026-01 代決 13 |
+| 合成粒度 B2:逐句輸出、模型載入一次、G2PW `num_workers = 0` | A 整段 vs B 逐句 vs B2 vs C 每句新行程 | 2026-10-26 實測(10 句、267 字,CPU):B2 總耗時 610.3 秒(A 655.9 / 662.0 秒)、第一段可播放 92.8 秒(A 要等全部完成)、峰值 RSS 12.13 GiB(A 10.78 GiB);B 變慢的原因是 G2PW 每次呼叫以 DataLoader 產生子行程;整段合成本來就逐句推論後串接,逐句輸出不損失跨句韻律 | 〔觀察〕CHG-20261022-04 修訂 2 |
+| 停頓以分句合成 + 精確靜音 | 文字插入標點 vs 分句合成插靜音 | 模型沒有停頓指令;靜音長度精確到 0.1 秒;逗號不切,要加長時設強制停頓 | 〔觀察〕CHG-20261022-04 |
+| 片段快取以內容雜湊、音檔內容定址 | 每次全部重合成 vs 快取 | 使用者會反覆改少數幾句;鍵含聲線逐字稿,只改逐字稿也會重合成(修訂 3 R3-4) | 〔觀察〕CHG-20261022-04 |
+| 語速以 ffmpeg `atempo` 後製 | 模型參數 vs 後製 | BreezyVoice 沒有語速參數;只改語速不重新合成,變速結果另行快取 | 〔觀察〕CHG-20261022-04 修訂 1 |
+| 專案檔 JSON + history 10 版 | JSON vs SQLite | 單人、可人工檢視;拖拉編輯容易誤改,保留最近 10 版 | 〔觀察〕CHG-20261022-04 |
+| 預覽在瀏覽器排程播放,匯出才用 ffmpeg | 先渲染 vs 即時播放 | 片段都是獨立 WAV;預覽與匯出共用 `timeline.layout()` | 〔觀察〕CHG-20261022-04 |
+| 時間軸前端自寫 | 第三方套件 vs 自寫 | 免建置、離線;只需三軌、拖拉空隙與圖片 | 〔觀察〕CHG-20261022-04(代決) |
+| 語音預設存設定資料庫 `voice_defaults` 表(schema 2) | 另建設定檔 vs 設定資料庫 | 設定只經 `settings.py`;升級在單一交易內,失敗維持 v1 | 〔觀察〕CHG-20261022-04 修訂 2 |
+| 自錄音檔只收 RIFF/WAVE | 全部上傳音檔 vs 只收 WAV vs 轉檔 | `media.wav_seconds()` 只讀得到 WAV 長度;不新增轉檔子程序路徑 | 〔觀察〕CHG-20261022-04 修訂 3 R3-6 |
+| 合成中途以記憶體疊加試聽,結束一次寫回 | 每句存檔 vs 記憶體疊加 | 不新增端點;每句存檔會讓 history 10 版被合成中間狀態洗掉 | 〔觀察〕DIR-5 修正 M-1(使用者故事 13) |
+| 停頓空隙的點擊範圍以交界為中心至少 12px、層級高於選取片段 | 依停頓寬度 vs 最小點擊範圍 | 停頓可設 0 秒(使用者 2026-10-27),逗號強制停頓預設 0 秒,0 秒空隙是常態 | 〔觀察〕DIR-5 修正 M-2 |
+| 第一句另給 180 秒模型載入額度 | 每句 120 秒含載入 vs 另給載入額度 | 改聲調後只重合成一句是主要路徑,實測載入約 70–93 秒,原規定餘裕約 27 秒 | 〔觀察〕CHG-20261022-04 修訂 4(使用者 2026-10-28 核准,RS-7) |
+| 專案名稱沿用中英日白名單 | ASCII `^[\w\-]{1,64}$` vs 中英日白名單 | 驗收要建立「夜市的味道」;與工作流程名稱同一套規則(使用者 2026-10-26「中英日即可」) | 〔觀察〕CHG-20261022-04 修訂 4(RS-3) |
 
 ## 採用模式
 
@@ -262,5 +321,6 @@ classDiagram
 - 〔觀察〕**共用模組以 `sys.path.insert` + import 重用**(`taiwan_ai` 只是函式庫,CLI 已於 CHG-20261022-01 T2 移除)。
 - 〔觀察〕**節點包裝**:`nodes.py` 以 `NodeSpec` 包住既有 `taiwan_ai` / `media` 函式,不改其行為;新功能以新節點種類加入登錄表。
 - 〔觀察〕**單一存取點**:模型設定只經 `settings.py`;輸出檔名只經 `taiwan_ai.reserve()`;重型工作只在 `heavy_lock()` 內。
+- 〔觀察〕**檔案存取經目錄 fd**(CHG-20261022-04 DIR-5 修正 4):本程式自己對專案資料、`outputs/`、`static/`、`workflows/`、`config/` 的讀寫刪搬一律經 `safe_fs`(dir_fd 逐層 `O_NOFOLLOW`),回應與複製讀同一個 fd;`project.subdir()` 回傳的路徑只交給外部程式(worker、ffmpeg)。外部程式只能以路徑存取的位置(BreezyVoice worker 的 `--out`、mflux 輸出、匯出時 ffmpeg 的暫存與輸出、SQLite 資料庫)列為殘餘風險,見 CHG-20261022-04 修訂 4 補記 20。outputs/ 佔位檔以 `media.open_reserved()` / `save_image()` 經目錄 fd 寫入,匯出與生圖的暫存目錄以 `media._mkdtemp_out()` 建立並保留 fd(修正 5,補記 22)。
 - 〔觀察〕**外部引擎一律子程序或 HTTP**,不在行程內載入模型——讓記憶體可由卸載控制。
 - 〔觀察〕~~**重複**:mflux 指令在 `taiwan_ai.image()` 與 `media.generate_image()` 各一份~~——`taiwan_ai.image()` 隨 CLI 移除(CHG-20261022-01 T2),只剩 `media.generate_image()`。

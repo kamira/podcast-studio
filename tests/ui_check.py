@@ -12,11 +12,23 @@
 #   "pillow<13",
 # ]
 # ///
-"""UI 互動檢查(CHG-20261022-01 T14):以無頭 Chromium 實際操作網頁。
+"""UI 互動檢查(CHG-20261022-01 T14;CHG-20261022-04 T9 擴充):以無頭 Chromium 實際操作網頁。
 
 用法:`uv run --script tests/ui_check.py`(需先依 P2 安裝 Chromium:
 `uv run --with playwright==1.64.1 playwright install chromium`)。
 本檔不叫 test_*.py,pytest 與 `scripts/check.sh` 不會收集它。
+
+兩組檢查,各自用一個暫存目錄與一個伺服器:
+- `canvas`(CHG-20261022-01):節點畫布、檔案拖放、設定頁;截圖 canvas.png、dnd.png、settings.png。
+- `editor`(CHG-20261022-04 T9):首頁雙卡片、精靈 ①~⑤、完整模式、剪輯互動、免責頁、
+  畫布刪除封面步驟後的精靈步驟;截圖 home.png、wizard.png、full.png、editor.png、tone.png、disclaimer.png。
+不帶參數兩組都跑(先 canvas 再 editor);`--only editor` 只跑 editor。
+
+editor 的替身:語音合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身腳本
+(每句寫一個真的 16 kHz 正弦波 WAV,預覽可實際播放);聲線設定以替身 `taiwan_ai.role_config` 提供;
+匯出(render)與注音(annotate)以 `create_app(render=…, annotate=…)` 換成替身。
+`project.ROOT`、`taiwan_ai.ROOT` / `OUT`、`heavy_lock.ROOT` / `LOCK_PATH`、`tts_service.BREEZY`
+都指到暫存目錄,結束時還原;repo 的 `projects/` 不會被碰。
 
 做法:
 - 伺服器在本行程內以 `studio_server.create_app()` 建立,uvicorn 綁 127.0.0.1 的隨機空閒埠,
@@ -36,7 +48,9 @@ CSP 違規,有任何一筆也算失敗。
 """
 from __future__ import annotations
 
+import argparse
 import json
+import math
 import re
 import shutil
 import socket
@@ -399,50 +413,671 @@ def run_checks(page, base: str, root: Path, runner: StubRunner, settings) -> Non
         raise StepFailed(f"步驟「{step['name']}」:{type(e).__name__}:{str(e).splitlines()[0] if str(e) else ''}") from None
 
 
-def main() -> int:
+# ---------- editor(CHG-20261022-04 T9)----------
+
+PROJECT_NAME = "夜市的味道"
+SCRIPT = "大家好，歡迎收聽。今天來聊台灣夜市。這家攤販已經開了四十年，味道真好。"
+SCRIPT_EDITED = SCRIPT.replace("四十年", "五十年")
+SYNTH_SECONDS = 1.6          # 替身 worker 每句的長度
+OWN_WAV_SECONDS = 1.2        # 自錄音檔長度
+VOICE_TEXT = "這是聲線逐字稿(UI 檢查替身)。"
+EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "disclaimer.png")
+CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png")
+STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ"}
+
+# 替身 worker:參數格式同 breezy_worker.py synth;每句寫一個真的 16 kHz 正弦波 WAV,
+# stdout 逐句印 {"id", "seconds"};呼叫紀錄寫到同目錄的 calls.log(一行一次呼叫)。
+# 同目錄有 delay.txt 時,第 2 句起每句先等該秒數(合成中途試聽情境,DIR-5 統整 M-1)。
+FAKE_WORKER = """# -*- coding: utf-8 -*-
+import json, math, os, struct, sys, time
+HERE = os.path.dirname(os.path.abspath(__file__))
+SECONDS = %r
+args = sys.argv[1:]
+jobs_path, out = args[args.index("--jobs") + 1], args[args.index("--out") + 1]
+with open(jobs_path, encoding="utf-8") as f:
+    body = json.load(f)
+with open(os.path.join(HERE, "calls.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"jobs": body["jobs"]}, ensure_ascii=False) + "\\n")
+rate = 16000
+n = int(SECONDS * rate)
+pcm = b"".join(struct.pack("<h", int(6000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(n))
+delay = 0.0
+if os.path.exists(os.path.join(HERE, "delay.txt")):
+    with open(os.path.join(HERE, "delay.txt"), encoding="utf-8") as f:
+        delay = float(f.read().strip() or 0)
+for n, job in enumerate(body["jobs"]):
+    if n:
+        time.sleep(delay)
+    head = (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE" + b"fmt " + struct.pack("<I", 16)
+            + struct.pack("<HHIIHH", 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(pcm)))
+    with open(os.path.join(out, job["id"] + ".wav"), "wb") as w:
+        w.write(head + pcm)
+    sys.stdout.write(json.dumps({"id": job["id"], "seconds": SECONDS}) + "\\n")
+    sys.stdout.flush()
+""" % SYNTH_SECONDS
+
+
+def sine_wav(seconds: float, rate: int = 22050, freq: float = 330.0) -> bytes:
+    """真正的 RIFF/WAVE(PCM 16-bit 單聲道);自錄音檔替身用。"""
+    n = int(seconds * rate)
+    pcm = b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * freq * i / rate))) for i in range(n))
+    fmt = struct.pack("<HHIIHH", 1, 1, rate, rate * 2, 2, 16)
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE" + b"fmt " + struct.pack("<I", 16) + fmt
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+def color_png(rgb: tuple, size=(640, 360)) -> bytes:
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, rgb).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class EditorStubs:
+    """editor 組的替身與呼叫紀錄。"""
+
+    def __init__(self, tmp: Path):
+        self.fake = tmp / "fake"
+        self.breezy = tmp / "breezy"
+        self.fake.mkdir(parents=True, exist_ok=True)
+        self.breezy.mkdir(parents=True, exist_ok=True)
+        (self.fake / "worker.py").write_text(FAKE_WORKER, encoding="utf-8")
+        self.render_calls: list[list[str]] = []
+        self.annotate_calls: list[str] = []
+        self.out: Path | None = None
+
+    def worker_argv(self, jobs_path, out_dir):
+        return [sys.executable, str(self.fake / "worker.py"), "synth", "--jobs", str(jobs_path), "--out", str(out_dir)]
+
+    def set_delay(self, seconds: float) -> None:
+        (self.fake / "delay.txt").write_text(str(seconds), encoding="utf-8")
+
+    def worker_calls(self) -> list[list[dict]]:
+        p = self.fake / "calls.log"
+        if not p.exists():
+            return []
+        return [json.loads(x)["jobs"] for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def render(self, proj):
+        self.render_calls.append([s["id"] for s in proj.segments])
+        n = len(self.render_calls)
+        self.out.mkdir(parents=True, exist_ok=True)
+        mp4, srt = self.out / f"podcast-ui-check-{n}.mp4", self.out / f"podcast-ui-check-{n}.srt"
+        mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nUI 檢查\n", encoding="utf-8")
+        return mp4, srt
+
+    def annotate(self, text):
+        self.annotate_calls.append(text)
+        return [STUB_ZHUYIN.get(c, "ㄅㄚ") if "一" <= c <= "鿿" else None for c in text]
+
+
+JS_FIND_TITLE_NODE = """() => {
+  // 「文字」節點中,輸出接到「封面 prompt」的那一個(預設流程的 title)
+  const nodes = Array.from(document.querySelectorAll('#drawflow .drawflow-node'));
+  const idOf = n => n.id.replace(/^node-/, '');
+  const label = n => { const t = n.querySelector('.node-title'); return t ? t.textContent : ''; };
+  const cp = nodes.filter(n => label(n) === '封面 prompt').map(idOf);
+  return nodes.filter(n => label(n) === '文字').map(idOf).filter(id =>
+    cp.some(c => document.querySelector('#drawflow svg.connection.node_out_node-' + id + '.node_in_node-' + c)));
+}"""
+
+
+# DIR-6 修正 2:延遲回應期間切換專案(mutate、AI 封面、AI 寫稿)。在頁面內以替身延遲 / 取代
+# Studio.api 與 Studio.Flows.runStep,回傳各情境的觀察結果。
+JS_STALE_SWITCH = """
+async ([a, b]) => {
+  const S = window.Studio, Store = S.Store, out = {};
+  const realApi = S.api, realRun = S.Flows.runStep;
+  const made = await realApi("POST", "/api/projects", { name: b, script: "切換測試的第一句。" });
+  out.created = made.ok;
+  try {
+    // (1) mutate:A 的 PATCH 回應延遲到切換成 B 之後才回來
+    await Store.open(a);
+    const sid = Store.view.project.segments[0].id;
+    let release;
+    const gate = new Promise(function (r) { release = r; });
+    S.api = async function (method, url, body) {
+      if (method === "PATCH") await gate;
+      return realApi(method, url, body);
+    };
+    const pending = Store.patchSegment(sid, { pause_after: 2.0 });
+    await Store.open(b);
+    release();
+    const r = await pending;
+    S.api = realApi;
+    out.mutate = { stale: r.stale === true, ok: r.ok, name: Store.name,
+                   viewName: Store.view && Store.view.project.name };
+    // (2) AI 封面:產生期間切換專案,完成時不匯入
+    await Store.open(a);
+    const imagesA = Store.view.project.images.length;
+    S.Flows.runStep = async function () { await Store.open(b); return { value: "outputs/不存在.png" }; };
+    await S.CoverPanel.generate();
+    out.cover = { status: document.getElementById("cover-status").textContent, name: Store.name,
+                  imagesB: Store.view.project.images.length };
+    await Store.open(a);
+    out.cover.imagesA = Store.view.project.images.length;
+    out.cover.imagesABefore = imagesA;
+    // (3) AI 寫稿:產生期間切換專案,完成時不填入
+    const before = document.getElementById("script-text").value;
+    S.Flows.runStep = async function () { await Store.open(b); return { value: "不該填入的文稿" }; };
+    await S.ScriptPanel.generate();
+    out.script = { status: document.getElementById("script-status").textContent,
+                   filled: document.getElementById("script-text").value === "不該填入的文稿",
+                   unchanged: document.getElementById("script-text").value === before };
+  } finally {
+    S.api = realApi;
+    S.Flows.runStep = realRun;
+  }
+  return out;
+}
+"""
+
+
+def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems: list) -> None:
+    from playwright.sync_api import expect
+
+    import project as pj
+
+    step = {"name": ""}
+
+    def begin(name):
+        step["name"] = name
+        print(f"・{name}", flush=True)
+
+    def shot(name):
+        page.screenshot(path=str(SHOT_DIR / name))
+
+    def proj():
+        return pj.load(PROJECT_NAME)
+
+    def calls():
+        return stubs.worker_calls()
+
+    def wait_until(fn, message, timeout=TIMEOUT_MS / 1000):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if fn():
+                return
+            time.sleep(0.05)
+        check(fn(), message)
+
+    def drag_x(locator, dx):
+        locator.scroll_into_view_if_needed()
+        b = locator.bounding_box()
+        check(b, "找不到要拖拉的元素")
+        x, y = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + dx / 2, y, steps=5)
+        page.mouse.move(x + dx, y, steps=5)
+        page.mouse.up()
+
+    def drop(selector, off_x, off_y, files):
+        page.locator(selector).scroll_into_view_if_needed()
+        return page.evaluate(JS_DROP_FILES, [selector, off_x, off_y, files])
+
+    def step_labels():
+        return [t.strip() for t in page.locator("#wizard-steps li").all_text_contents()]
+
+    def current_step(text):
+        expect(page.locator("#wizard-steps li.is-current")).to_have_text(text)
+        expect(page.locator("#wizard-body .wizard-title")).to_have_text(text)
+
+    def no_prev_next(scope):
+        btns = page.locator(f"{scope} button:visible, {scope} a:visible")
+        texts = [t.strip() for t in btns.all_text_contents()]
+        check(not any(t in ("上一步", "下一步") for t in texts), f"{scope} 不應有「上一步」「下一步」:{texts}")
+
+    toast = page.locator("#toast")
+    home = page.locator("#page-home")
+    wiz = page.locator("#page-wizard")
+    full = page.locator("#page-full")
+
     try:
-        from playwright.sync_api import Error as PwError, expect, sync_playwright
-    except ImportError:
-        print("UI 檢查失敗:找不到 playwright;請以 `uv run --script tests/ui_check.py` 執行", file=sys.stderr)
-        return 2
+        # 1. 首頁
+        begin("開啟首頁:只有兩張卡片、右上角 ⚙、底部免責連結,沒有分頁列")
+        page.goto(base + "/")
+        expect(home).to_be_visible()
+        cards = home.locator(".home-cards .card")
+        expect(cards).to_have_count(2)
+        expect(cards.locator(".card-title")).to_have_text(["精靈", "完整模式"])
+        expect(home.locator('.page-header [aria-label="設定"]')).to_have_count(1)
+        expect(home.locator('.page-header [aria-label="設定"]')).to_be_visible()
+        check(home.locator('[aria-label="設定"]').count() == 1, "首頁應恰好一個設定圖示")
+        footer = home.locator(".page-footer a")
+        expect(footer).to_have_count(1)
+        expect(footer).to_have_text("免責說明與授權")
+        expect(footer).to_have_attribute("href", "#/disclaimer")
+        check(page.locator('[role="tab"], [role="tablist"]').count() == 0, "首頁不應有分頁列(role=tab / tablist)")
+        home_text = home.inner_text()
+        check("本機" not in home_text and "→" not in home_text, "首頁不應有「本機」或以「→」串起的步驟說明")
+        shot("home.png")
+
+        begin("點右上角 ⚙ 開設定頁,再按「← 首頁」回首頁")
+        page.locator("#open-settings").click()
+        expect(page.locator("#page-settings")).to_be_visible()
+        expect(home).to_be_hidden()
+        page.locator("#page-settings .back-link").click()
+        expect(home).to_be_visible()
+        expect(page.locator("#page-settings")).to_be_hidden()
+        expect(cards).to_have_count(2)
+
+        # 2. 精靈
+        begin("點「精靈」卡片並建立專案「夜市的味道」")
+        page.locator("#card-wizard").click()
+        expect(wiz).to_be_visible()
+        expect(page.locator("#wizard-body #project-picker")).to_be_visible()
+        page.locator("#picker-name").fill(PROJECT_NAME)
+        page.locator("#picker-create").click()
+        expect(page.locator("#wizard-nav")).to_be_visible()
+        check(step_labels() == ["① 文稿", "② 語音", "③ 封面", "④ 剪輯", "⑤ 匯出"],
+              f"精靈步驟應為預設流程的五步,實際 {step_labels()}")
+        current_step("① 文稿")
+        nav = page.locator("#page-wizard button:visible").filter(has_text=re.compile(r"^(上一步|下一步)$"))
+        expect(nav).to_have_count(2)
+        expect(page.locator("#wizard-prev")).to_be_disabled()
+        check((root / "projects" / PROJECT_NAME / "project.json").is_file(), "專案應建立在暫存目錄的 projects/")
+
+        begin("① 文稿:填入三句文稿後按「下一步」")
+        page.locator("#script-text").fill(SCRIPT)
+        page.locator("#wizard-next").click()
+        current_step("② 語音")
+        expect(page.locator("#voice-list li.voice-row")).to_have_count(3)
+        check(proj().script == SCRIPT, "按「下一步」時應把文稿存檔")
+
+        begin("② 語音 → 按「上一步」回 ① 文稿,內容保留,再按「下一步」")
+        page.locator("#wizard-prev").click()
+        current_step("① 文稿")
+        expect(page.locator("#script-text")).to_have_value(SCRIPT)
+        page.locator("#wizard-next").click()
+        current_step("② 語音")
+
+        begin("② 語音:逐句合成三句(替身 worker 每句間隔 1.2 秒),第一句在整批結束前就能試聽")
+        stubs.set_delay(1.2)
+        h0 = len(pj.list_history(PROJECT_NAME))
+        page.locator("#voice-synth").click()
+        play1 = page.locator('#voice-list li.voice-row button[aria-label="試聽第 1 句"]')
+        expect(play1).to_be_enabled()
+        mid = page.evaluate("""() => {
+          const s = window.Studio.Store.view.project.segments;
+          const tl = document.querySelector('#tl-voice .tl-seg[data-segment="' + s[0].id + '"]');
+          return {status: document.getElementById('voice-status').textContent, running: window.Studio.Voice.running,
+                  first: !!s[0].audio, last: !!s[2].audio, tl: tl ? tl.className : null};
+        }""")
+        check(mid["running"] and "合成中" in mid["status"] and "新合成" not in mid["status"],
+              f"第一句可試聽時整批合成應尚未結束,實際 {mid}")
+        check(mid["first"] and not mid["last"], f"合成中途專案檢視應只有已完成的句子有音檔,實際 {mid}")
+        check(mid["tl"] is not None and "is-pending" not in mid["tl"],
+              f"語音軌第一句在合成中途應為已合成的片段(不是 ⏳ 合成中),實際 class={mid['tl']}")
+        check(len(pj.list_history(PROJECT_NAME)) == h0, "合成中途不應存檔(history 不應增加)")
+        expect(page.locator("#voice-status")).to_contain_text("新合成 3 句、沿用 0 句")
+        stubs.set_delay(0)
+        check(len(pj.list_history(PROJECT_NAME)) == h0 + 1, "一次合成應只多一個 history 版本")
+        check([len(c) for c in calls()] == [3], f"worker 應被呼叫一次、三句,實際 {[len(c) for c in calls()]}")
+        rows = page.locator("#voice-list li.voice-row")
+        for i in range(3):
+            expect(rows.nth(i).locator(".voice-state")).to_contain_text("✓ 已合成")
+        segs = proj().segments
+        check(len(segs) == 3 and all(s.get("audio") and "key" in s["audio"] for s in segs), "三句都應有合成音檔")
+        seg_ids = [s["id"] for s in segs]
+
+        begin("② 語音:把自錄的 WAV 拖到第 2 句上,取代該句且不重新合成")
+        drop(f'#voice-list li.voice-row[data-segment="{seg_ids[1]}"]', 40, 10,
+             [file_arg("自錄開場.wav", sine_wav(OWN_WAV_SECONDS), "audio/wav")])
+        expect(toast).to_have_text("已用「自錄開場.wav」取代這一句")
+        expect(rows.nth(1).locator(".voice-state")).to_contain_text("✓ 自錄")
+        a2 = proj().segments[1]["audio"]
+        check(a2 and "key" not in a2 and abs(a2["seconds"] - OWN_WAV_SECONDS) < 0.01,
+              f"第 2 句應改用自錄音檔({OWN_WAV_SECONDS} 秒),實際 {a2}")
+        check(len(calls()) == 1, "取代音檔不應呼叫合成 worker")
+
+        begin("② 語音:把第 3 句語速改成 1.30×,只改變速、不觸發合成")
+        sel = rows.nth(2).locator("select.speed-select")
+        expect(sel).to_have_attribute("aria-label", "第 3 句語速")
+        sel.select_option("1.30")
+        expect(toast).to_contain_text("語速改為 1.30×")
+        expect(rows.nth(2).locator("select.speed-select")).to_have_value("1.30")
+        check(proj().segments[2]["speed"] == 1.3, "第 3 句語速應存成 1.3")
+        time.sleep(0.5)
+        check(len(calls()) == 1, "改語速不應呼叫合成 worker")
+        check(proj().segments[2]["audio"] == segs[2]["audio"], "改語速不應改變第 3 句的合成音檔")
+        shot("wizard.png")
+
+        begin("③ 封面:把圖片拖進封面面板,加入畫面軌")
+        page.locator("#wizard-next").click()
+        current_step("③ 封面")
+        drop("#panel-cover", 60, 40, [file_arg("封面.png", color_png((200, 60, 40)), "image/png")])
+        expect(page.locator("#cover-list .cover-item.is-used")).to_have_count(1)
+        check(len(proj().images) == 1, "畫面軌應有 1 張圖")
+
+        begin("④ 剪輯:素材庫、預覽、屬性、時間軸三軌")
+        page.locator("#wizard-next").click()
+        current_step("④ 剪輯")
+        for k in ("library", "preview", "props", "timeline"):
+            expect(page.locator(f"#wizard-body #panel-{k}")).to_be_visible()
+        expect(page.locator("#tl-voice .tl-seg")).to_have_count(3)
+        expect(page.locator("#tl-voice .tl-gap")).to_have_count(2)
+        expect(page.locator("#tl-images .tl-img")).to_have_count(1)
+        zoom = page.evaluate("window.Studio.Timeline.zoom")
+
+        begin("④ 剪輯:把第 2、3 句之間的空隙拖到 1.5 秒(不重新合成)")
+        lay0 = page.evaluate("window.Studio.Store.view.layout.segments")
+        gap = page.locator(f'#tl-voice .tl-gap[data-after="{seg_ids[1]}"]')
+        expect(gap).to_have_attribute("aria-valuenow", "0.4")
+        drag_x(gap, 1.1 * zoom)
+        expect(toast).to_have_text("停頓改為 1.5 秒")
+        check(proj().segments[1]["pause_after"] == 1.5, "第 2 句之後的停頓應存成 1.5 秒")
+        lay1 = page.evaluate("window.Studio.Store.view.layout.segments")
+        check(abs((lay1[2]["start"] - lay1[1]["end"]) - 1.5) < 0.01,
+              f"時間軸上第 2、3 句間隔應為 1.5 秒,實際 {lay1[2]['start'] - lay1[1]['end']:.3f}")
+        check(abs((lay1[2]["start"] - lay0[2]["start"]) - 1.1) < 0.01, "第 3 句應往後移 1.1 秒")
+        check(len(calls()) == 1, "改停頓不應呼叫合成 worker")
+
+        begin("④ 剪輯:屬性面板把第 2 句之後的停頓設為 0,空隙仍可點到並拖到 1.5 秒(DIR-5 統整 M-2)")
+
+        def set_pause_in_props(sid, value):
+            page.locator(f'#tl-voice .tl-seg[data-segment="{sid}"]').click()
+            inp = page.locator('#props-body [data-hook="pause"] input.pause-input')
+            inp.fill(value)
+            inp.dispatch_event("change")
+            wait_until(lambda: proj().segments[1]["pause_after"] == float(value),
+                       f"第 2 句之後的停頓應存成 {value} 秒")
+
+        set_pause_in_props(seg_ids[1], "0")
+        gap = page.locator(f'#tl-voice .tl-gap[data-after="{seg_ids[1]}"]')
+        expect(gap).to_have_attribute("aria-valuenow", "0.0")
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[2]}"]').click()   # 先選取第 3 句
+        expect(page.locator(f'#tl-voice .tl-seg.is-selected[data-segment="{seg_ids[2]}"]')).to_have_count(1)
+        gap.scroll_into_view_if_needed()
+        hit = page.evaluate("""(after) => {
+          const g = document.querySelector('#tl-voice .tl-gap[data-after="' + after + '"]');
+          const r = g.getBoundingClientRect();
+          const c = document.getElementById('tl-content').getBoundingClientRect();
+          const segs = window.Studio.Store.view.layout.segments;
+          const prev = segs.find(s => s.id === after);
+          const x = c.left + prev.end * window.Studio.Timeline.zoom, y = r.top + r.height / 2;
+          const e = document.elementFromPoint(x, y);
+          return {width: r.width, x: x, y: y, isGap: e === g, got: e ? e.className : null};
+        }""", seg_ids[1])
+        check(hit["width"] >= 12, f"停頓 0 秒的空隙點擊範圍應至少 12px,實際 {hit['width']:.1f}")
+        check(hit["isGap"], f"選取第 3 句後,交界處最上層應是空隙,實際 {hit['got']}")
+        n_calls = len(calls())
+        page.mouse.move(hit["x"], hit["y"])
+        page.mouse.down()
+        page.mouse.move(hit["x"] + 0.75 * zoom, hit["y"], steps=5)
+        page.mouse.move(hit["x"] + 1.5 * zoom, hit["y"], steps=5)
+        page.mouse.up()
+        expect(toast).to_have_text("停頓改為 1.5 秒")
+        check(proj().segments[1]["pause_after"] == 1.5, "從 0 秒拖拉後停頓應存成 1.5 秒")
+        check(len(calls()) == n_calls, "改停頓不應呼叫合成 worker")
+
+        begin("④ 剪輯:停頓 0 秒的空隙以鍵盤 → 改成 0.1 秒")
+        set_pause_in_props(seg_ids[1], "0")
+        gap = page.locator(f'#tl-voice .tl-gap[data-after="{seg_ids[1]}"]')
+        expect(gap).to_have_attribute("aria-valuenow", "0.0")
+        gap.focus()
+        page.keyboard.press("ArrowRight")
+        wait_until(lambda: proj().segments[1]["pause_after"] == 0.1, "鍵盤 → 後停頓應存成 0.1 秒")
+        set_pause_in_props(seg_ids[1], "1.5")                                     # 還原,後續步驟照舊
+        check(len(calls()) == n_calls, "改停頓不應呼叫合成 worker")
+
+        begin("④ 剪輯:點第 1 句的「好」,在注音彈出框改成四聲並套用,只重新合成這一句")
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[0]}"]').click()
+        expect(page.locator("#props-body .prop-title")).to_have_text("選取:片段 #1")
+        hao = page.locator('#props-body .tone-char[data-index="2"]')
+        expect(hao.locator(".tone-glyph")).to_have_text("好")
+        hao.click()
+        popup = page.locator("#tone-popup")
+        expect(popup).to_be_visible()
+        expect(popup.locator(".tone-title")).to_have_text("「好」的念法")
+        expect(popup.locator(".tone-auto")).to_have_text("自動:ㄏㄠˇ")
+        popup.locator('input[type="radio"][value="ㄏㄠˋ"]').check()
+        expect(popup.locator(".tone-input")).to_have_value("ㄏㄠˋ")
+        shot("tone.png")
+        popup.get_by_role("button", name="套用").click()
+        expect(popup).to_be_hidden()
+        expect(page.locator("#voice-status")).to_contain_text("新合成 1 句、沿用 0 句")
+        check([len(c) for c in calls()] == [3, 1], f"改聲調後應只合成 1 句,worker 呼叫 {[len(c) for c in calls()]}")
+        check("好[:ㄏㄠˋ]" in calls()[1][0]["text"], f"重新合成的應是第 1 句(含標註),實際 {calls()[1][0]['text']}")
+        check("好[:ㄏㄠˋ]" in pj.tts_text(proj().segments[0]), "第 1 句的合成文字應包含「好[:ㄏㄠˋ]」")
+        check(stubs.annotate_calls, "應以 /api/annotate 取得自動注音")
+
+        begin("④ 剪輯:把第二張圖拖到畫面軌 3.0 秒處,再把它的起點拖到 4.0 秒")
+        off = page.evaluate("""(t) => {
+          const c = document.getElementById('tl-content').getBoundingClientRect();
+          const l = document.getElementById('tl-images').getBoundingClientRect();
+          return [c.left - l.left + t * window.Studio.Timeline.zoom, l.height / 2];
+        }""", 3.0)
+        drop("#tl-images", off[0], off[1], [file_arg("夜市照片.png", color_png((30, 90, 200)), "image/png")])
+        expect(page.locator("#tl-images .tl-img")).to_have_count(2)
+        imgs = proj().images
+        check(len(imgs) == 2 and abs(imgs[1]["start"] - 3.0) <= 0.1, f"第二張圖應從 3.0 秒開始,實際 {imgs}")
+        img2 = imgs[1]["id"]
+        drag_x(page.locator(f'#tl-images .tl-img[data-image="{img2}"] .tl-edge-start'), 1.0 * zoom)
+        expect(toast).to_have_text("起點改為 4.0 秒")
+        check(proj().images[1]["start"] == 4.0, f"第二張圖起點應為 4.0 秒,實際 {proj().images[1]['start']}")
+
+        begin("④ 剪輯:預覽播放 3 秒(音訊實際播放、字幕與畫面切換)")
+        page.locator("#preview-start").click()
+        page.locator("#preview-play").click()
+        expect(page.locator("#preview-play")).to_have_attribute("aria-label", "暫停")
+        t0 = time.monotonic()
+        wait_until(lambda: page.evaluate("!window.Studio.Preview.audio.paused"), "預覽開始後音訊應在播放")
+        a0 = page.evaluate("window.Studio.Preview.audio.currentTime")
+        time.sleep(0.6)
+        a1 = page.evaluate("window.Studio.Preview.audio.currentTime")
+        check(a1 > a0 + 0.2, f"預覽的音訊播放位置應前進,實際 {a0:.2f} → {a1:.2f} 秒")
+        expect(page.locator("#preview-cue")).not_to_have_text("")
+        expect(page.locator("#preview-img")).to_be_visible()
+        time.sleep(max(0.0, 3.0 - (time.monotonic() - t0)))
+        pt = page.evaluate("window.Studio.Preview.t")
+        check(pt >= 2.5, f"播放 3 秒後預覽時間應 ≥ 2.5 秒,實際 {pt:.2f}")
+        check(page.evaluate("window.Studio.Preview.playing"), "播放 3 秒時預覽仍應在播放(總長超過 3 秒)")
+        shot("editor.png")
+        page.locator("#preview-play").click()
+        expect(page.locator("#preview-play")).to_have_attribute("aria-label", "播放")
+
+        begin("⑤ 匯出(替身 render)")
+        page.locator("#wizard-next").click()
+        current_step("⑤ 匯出")
+        expect(page.locator("#wizard-next")).to_be_disabled()
+        page.locator("#export-run").click()
+        expect(page.locator("#export-status")).to_have_text("匯出完成")
+        expect(page.locator("#export-links li")).to_have_count(2)
+        check(len(stubs.render_calls) == 1 and stubs.render_calls[0] == seg_ids, "匯出應呼叫一次 render、含三句")
+
+        # 3. 完整模式
+        begin("回首頁點「完整模式」卡片,開啟同一個專案")
+        page.locator("#page-wizard .back-link").click()
+        expect(home).to_be_visible()
+        expect(page.locator("#home-recent")).to_be_visible()
+        expect(page.locator("#home-recent-name")).to_contain_text(PROJECT_NAME)
+        page.locator("#card-full").click()
+        expect(full).to_be_visible()
+        page.locator("#full-picker-slot .picker-link", has_text=PROJECT_NAME).click()
+        expect(page.locator("#full-body")).to_be_visible()
+        for k in ("script", "cover", "library", "preview", "props", "timeline"):
+            expect(page.locator(f"#full-body #panel-{k}")).to_be_visible()
+        expect(page.locator("#script-text")).to_have_value(SCRIPT)
+        expect(page.locator("#cover-list .cover-item")).to_have_count(2)
+        expect(page.locator("#tl-voice .tl-seg")).to_have_count(3)
+        expect(page.locator("#tl-images .tl-img")).to_have_count(2)
+        expect(wiz).to_be_hidden()
+        no_prev_next("#page-full")
+
+        begin("完整模式:在文稿面板改第 3 句後按「逐句合成全部」,只有該句重新合成")
+        page.locator("#script-text").fill(SCRIPT_EDITED)
+        expect(page.locator("#script-status")).to_have_text("文稿已修改,尚未存檔")
+        page.locator("#script-synth").click()
+        expect(page.locator("#script-status")).to_contain_text("新合成 1 句、沿用 0 句")
+        c = calls()
+        check([len(x) for x in c] == [3, 1, 1], f"改一句後應只合成 1 句,worker 呼叫 {[len(x) for x in c]}")
+        check("五十年" in c[2][0]["text"], "重新合成的應是改過的第 3 句")
+        segs2 = proj().segments
+        check(proj().script == SCRIPT_EDITED and len(segs2) == 3, "文稿應已存檔且仍為三句")
+        check(segs2[0]["id"] == seg_ids[0] and segs2[1]["id"] == seg_ids[1], "未改的第 1、2 句應沿用原片段")
+        check(segs2[1]["audio"] == a2, "第 2 句應保留自錄音檔")
+        expect(page.locator("#tl-voice .tl-seg:not(.is-pending)")).to_have_count(3)
+        no_prev_next("#page-full")
+        shot("full.png")
+
+        # 4. 免責說明與授權
+        begin("回首頁點底部「免責說明與授權」連結")
+        page.locator("#page-full .back-link").click()
+        expect(home).to_be_visible()
+        home.locator(".page-footer a", has_text="免責說明與授權").click()
+        disc = page.locator("#page-disclaimer")
+        expect(disc).to_be_visible()
+        expect(disc.locator(".section-title")).to_have_text(["AI 生成內容聲明", "聲線", "模型與元件授權"])
+        expect(disc).to_contain_text("須取得聲音所有人同意")
+        rows_l = disc.locator("#license-table tbody tr")
+        check(rows_l.count() >= 3, "授權表應列出模型與元件")
+        for i in range(rows_l.count()):
+            cells = [t.strip() for t in rows_l.nth(i).locator("td").all_text_contents()]
+            check(len(cells) == 4 and all(cells), f"授權表第 {i + 1} 列應有元件、用途、授權、來源(或「未知」):{cells}")
+        shot("disclaimer.png")
+
+        # 5. 進階流程刪除封面步驟後,精靈步驟跟著改
+        begin("設定 › 進階流程:刪除封面步驟的四個節點")
+        disc.locator(".open-settings").click()
+        expect(page.locator("#page-settings")).to_be_visible()
+        page.locator('.subnav-link[data-sub="flow"]').click()
+        expect(page.locator("#statusbar")).to_have_text("已載入預設流程")
+        expect(page.locator("#drawflow .drawflow-node")).to_have_count(9)
+        title_ids = page.evaluate(JS_FIND_TITLE_NODE)
+        check(len(title_ids) == 1, f"應找到 1 個接到「封面 prompt」的文字節點,實際 {title_ids}")
+        targets = [title_ids[0]] + [page.evaluate(JS_NODE_IDS, lb)[0] for lb in ("封面 prompt", "生圖", "疊標題")]
+        for nid in targets:
+            node = page.locator(f"#node-{nid}")
+            node.scroll_into_view_if_needed()
+            node.locator(".node-title").click()
+            expect(node).to_have_class(re.compile(r"\bselected\b"))
+            page.keyboard.press("Delete")
+            expect(node).to_have_count(0)
+        expect(page.locator("#drawflow .drawflow-node")).to_have_count(5)
+
+        begin("「合成影片」的圖片輸入改接拖入的圖片檔(否則流程驗證不過、無法存檔)")
+        mv = page.evaluate(JS_NODE_IDS, "合成影片")
+        check(len(mv) == 1, "畫布上應有 1 個「合成影片」節點")
+        port = page.locator(f"#node-{mv[0]} .inputs .input_1")
+        port.scroll_into_view_if_needed()
+        pb, cb = port.bounding_box(), page.locator("#drawflow").bounding_box()
+        page.evaluate(JS_DROP_FILES, ["#drawflow", pb["x"] - cb["x"] + pb["width"] / 2,
+                                      pb["y"] - cb["y"] + pb["height"] / 2,
+                                      [file_arg("片頭圖.png", color_png((20, 120, 60)), "image/png")]])
+        expect(toast).to_have_text("「合成影片」的「封面」輸入已改用「片頭圖.png」")
+        expect(page.locator("#drawflow .drawflow-node")).to_have_count(6)
+
+        begin("以「default」覆寫存檔預設流程")
+        page.locator("#btn-save").click()
+        expect(page.locator("#wf-dialog")).to_be_visible()
+        page.locator("#wf-name").fill("default")
+        n_before = len(problems)
+        page.locator("#wf-submit").click()
+        expect(page.locator("#wf-confirm")).to_be_visible()
+        # 第一次 PUT(未帶 overwrite)回 409 是預期的(介面據此詢問是否覆寫);瀏覽器會把它記成一筆
+        # console error,只容許這一筆,其餘照常算失敗
+        expected = [p for p in problems[n_before:] if "status of 409" in p]
+        check(len(expected) <= 1, f"存檔時不應出現多筆 409:{expected}")
+        if expected:
+            problems.remove(expected[0])
+        page.locator("#wf-overwrite").click()
+        expect(page.locator("#wf-dialog")).to_be_hidden()
+        expect(page.locator("#statusbar")).to_have_text("已存檔:「default」")
+        saved = json.loads((root / "workflows" / "default.json").read_text(encoding="utf-8"))
+        labels = [s.get("label") for s in saved.get("steps", [])]
+        check(labels == ["文稿", "語音", "剪輯", "匯出"], f"存檔後的 steps 應去掉「封面」,實際 {labels}")
+
+        begin("回首頁開精靈:步驟不含「封面」且仍含「剪輯」")
+        page.locator("#page-settings .back-link").click()
+        expect(home).to_be_visible()
+        page.locator("#card-wizard").click()
+        expect(wiz).to_be_visible()
+        expect(page.locator("#wizard-steps li")).to_have_count(4)
+        got = step_labels()
+        check(not any("封面" in s for s in got), f"精靈步驟不應含「封面」:{got}")
+        check(any("剪輯" in s for s in got), f"精靈步驟應仍含「剪輯」:{got}")
+        expect(page.locator("#wizard-error")).to_be_hidden()
+
+        begin("延遲回應期間切換專案:mutate、AI 封面、AI 寫稿的結果不套到新專案(DIR-6 修正 2)")
+        got = page.evaluate(JS_STALE_SWITCH, [PROJECT_NAME, "切換測試"])
+        check(got.get("created") is True, f"應能建立第二個專案:{got}")
+        m = got["mutate"]
+        check(m["stale"] and not m["ok"], f"切換後晚到的修改回應應標為 stale、不算成功:{m}")
+        check(m["name"] == "切換測試" and m["viewName"] == "切換測試", f"畫面應仍是新專案:{m}")
+        cov = got["cover"]
+        check(cov["status"] == "封面已產生,但專案已切換,未加入", f"封面狀態文字不符:{cov}")
+        check(cov["imagesB"] == 0 and cov["imagesA"] == cov["imagesABefore"], f"封面不應加入任何專案:{cov}")
+        sc = got["script"]
+        check(sc["status"] == "文稿已產生,但專案已切換,未填入" and not sc["filled"], f"文稿不應填入:{sc}")
+        b_disk = json.loads((root / "projects" / "切換測試" / "project.json").read_text(encoding="utf-8"))
+        check(b_disk["images"] == [] and b_disk["script"] == "切換測試的第一句。", "新專案的磁碟內容不應被改動")
+    except StepFailed as e:
+        raise StepFailed(f"步驟「{step['name']}」:{e}") from None
+    except AssertionError as e:
+        raise StepFailed(f"步驟「{step['name']}」:畫面不符預期({str(e).splitlines()[0] if str(e) else 'AssertionError'})") from None
+    except Exception as e:  # Playwright 逾時等
+        raise StepFailed(f"步驟「{step['name']}」:{type(e).__name__}:{str(e).splitlines()[0] if str(e) else ''}") from None
+
+
+# ---------- 執行一組檢查 ----------
+
+def run_suite(browser, suite: str) -> int:
+    """在自己的暫存目錄與伺服器上跑一組檢查;通過回 0,失敗印出原因並回 1。"""
+    from playwright.sync_api import Error as PwError
     import uvicorn
 
+    import heavy_lock
     import nodes
+    import project
     import settings
     import studio_server as ss
+    import taiwan_ai
+    import tts_service
 
-    expect.set_options(timeout=TIMEOUT_MS)
-    default_hosts = frozenset({"127.0.0.1:7860", "localhost:7860"})
-    if ss.ALLOWED_HOSTS != default_hosts:
-        print("UI 檢查失敗:studio_server.ALLOWED_HOSTS 不是預期的預設值,請先更新本檔", file=sys.stderr)
-        return 1
+    print(f"── {suite} ──", flush=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f"ui_check-{suite}-")).resolve()
+    saved: list[tuple] = []
 
-    guarded = [REPO / "config" / "studio.db", REPO / "config" / "studio.db-wal", REPO / "config" / "models.json",
-               REPO / "workflows", REPO / "workflows" / "default.json", REPO / "outputs" / "uploads"]
-    before = {p: snapshot(p) for p in guarded}
-    SHOT_DIR.mkdir(parents=True, exist_ok=True)
-    for name in ("canvas.png", "dnd.png", "settings.png", "failure.png"):
-        (SHOT_DIR / name).unlink(missing_ok=True)
+    def patch(obj, attr, value):
+        saved.append((obj, attr, getattr(obj, attr)))
+        setattr(obj, attr, value)
 
-    tmp = Path(tempfile.mkdtemp(prefix="ui_check-")).resolve()
-    saved = {"settings.ROOT": settings.ROOT, "settings.CONFIG_PATH": settings.CONFIG_PATH, "ss.ROOT": ss.ROOT,
-             "hosts": ss.ALLOWED_HOSTS, "origins": ss.ALLOWED_ORIGINS}
     server = None
     thread = None
     problems: list[str] = []
     try:
         root = make_root(tmp)
-        settings.ROOT = root
-        settings.CONFIG_PATH = root / "config" / "models.json"
-        ss.ROOT = root
+        patch(settings, "ROOT", root)
+        patch(settings, "CONFIG_PATH", root / "config" / "models.json")
+        patch(ss, "ROOT", root)
         port = free_port()
-        ss.ALLOWED_HOSTS = frozenset({f"127.0.0.1:{port}"})
-        ss.ALLOWED_ORIGINS = frozenset({f"http://127.0.0.1:{port}"})
+        patch(ss, "ALLOWED_HOSTS", frozenset({f"127.0.0.1:{port}"}))
+        patch(ss, "ALLOWED_ORIGINS", frozenset({f"http://127.0.0.1:{port}"}))
         runner = StubRunner(nodes.REGISTRY)
-        app = ss.create_app(runner=runner, root=root, ollama_tags=lambda: list(STUB_TAGS))
+        kwargs = {}
+        stubs = None
+        if suite == "editor":
+            stubs = EditorStubs(tmp)
+            stubs.out = root / "outputs"
+            (root / "voice").mkdir(exist_ok=True)
+            (root / "voice" / "voice.wav").write_bytes(sine_wav(0.3, rate=16000))
+            patch(project, "ROOT", root)
+            patch(taiwan_ai, "ROOT", root)
+            patch(taiwan_ai, "OUT", root / "outputs")
+            patch(heavy_lock, "ROOT", root)
+            patch(heavy_lock, "LOCK_PATH", root / "outputs" / ".heavy.lock")
+            patch(tts_service, "BREEZY", stubs.breezy)
+            patch(tts_service, "_worker_argv", stubs.worker_argv)
+            patch(taiwan_ai, "role_config", lambda role: {"wav": "voice/voice.wav", "text": VOICE_TEXT})
+            kwargs = {"render": stubs.render, "annotate": stubs.annotate}
+        app = ss.create_app(runner=runner, root=root, ollama_tags=lambda: list(STUB_TAGS), **kwargs)
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
                                                proxy_headers=False, server_header=False))
-        thread = threading.Thread(target=server.run, name="ui-check-server", daemon=True)
+        thread = threading.Thread(target=server.run, name=f"ui-check-server-{suite}", daemon=True)
         thread.start()
         deadline = time.monotonic() + 15
         while not server.started:
@@ -452,62 +1087,108 @@ def main() -> int:
             time.sleep(0.05)
         base = f"http://127.0.0.1:{port}"
 
-        with sync_playwright() as pw:
+        page = browser.new_page(viewport=VIEWPORT, locale="zh-TW")
+        try:
+            page.set_default_timeout(TIMEOUT_MS)
+            page.add_init_script(INIT_SCRIPT)
+            page.on("console", lambda m: problems.append(f"console {m.type}:{m.text}")
+                    if m.type in ("error", "warning") else None)
+            page.on("pageerror", lambda e: problems.append(f"未捕捉例外:{e}"))
             try:
-                browser = pw.chromium.launch(headless=True)
-            except PwError as e:
-                print("UI 檢查失敗:步驟「啟動 Chromium」:無法啟動瀏覽器;請先執行 "
-                      "`uv run --with playwright==1.64.1 playwright install chromium`"
-                      f"({str(e).splitlines()[0]})", file=sys.stderr)
-                return 1
-            try:
-                page = browser.new_page(viewport=VIEWPORT, locale="zh-TW")
-                page.set_default_timeout(TIMEOUT_MS)
-                page.add_init_script(INIT_SCRIPT)
-                page.on("console", lambda m: problems.append(f"console {m.type}:{m.text}")
-                        if m.type in ("error", "warning") else None)
-                page.on("pageerror", lambda e: problems.append(f"未捕捉例外:{e}"))
-                try:
+                if suite == "editor":
+                    run_editor_checks(page, base, root, stubs, problems)
+                else:
                     run_checks(page, base, root, runner, settings)
-                    csp = page.evaluate("window.__csp || []")
-                    problems.extend(f"CSP 違規:{c}" for c in csp)
-                except StepFailed as e:
-                    try:
-                        page.screenshot(path=str(SHOT_DIR / "failure.png"))
-                    except PwError:
-                        pass
-                    print(f"UI 檢查失敗:{e}", file=sys.stderr)
-                    for p in problems:
-                        print(f"  {p}", file=sys.stderr)
-                    return 1
-            finally:
-                browser.close()
+                csp = page.evaluate("window.__csp || []")
+                problems.extend(f"CSP 違規:{c}" for c in csp)
+            except StepFailed as e:
+                try:
+                    page.screenshot(path=str(SHOT_DIR / "failure.png"))
+                except PwError:
+                    pass
+                print(f"UI 檢查失敗({suite}):{e}", file=sys.stderr)
+                for p in problems:
+                    print(f"  {p}", file=sys.stderr)
+                return 1
+        finally:
+            page.close()
     finally:
         if server is not None:
             server.should_exit = True
         if thread is not None:
             thread.join(timeout=10)
-        settings.ROOT, ss.ROOT = saved["settings.ROOT"], saved["ss.ROOT"]
-        settings.CONFIG_PATH = saved["settings.CONFIG_PATH"]
-        ss.ALLOWED_HOSTS, ss.ALLOWED_ORIGINS = saved["hosts"], saved["origins"]
+        for obj, attr, value in reversed(saved):
+            setattr(obj, attr, value)
         shutil.rmtree(tmp, ignore_errors=True)
 
     if problems:
-        print("UI 檢查失敗:步驟「瀏覽器 console 與 CSP」:", file=sys.stderr)
+        print(f"UI 檢查失敗({suite}):步驟「瀏覽器 console 與 CSP」:", file=sys.stderr)
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
+    return 0
+
+
+SUITES = {"canvas": CANVAS_SHOTS, "editor": EDITOR_SHOTS}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="UI 互動檢查(無頭 Chromium)")
+    ap.add_argument("--only", choices=["editor"],
+                    help="只跑指定的一組檢查(editor = CHG-20261022-04 的首頁、精靈、完整模式與剪輯);不帶則全部")
+    args = ap.parse_args(argv)
+    suites = [args.only] if args.only else ["canvas", "editor"]
+
+    try:
+        from playwright.sync_api import Error as PwError, expect, sync_playwright
+    except ImportError:
+        print("UI 檢查失敗:找不到 playwright;請以 `uv run --script tests/ui_check.py` 執行", file=sys.stderr)
+        return 2
+
+    import studio_server as ss
+
+    expect.set_options(timeout=TIMEOUT_MS)
+    default_hosts = frozenset({"127.0.0.1:7860", "localhost:7860"})
+    if ss.ALLOWED_HOSTS != default_hosts:
+        print("UI 檢查失敗:studio_server.ALLOWED_HOSTS 不是預期的預設值,請先更新本檔", file=sys.stderr)
+        return 1
+
+    guarded = [REPO / "config" / "studio.db", REPO / "config" / "studio.db-wal", REPO / "config" / "models.json",
+               REPO / "workflows", REPO / "workflows" / "default.json", REPO / "outputs" / "uploads",
+               REPO / "projects", REPO / "outputs" / ".heavy.lock"]
+    before = {p: snapshot(p) for p in guarded}
+    SHOT_DIR.mkdir(parents=True, exist_ok=True)
+    shots = [n for s in suites for n in SUITES[s]]
+    for name in [*shots, "failure.png"]:
+        (SHOT_DIR / name).unlink(missing_ok=True)
+
+    with sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch(headless=True)
+        except PwError as e:
+            print("UI 檢查失敗:步驟「啟動 Chromium」:無法啟動瀏覽器;請先執行 "
+                  "`uv run --with playwright==1.64.1 playwright install chromium`"
+                  f"({str(e).splitlines()[0]})", file=sys.stderr)
+            return 1
+        try:
+            for suite in suites:
+                code = run_suite(browser, suite)
+                if code:
+                    return code
+        finally:
+            browser.close()
+
     after = {p: snapshot(p) for p in guarded}
     changed = [str(p.relative_to(REPO)) for p in guarded if before[p] != after[p]]
     if changed:
         print(f"UI 檢查失敗:步驟「確認未碰 repo 檔案」:{'、'.join(changed)} 被改動", file=sys.stderr)
         return 1
-    missing = [n for n in ("canvas.png", "dnd.png", "settings.png") if not (SHOT_DIR / n).is_file()]
+    missing = [n for n in shots if not (SHOT_DIR / n).is_file()]
     if missing:
         print(f"UI 檢查失敗:步驟「截圖」:缺少 {'、'.join(missing)}", file=sys.stderr)
         return 1
     print("UI 檢查通過;截圖:")
-    for n in ("canvas.png", "dnd.png", "settings.png"):
+    for n in shots:
         print(f"  {SHOT_DIR / n}")
     return 0
 

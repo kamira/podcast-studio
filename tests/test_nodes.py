@@ -12,11 +12,13 @@ from PIL import Image
 
 import media
 import nodes
+import project as pj
 import taiwan_ai as tai
 
 PORT_TYPES = {"text", "image", "audio", "video"}
 KINDS = {"text-input", "file-input", "write-script", "revise", "taiwanize", "speak",
-         "cover-prompt", "generate-image", "add-title", "make-video"}
+         "cover-prompt", "generate-image", "add-title", "make-video",
+         "send-to-library"}   # CHG-20261022-04 T8 新增「送到素材庫」
 HEAVY = {"write-script", "revise", "taiwanize", "speak", "cover-prompt", "generate-image", "make-video"}
 
 
@@ -46,6 +48,7 @@ def out(monkeypatch, tmp_path):
     d = tmp_path / "outputs"
     d.mkdir()
     monkeypatch.setattr(tai, "OUT", d)
+    monkeypatch.setattr(pj, "ROOT", tmp_path.resolve())   # 專案在 <tmp>/projects/,不碰 repo 內的 projects/
     return d
 
 
@@ -89,7 +92,8 @@ def _run(kind, inputs=None, params=None):
 
 # ---------- 登錄表結構與埠型別 ----------
 
-def test_登錄表恰為十種節點():
+def test_登錄表恰為十一種節點():
+    assert len(nodes.REGISTRY) == 11
     assert set(nodes.REGISTRY) == KINDS
     for kind, spec in nodes.REGISTRY.items():
         assert isinstance(spec, nodes.NodeSpec)
@@ -130,6 +134,10 @@ def test_各節點宣告的埠():
     assert types(R["make-video"].inputs) == {"image": "image", "audio": "audio", "script": "text"}
     assert R["make-video"].inputs["script"].required is False
     assert types(R["make-video"].outputs) == {"video": "video"}
+    assert types(R["send-to-library"].inputs) == {"text": "text", "image": "image", "audio": "audio"}
+    assert all(p.required is False for p in R["send-to-library"].inputs.values())
+    assert types(R["send-to-library"].outputs) == {"text": "text"}
+    assert R["send-to-library"].params["project"].max_len == 64
 
 
 def test_heavy旗標只標在LLM生圖語音影片節點():
@@ -394,7 +402,14 @@ def _sample_inputs(out):
         "generate-image": ({"prompt": "p"}, {}),
         "add-title": ({"image": str(img), "title": "標題"}, {}),
         "make-video": ({"image": str(img), "audio": "a.wav", "script": "文案"}, {}),
+        "send-to-library": ({"image": str(img)}, {"project": _library_project()}),
     }
+
+
+def _library_project(name="夜市的味道"):
+    if name not in {p["name"] for p in pj.list_projects()}:
+        pj.create(name, "第一句。")
+    return name
 
 
 def test_每個節點以替身執行都回傳宣告的輸出鍵(ai, fake_media, out):
@@ -422,3 +437,226 @@ def test_節點本身不取重型鎖(ai, fake_media, out, monkeypatch):
     imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     imported |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     assert "heavy_lock" not in imported
+
+
+# ---------- 送到素材庫(CHG-20261022-04 T8) ----------
+
+def _assets_dir(name="夜市的味道") -> Path:
+    return Path(pj.ROOT) / "projects" / name / "assets"
+
+
+def _asset_files(name="夜市的味道") -> list[Path]:
+    d = _assets_dir(name)
+    return sorted(d.iterdir()) if d.exists() else []
+
+
+def test_send_to_library把輸出檔與文字登記到專案素材(out):
+    name = _library_project()
+    img = out / "cover-1.png"
+    Image.new("RGB", (32, 18), "red").save(img)
+    wav = out / "speech-1.wav"
+    wav.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    res = _run("send-to-library", {"image": str(img), "audio": str(wav), "text": "大家好"}, {"project": name})
+    assert set(res) == {"text"} and "3 個素材" in res["text"] and name in res["text"]
+    assets = pj.load(name).assets
+    assert [a["kind"] for a in assets] == ["image", "audio", "text"]
+    by_kind = {a["kind"]: a for a in assets}
+    assert by_kind["image"]["label"] == "cover-1.png" and by_kind["image"]["ext"] == "png"
+    assert by_kind["audio"]["label"] == "speech-1.wav" and by_kind["audio"]["ext"] == "wav"
+    assert by_kind["text"]["ext"] == "txt"
+    for a, src in ((by_kind["image"], img.read_bytes()), (by_kind["audio"], wav.read_bytes()),
+                   (by_kind["text"], "大家好".encode("utf-8"))):
+        f = _assets_dir(name) / f"{a['id']}.{a['ext']}"
+        assert f.is_file() and not f.is_symlink() and f.read_bytes() == src and a["bytes"] == len(src)
+    assert img.exists() and wav.exists()   # 原檔不動
+    assert len(pj.list_history(name)) == 1  # 一次存檔(先移舊版入 history)
+
+
+def test_send_to_library自錄檔佔滿配額後被拒且不留新檔(out, monkeypatch):
+    """素材與自錄音檔共用磁碟配額(DIR-5 修正 3):audio/ 的自錄檔佔滿後,經節點加入素材被拒。"""
+    name = _library_project()
+    audio = Path(pj.ROOT) / "projects" / name / "audio"
+    audio.mkdir(exist_ok=True)
+    (audio / "0123456789abcdef.wav").write_bytes(b"\x00" * 1000)   # 模擬已存在的自錄音檔
+    img = out / "cover-q.png"
+    Image.new("RGB", (32, 18), "red").save(img)
+    monkeypatch.setattr(pj, "MAX_ASSET_BYTES", 1000 + img.stat().st_size - 1)
+    before = _asset_files(name)
+    with pytest.raises(pj.QuotaExceeded, match="上限"):
+        _run("send-to-library", {"image": str(img)}, {"project": name})
+    assert _asset_files(name) == before
+    assert pj.load(name).assets == []
+    assert len(pj.list_history(name)) == 0   # 沒有存檔
+
+
+def test_send_to_library未超過配額仍成功(out, monkeypatch):
+    name = _library_project()
+    audio = Path(pj.ROOT) / "projects" / name / "audio"
+    audio.mkdir(exist_ok=True)
+    (audio / "0123456789abcdef.wav").write_bytes(b"\x00" * 1000)
+    img = out / "cover-q.png"
+    Image.new("RGB", (32, 18), "red").save(img)
+    monkeypatch.setattr(pj, "MAX_ASSET_BYTES", 1000 + img.stat().st_size + len("大家好".encode("utf-8")))
+    res = _run("send-to-library", {"image": str(img), "text": "大家好"}, {"project": name})
+    assert "2 個素材" in res["text"]
+    assert [a["kind"] for a in pj.load(name).assets] == ["image", "text"]
+
+
+def test_send_to_library接受outputs下的相對路徑(out):
+    name = _library_project()
+    (out / "uploads").mkdir()
+    Image.new("RGB", (8, 8)).save(out / "uploads" / "a.jpg")
+    _run("send-to-library", {"image": "uploads/a.jpg"}, {"project": name})
+    assert [a["ext"] for a in pj.load(name).assets] == ["jpg"]
+
+
+@pytest.mark.parametrize("bad", ["", "../夜市", "a/b", "夜市 的味道", "café", "x" * 65, ".trash"])
+def test_send_to_library專案名稱不合規則時失敗(out, bad):
+    img = out / "a.png"
+    Image.new("RGB", (8, 8)).save(img)
+    with pytest.raises(ValueError):
+        _run("send-to-library", {"image": str(img)}, {"project": bad})
+    assert not (Path(pj.ROOT) / "projects").exists() or not any(
+        p.name != ".trash" for p in (Path(pj.ROOT) / "projects").iterdir())
+
+
+def test_send_to_library專案不存在時失敗且不建立專案(out):
+    img = out / "a.png"
+    Image.new("RGB", (8, 8)).save(img)
+    with pytest.raises(ValueError):
+        _run("send-to-library", {"image": str(img)}, {"project": "沒有這個專案"})
+    assert not (Path(pj.ROOT) / "projects" / "沒有這個專案").exists()
+
+
+def test_send_to_library拒絕outputs以外與符號連結(out, tmp_path):
+    name = _library_project()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.png"
+    Image.new("RGB", (8, 8)).save(secret)
+    (out / "link.png").symlink_to(secret)
+    (out / "dirlink").symlink_to(outside, target_is_directory=True)
+    for bad in (str(secret), "../outside/secret.png", str(out / "link.png"), "dirlink/secret.png", str(out)):
+        with pytest.raises(ValueError):
+            _run("send-to-library", {"image": bad}, {"project": name})
+    assert pj.load(name).assets == [] and _asset_files(name) == []
+
+
+def test_send_to_library拒絕指向outputs內的符號連結(out):
+    """DIR-5 統整 M-4:outputs/link.png → outputs/real.png(同在 outputs/ 內)也拒絕;目錄連結亦同。"""
+    name = _library_project()
+    real = out / "real.png"
+    Image.new("RGB", (8, 8)).save(real)
+    (out / "link.png").symlink_to(real)
+    (out / "sub").mkdir()
+    Image.new("RGB", (8, 8)).save(out / "sub" / "b.png")
+    (out / "sublink").symlink_to(out / "sub", target_is_directory=True)
+    (out / "self").symlink_to(out, target_is_directory=True)
+    for bad in (str(out / "link.png"), "link.png", "sublink/b.png", str(out / "self" / "real.png")):
+        with pytest.raises(ValueError, match="符號連結"):
+            _run("send-to-library", {"image": bad}, {"project": name})
+    assert pj.load(name).assets == [] and _asset_files(name) == []
+    _run("send-to-library", {"image": "sub/b.png"}, {"project": name})   # 一般檔案照舊接受
+    assert [a["ext"] for a in pj.load(name).assets] == ["png"]
+
+
+def test_send_to_library檢查檔頭_副檔名png但內容是文字被拒絕(out):
+    """DIR-5 統整 M-5:與 /api/upload 同一套嗅探(media.sniff_binary)。"""
+    name = _library_project()
+    (out / "fake.png").write_text("這不是圖片", encoding="utf-8")
+    (out / "fake.mp3").write_bytes(b"hello world, not mp3")
+    with pytest.raises(ValueError, match="不符"):
+        _run("send-to-library", {"image": str(out / "fake.png")}, {"project": name})
+    with pytest.raises(ValueError, match="不符"):
+        _run("send-to-library", {"audio": str(out / "fake.mp3")}, {"project": name})
+    assert pj.load(name).assets == [] and _asset_files(name) == []
+    Image.new("RGB", (8, 8)).save(out / "ok.png")
+    _run("send-to-library", {"image": str(out / "ok.png")}, {"project": name})
+    assert [a["ext"] for a in pj.load(name).assets] == ["png"]
+
+
+def test_送到素材庫與upload共用同一個嗅探函式():
+    import studio_server as ss
+    assert ss._sniff_binary is media.sniff_binary and ss.M4A_BRANDS is media.M4A_BRANDS
+
+
+def test_send_to_library拒絕不在白名單的副檔名與種類不符(out):
+    name = _library_project()
+    (out / "v.mp4").write_bytes(b"mp4")
+    (out / "a.wav").write_bytes(b"RIFF")
+    with pytest.raises(ValueError):
+        _run("send-to-library", {"image": str(out / "v.mp4")}, {"project": name})
+    with pytest.raises(ValueError):
+        _run("send-to-library", {"image": str(out / "a.wav")}, {"project": name})
+    assert pj.load(name).assets == []
+
+
+def test_send_to_library沒有輸入時失敗(out):
+    name = _library_project()
+    with pytest.raises(ValueError):
+        _run("send-to-library", {}, {"project": name})
+    with pytest.raises(ValueError):
+        _run("send-to-library", {"text": "   "}, {"project": name})
+
+
+def test_send_to_library超過素材上限時不留複製檔(out, monkeypatch):
+    name = _library_project()
+    img = out / "a.png"
+    Image.new("RGB", (8, 8)).save(img)
+    _run("send-to-library", {"image": str(img)}, {"project": name})
+    monkeypatch.setattr(pj, "MAX_ASSETS", 1)
+    before = _asset_files(name)
+    with pytest.raises(ValueError):
+        _run("send-to-library", {"image": str(img), "text": "文字"}, {"project": name})
+    assert _asset_files(name) == before
+    assert len(pj.load(name).assets) == 1
+
+
+def test_send_to_library不是重型節點且參數有上限():
+    spec = nodes.REGISTRY["send-to-library"]
+    assert spec.heavy is False and spec.label == "送到素材庫"
+    assert spec.params["project"].check("字" * 65)
+    assert spec.params["project"].check("夜市的味道") is None
+
+
+# ---------- DIR-5 修正 4:送到素材庫的檢查後、操作前換成符號連結 ----------
+
+def test_send_to_library來源目錄在解析後被換成連結時拒絕(out, tmp_path, monkeypatch):
+    name = _library_project()
+    (out / "sub").mkdir()
+    Image.new("RGB", (8, 8)).save(out / "sub" / "b.png")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    Image.new("RGB", (8, 8), "blue").save(outside / "b.png")
+    real = nodes._output_parts
+
+    def swapping(value, msg):   # 路徑解析(檢查)完成後、開檔前把 outputs/sub 換成指向外部的連結
+        parts = real(value, msg)
+        if not (out / "sub").is_symlink():
+            (out / "sub").rename(out / "sub-moved")
+            (out / "sub").symlink_to(outside, target_is_directory=True)
+        return parts
+    monkeypatch.setattr(nodes, "_output_parts", swapping)
+    with pytest.raises(ValueError, match="符號連結"):
+        _run("send-to-library", {"image": "sub/b.png"}, {"project": name})
+    assert pj.load(name).assets == [] and _asset_files(name) == []
+
+
+def test_send_to_library素材目錄開啟後被換成連結_不寫到外部(out, tmp_path, monkeypatch):
+    name = _library_project()
+    Image.new("RGB", (8, 8)).save(out / "ok.png")
+    outside = tmp_path / "outside-assets"
+    outside.mkdir()
+    real = pj.open_subdir
+
+    def swapping(pname, sub, **kw):
+        fd = real(pname, sub, **kw)
+        d = _assets_dir(name)
+        if sub == "assets" and not d.is_symlink():
+            d.rename(d.with_name("assets-moved"))
+            d.symlink_to(outside, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(pj, "open_subdir", swapping)
+    _run("send-to-library", {"image": str(out / "ok.png")}, {"project": name})
+    assert list(outside.iterdir()) == []                    # 沒寫進連結目標
+    assert len(list(_assets_dir(name).with_name("assets-moved").iterdir())) == 1

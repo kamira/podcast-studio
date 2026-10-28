@@ -1,15 +1,17 @@
 """封面、字幕、影片合成。podcast_studio.py 與 local_models_mcp.py 共用。"""
 import os
 import re
-import shutil
+import contextlib
+import secrets
+import stat
 import struct
 import subprocess
-import tempfile
 from pathlib import Path
 
 import imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+import safe_fs
 import taiwan_ai as tai
 
 FONT = "/System/Library/Fonts/STHeiti Medium.ttc"
@@ -26,18 +28,66 @@ def generate_image(prompt, width=1024, height=1024):
     path = tai.reserve("image", ".png")
     # mflux 遇到已存在的輸出檔不覆寫,而是改存成 `<名>_1.png`;所以讓它寫進新建的私有暫存目錄,
     # 完成後再以 os.replace 換到先佔下的路徑(rename 取代佔位檔本身,不跟隨連結)。
-    tmpdir = tempfile.mkdtemp(prefix=".mflux-", dir=tai.OUT)
+    tmpname, tmp_fd = _mkdtemp_out(".mflux-")
     try:
         with tai.discard_on_error(path):
-            tmp = Path(tmpdir) / "image.png"
+            tmp = Path(tai.OUT) / tmpname / "image.png"   # mflux 是外部程式,只能給路徑(殘餘風險)
             subprocess.run([str(tai.MFLUX), "--model", conf["model"], "--base-model", "schnell",
                             "--steps", str(conf["steps"]),
                             "--width", str(width), "--height", str(height), "--prompt", prompt,
                             "--output", str(tmp)], check=True, stdout=subprocess.DEVNULL, env=env)
-            os.replace(tmp, path)
+            # (DIR-5 修正 4)相對兩個目錄 fd 搬移:私有暫存目錄(建立時取得的 fd)→ outputs/ 的佔位檔名
+            st = safe_fs.lstat(tmp_fd, tmp.name)
+            if st is None or not stat.S_ISREG(st.st_mode):
+                raise OSError("生圖結果不是一般檔案")
+            with safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
+                safe_fs.replace(tmp_fd, tmp.name, out, Path(path).name)
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        os.close(tmp_fd)
+        _rmtree_in_out(tmpname)
     return path
+
+
+def _mkdtemp_out(prefix: str) -> tuple[str, int]:
+    """在 outputs/ 正下方建立私有暫存目錄(mkdir(dir_fd), 0700)並以 O_NOFOLLOW 開啟;回傳 (名稱, 目錄 fd)。
+
+    (DIR-5 修正 5)取代 tempfile.mkdtemp(路徑);之後本程式在暫存目錄內的寫入一律相對這個 fd。"""
+    with safe_fs.closing(safe_fs.open_dir(tai.OUT, create=False)) as out:
+        for _ in range(16):
+            name = f"{prefix}{secrets.token_hex(8)}"
+            try:
+                os.mkdir(name, 0o700, dir_fd=out)
+            except FileExistsError:
+                continue
+            return name, safe_fs.open_child(out, name)
+    raise FileExistsError("無法建立不重複的暫存目錄")
+
+
+def open_reserved(path):
+    """以寫入模式開啟 `taiwan_ai.reserve()` 佔下的 outputs/ 正下方檔案(DIR-5 修正 5)。
+
+    相對 outputs/ 的目錄 fd 以 O_WRONLY | O_TRUNC | O_NOFOLLOW 開啟既有佔位檔,fstat 確認是一般檔;
+    回傳二進位檔案物件(PIL 與文字寫入都經它,不再以路徑寫)。不在 outputs/ 正下方丟 ValueError。"""
+    p = Path(path)
+    if p.parent != Path(tai.OUT) and p.parent.resolve() != Path(tai.OUT).resolve():
+        raise ValueError("輸出檔必須在 outputs/ 之下")
+    with safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
+        fd = safe_fs.open_file(out, p.name, os.O_WRONLY | os.O_TRUNC)
+    return os.fdopen(fd, "wb")
+
+
+def save_image(img, path) -> None:
+    """把 PIL 圖片寫進 outputs/ 的佔位檔(格式依副檔名;經 open_reserved 的 fd 寫入)。"""
+    fmt = Image.registered_extensions().get(Path(path).suffix.lower())
+    with open_reserved(path) as f:
+        img.save(f, format=fmt)
+
+
+def _rmtree_in_out(path) -> None:
+    """刪除 outputs/ 正下方的暫存目錄(DIR-5 修正 4:相對 outputs/ 的目錄 fd 以 safe_fs.rmtree 遞迴,不跟隨連結)。"""
+    with contextlib.suppress(OSError, ValueError):
+        with safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
+            safe_fs.rmtree(out, Path(path).name, missing_ok=True)
 
 
 def to_16x9(path):
@@ -85,7 +135,7 @@ def make_cover(prompt, title):
     raw = generate_image(prompt, FLUX_W, FLUX_H)
     path = tai.reserve("cover", ".png")
     with tai.discard_on_error(path):
-        add_title(to_16x9(raw), title).save(path)
+        save_image(add_title(to_16x9(raw), title), path)
     return path
 
 
@@ -95,8 +145,10 @@ _WAV_PCM, _WAV_FLOAT, _WAV_EXTENSIBLE = 1, 3, 0xFFFE
 
 
 def _wav_read_chunks(path):
-    """走訪 RIFF chunk,回傳(fmt 內容, data 位元組數);找不到的回 None。OSError 由呼叫端轉換。"""
-    with open(path, "rb") as f:
+    """走訪 RIFF chunk,回傳(fmt 內容, data 位元組數);找不到的回 None。OSError 由呼叫端轉換。
+
+    path 也可以是已開啟的 fd(DIR-5 修正 4:呼叫端以 O_NOFOLLOW 開啟後傳入;本函式不關閉它)。"""
+    with open(path, "rb", closefd=not isinstance(path, int)) as f:
         size = f.seek(0, os.SEEK_END)
         f.seek(0)
         head = f.read(12)
@@ -185,7 +237,8 @@ def make_srt(script, seconds, path):
         end = t + seconds * len(s) / total
         rows.append(f"{i}\n{_ts(t)} --> {_ts(end)}\n{s.rstrip('。，,')}\n")
         t = end
-    Path(path).write_text("\n".join(rows), encoding="utf-8")
+    with open_reserved(path) as f:   # (DIR-5 修正 5)佔位檔經 outputs/ 的目錄 fd 開啟
+        f.write("\n".join(rows).encode("utf-8"))
     return path
 
 
@@ -232,3 +285,386 @@ def _run_ffmpeg(image_path, audio_path, script, path, srt):
         cmd += ["-t", f"{seconds:.3f}"]  # 本機計算的秒數,不是使用者字串
     cmd.append(str(path))
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------- 內容嗅探(CHG-20261022-04 DIR-5 統整 M-5:由 studio_server._sniff_binary 搬來,規則不變) ----------
+#
+# `/api/upload`(studio_server)與「送到素材庫」節點(nodes)共用;依檔頭位元組判斷內容是否與副檔名相符,
+# 不信任副檔名或用戶端 Content-Type。
+
+M4A_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2"})
+SNIFF_BYTES = 16
+
+
+def sniff_binary(ext: str, head: bytes) -> bool:
+    """ext 含開頭的點(例 `.png`);head 為檔頭至少 SNIFF_BYTES 位元組(不足時視為不符)。"""
+    if ext == ".png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if ext in (".jpg", ".jpeg"):
+        return head.startswith(b"\xff\xd8\xff")
+    if ext == ".webp":
+        return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    if ext == ".wav":
+        return head[:4] == b"RIFF" and head[8:12] == b"WAVE"
+    if ext == ".mp3":
+        if head.startswith(b"ID3"):
+            return True
+        if len(head) < 2 or head[0] != 0xFF or head[1] & 0xE0 != 0xE0:
+            return False
+        version, layer = (head[1] >> 3) & 0x03, (head[1] >> 1) & 0x03
+        return version != 0x01 and layer != 0x00   # 保留值不是合法 MPEG 音訊框
+    if ext == ".m4a":
+        return head[4:8] == b"ftyp" and head[8:12] in M4A_BRANDS
+    return False
+
+
+# ---------- 時間軸匯出(CHG-20261022-04 T5) ----------
+
+RENDER_RATE = 48000      # 匯出音軌:單聲道 16 位元 PCM,48 kHz
+RENDER_TIMEOUT = 600     # 渲染逾時下限(秒);實際 = max(600, 音訊秒數 × 2)
+DECODE_TIMEOUT = 120     # 單一片段轉成 PCM 的逾時(秒)
+RENDER_MAX_MS = 60 * 60 * 1000  # 與 project.MAX_AUDIO_SECONDS 相同:音訊總長上限 60 分鐘
+_SILENCE_CHUNK = RENDER_RATE * 10  # 寫入靜音時每次最多寫幾個樣本
+
+
+class RenderError(ValueError):
+    """匯出被拒絕或失敗;訊息為繁中、不含本機絕對路徑,可直接給使用者看。
+
+    segments:因尚未合成而被拒絕時,列出沒有音檔的片段 id(依片段順序)。
+    """
+
+    def __init__(self, message, segments=()):
+        super().__init__(message)
+        self.segments = list(segments)
+
+
+def _finite(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+
+
+def _ms_of(seconds) -> int:
+    """秒 → 整數毫秒(四捨五入);負數回 -1 交給呼叫端拒絕。"""
+    return int(float(seconds) * 1000 + 0.5) if seconds >= 0 else -1
+
+
+def _deci_of_ms(ms: int) -> int:
+    """毫秒 → 以 0.1 秒為單位的整數(四捨五入,0.5 進位)。"""
+    return (ms + 50) // 100
+
+
+def _project_parts(path: Path) -> list[str] | None:
+    """`projects/<名稱>/<sub>/<檔名>` 的路徑元件(相對 repo 根);不是這個形狀回 None。"""
+    import project as pj
+    try:
+        rel = Path(path).relative_to(pj._top() / pj.PROJECTS_NAME)
+    except ValueError:
+        return None
+    return [pj.PROJECTS_NAME, *rel.parts] if len(rel.parts) == 3 else None
+
+
+def _open_project_file(path: Path) -> int:
+    """(DIR-5 修正 4)自 repo 根以 dir_fd 逐層 O_NOFOLLOW 開啟專案內的一般檔;丟 safe_fs 的例外。"""
+    import project as pj
+    parts = _project_parts(path)
+    if parts is None:
+        raise safe_fs.UnsafePathError("不在專案目錄內")
+    return safe_fs.open_path(pj._top(), parts)
+
+
+def _contained_file(base: Path, path: Path) -> Path:
+    """path 必須是 base(專案子目錄)正下方的一般檔案,任一層都不得是符號連結(以 dir_fd 逐層開啟確認)。"""
+    if path.parent != base:
+        raise RenderError("✗ 素材檔不是專案內的一般檔案(不接受符號連結)")
+    try:
+        os.close(_open_project_file(path))
+    except FileNotFoundError:
+        raise RenderError("✗ 找不到素材檔") from None
+    except (OSError, ValueError):
+        raise RenderError("✗ 素材檔不是專案內的一般檔案(不接受符號連結)") from None
+    return path
+
+
+def _open_nofollow(path: Path) -> int:
+    """開啟專案內的素材或音檔供讀取:自 repo 根逐層 O_NOFOLLOW + fstat 確認一般檔(DIR-5 修正 4);
+    之後只讀這個 fd(經 stdin 交給 ffmpeg 或由 PIL 讀取),不以路徑重開。"""
+    try:
+        return _open_project_file(path)
+    except (OSError, ValueError):
+        raise RenderError("✗ 素材檔無法讀取(不接受符號連結)") from None
+
+
+def _check_layout(project, layout) -> tuple[int, list, list]:
+    """檢查 layout 與專案一致;回傳(總長毫秒, 片段 [(id, 起, 訖)] 毫秒, cue [(起, 訖, 文字)] 毫秒)。"""
+    bad = RenderError("✗ 時間軸資料與專案不一致,請重新整理後再匯出")
+    if not isinstance(layout, dict) or not _finite(layout.get("duration")):
+        raise bad
+    total = _ms_of(layout["duration"])
+    if total <= 0:
+        raise RenderError("✗ 時間軸總長為 0,沒有可匯出的內容")
+    if total > RENDER_MAX_MS:
+        raise RenderError("✗ 專案音訊總長超過 60 分鐘")
+    segs = layout.get("segments")
+    if not isinstance(segs, list) or [s.get("id") if isinstance(s, dict) else None for s in segs] \
+            != [s["id"] for s in project.segments]:
+        raise bad
+    spans, prev = [], 0
+    for s in segs:
+        if not (_finite(s.get("start")) and _finite(s.get("end"))):
+            raise bad
+        a, b = _ms_of(s["start"]), _ms_of(s["end"])
+        if not (prev <= a <= b <= total):
+            raise bad
+        spans.append((s["id"], a, b))
+        prev = b
+    cues = layout.get("cues") or []
+    if not isinstance(cues, list):
+        raise bad
+    out = []
+    for c in cues:
+        if not (isinstance(c, dict) and _finite(c.get("start")) and _finite(c.get("end"))
+                and isinstance(c.get("text"), str)):
+            raise bad
+        a, b = _ms_of(c["start"]), _ms_of(c["end"])
+        text = " ".join(c["text"].split())  # 換行與空白行會破壞 SRT 結構
+        if not (0 <= a <= b <= total) or not text:
+            raise bad
+        out.append((a, b, text))
+    return total, spans, out
+
+
+def _resolve_images(project, layout, total: int) -> list:
+    """畫面軌 → [(起, 訖)(0.1 秒為單位), 素材真實路徑];asset id 只在本專案 assets/ 內解析。"""
+    import project as pj
+    items = layout.get("images") or []
+    if not isinstance(items, list):
+        raise RenderError("✗ 畫面軌資料不正確")
+    if not items:
+        return []
+    assets = {a.get("id"): a for a in project.assets if isinstance(a, dict)}
+    try:
+        adir = pj.subdir(project.name, "assets")
+    except FileNotFoundError:
+        raise RenderError("✗ 專案沒有素材目錄") from None
+    except pj.ProjectError as e:
+        raise RenderError(f"✗ 素材目錄無法使用:{e}") from None
+    total_d = -(-total // 100)
+    out = []
+    for m in items:
+        aid = m.get("file") if isinstance(m, dict) else None
+        if not isinstance(aid, str) or not pj.ID_RE.fullmatch(aid):
+            raise RenderError("✗ 畫面軌的素材 id 不合法")
+        asset = assets.get(aid)
+        if not asset or asset.get("kind") != "image" or asset.get("ext") not in pj.ASSET_EXTS["image"]:
+            raise RenderError("✗ 畫面軌引用的不是本專案的圖片素材")
+        if not (_finite(m.get("start")) and _finite(m.get("end"))):
+            raise RenderError("✗ 畫面軌資料不正確")
+        a_ms, b_ms = _ms_of(m["start"]), _ms_of(m["end"])
+        if a_ms < 0 or b_ms < a_ms:
+            raise RenderError("✗ 畫面軌資料不正確")
+        start = _deci_of_ms(a_ms)
+        end = total_d if b_ms >= total else _deci_of_ms(b_ms)  # 撐到總長的圖一路蓋到最後一格
+        path = _contained_file(adir, adir / f"{aid}.{asset['ext']}")
+        if start < min(end, total_d):
+            out.append((start, min(end, total_d), path))
+    return out
+
+
+def _segment_audio(project) -> list:
+    """每個片段的(變速後)音檔真實路徑;變速沿用 `tts_service.apply_speed`(與預覽同一份檔案)。"""
+    import project as pj
+    import tts_service  # 延後匯入:tts_service 匯入本模組
+    try:
+        adir = pj.subdir(project.name, "audio")
+    except FileNotFoundError:
+        raise RenderError("✗ 專案沒有音檔目錄") from None
+    except pj.ProjectError as e:
+        raise RenderError(f"✗ 音檔目錄無法使用:{e}") from None
+    paths = []
+    for seg in project.segments:
+        try:
+            p = Path(tts_service.apply_speed(seg, project))
+        except tts_service.SynthError as e:
+            raise RenderError(f"{e}(片段 {seg['id']})") from None
+        except pj.ProjectError as e:
+            raise RenderError(f"✗ 音檔目錄無法使用:{e}") from None
+        paths.append(_contained_file(adir, p))
+    return paths
+
+
+def _decode_argv(seconds: float | None) -> list[str]:
+    """解碼用的 ffmpeg argv;seconds 有值時在輸出前加 `-t <秒數,小數 3 位>`,只解出需要的長度。"""
+    limit = ["-t", f"{seconds:.3f}"] if seconds is not None else []
+    return [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-i", "pipe:0",
+            "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(RENDER_RATE), *limit, "pipe:1"]
+
+
+def _decode_pcm(path: Path, seconds: float | None = None) -> bytes:
+    """以 ffmpeg 把音檔轉成 RENDER_RATE 單聲道 s16le;輸入以 O_NOFOLLOW 開啟後經 stdin 傳入,argv 不含路徑。
+
+    seconds:該片段在 layout 中需要的秒數(DIR-5 統整 M-3);ffmpeg 以 `-t` 截止,不把整個音檔解進記憶體。"""
+    fd = _open_nofollow(path)
+    try:
+        r = subprocess.run(_decode_argv(seconds),
+                           stdin=fd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           check=True, timeout=DECODE_TIMEOUT)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        raise RenderError("✗ 語音片段無法解碼") from None
+    finally:
+        os.close(fd)
+    return r.stdout
+
+
+def _write_silence(w, samples: int) -> None:
+    while samples > 0:
+        n = min(samples, _SILENCE_CHUNK)
+        w.writeframes(b"\x00\x00" * n)
+        samples -= n
+
+
+def _to_sample(ms: int) -> int:
+    return (ms * RENDER_RATE + 500) // 1000
+
+
+class _PcmWriter:
+    """寫 16 位元單聲道 PCM WAV;總樣本數事先已知,檔頭一次寫好(以 struct 組 RIFF,不用 wave 模組)。"""
+
+    def __init__(self, f, samples: int):
+        self.f = f
+        data = samples * 2
+        f.write(b"RIFF" + struct.pack("<I", 36 + data) + b"WAVE"
+                + b"fmt " + struct.pack("<IHHIIHH", 16, _WAV_PCM, 1, RENDER_RATE, RENDER_RATE * 2, 2, 16)
+                + b"data" + struct.pack("<I", data))
+
+    def writeframes(self, pcm: bytes) -> None:
+        self.f.write(pcm)
+
+
+def _create_in(work: int, name: str):
+    """在暫存目錄(目錄 fd)內排他建立 name(O_CREAT | O_EXCL | O_NOFOLLOW),回傳二進位寫入檔案物件。"""
+    return os.fdopen(safe_fs.create_excl(work, name, 0o600), "wb")
+
+
+def _build_audio(paths: list, spans: list, total: int, work: int, name: str) -> None:
+    """依 layout 把各片段放到起點(片段之間補靜音),每段截或補到 layout 長度;總長 = layout.duration。"""
+    with _create_in(work, name) as f:
+        w = _PcmWriter(f, _to_sample(total))
+        pos = 0
+        for path, (_, a_ms, b_ms) in zip(paths, spans):
+            a, b = _to_sample(a_ms), _to_sample(b_ms)
+            _write_silence(w, a - pos)
+            need = (b - a) * 2
+            pcm = _decode_pcm(path, (b_ms - a_ms) / 1000)[:need]
+            w.writeframes(pcm)
+            _write_silence(w, (need - len(pcm)) // 2)
+            pos = b
+        _write_silence(w, _to_sample(total) - pos)
+
+
+def _letterbox(path: Path, work: int, name: str) -> None:
+    """圖片等比縮放進 1920×1080、黑邊置中(與 make_video 的 scale + pad 相同);以 O_NOFOLLOW 開啟。"""
+    fd = _open_nofollow(path)
+    try:
+        with os.fdopen(fd, "rb") as f, Image.open(f) as im:
+            img = im.convert("RGB")
+    except Exception:
+        raise RenderError("✗ 圖片素材無法讀取") from None
+    scale = min(VIDEO_W / img.width, VIDEO_H / img.height)
+    img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
+    canvas = Image.new("RGB", (VIDEO_W, VIDEO_H))
+    canvas.paste(img, ((VIDEO_W - img.width) // 2, (VIDEO_H - img.height) // 2))
+    with _create_in(work, name) as f:
+        canvas.save(f, format="PNG")
+
+
+def _build_video_list(images: list, total: int, work: int) -> str:
+    """畫面軌 → concat demuxer 清單(0.1 秒一格;後開始的圖蓋過先前的圖,沒有圖的時段為黑畫面)。"""
+    total_d = -(-total // 100)
+    slots = [None] * total_d
+    for start, end, path in sorted(images, key=lambda x: x[0]):
+        slots[start:end] = [path] * (end - start)
+    names_of, runs = {}, []
+    for p in slots:
+        if p not in names_of:
+            name = f"v{len(names_of):03d}.png"
+            names_of[p] = name
+            if p is None:
+                with _create_in(work, name) as f:
+                    Image.new("RGB", (VIDEO_W, VIDEO_H)).save(f, format="PNG")
+            else:
+                _letterbox(p, work, name)
+        if runs and runs[-1][0] == names_of[p]:
+            runs[-1][1] += 1
+        else:
+            runs.append([names_of[p], 1])
+    lines = ["ffconcat version 1.0"]
+    for name, n in runs:
+        lines += [f"file {name}", f"duration {n / 10:.1f}"]
+    lines.append(f"file {runs[-1][0]}")  # concat demuxer 會忽略最後一筆的 duration,重複最後一張補足長度
+    with _create_in(work, "video.ffconcat") as f:
+        f.write(("\n".join(lines) + "\n").encode("utf-8"))
+    return "video.ffconcat"
+
+
+def _write_timeline_srt(cues: list, path: Path) -> None:
+    rows = [f"{i}\n{_ts(a / 1000)} --> {_ts(b / 1000)}\n{text}\n" for i, (a, b, text) in enumerate(cues, 1)]
+    try:   # (DIR-5 修正 5)SRT 佔位檔經 outputs/ 的目錄 fd 開啟(O_NOFOLLOW + fstat)
+        with open_reserved(path) as f:
+            f.write("\n".join(rows).encode("utf-8"))
+    except (OSError, ValueError):
+        raise RenderError("✗ 字幕檔無法寫入(不接受符號連結)") from None
+
+
+def render_timeline(project, layout):
+    """依 `timeline.layout(project)` 匯出 1920×1080 MP4(H.264 + AAC + mov_text)與同主檔名 SRT,回傳 (mp4, srt)。
+
+    - 專案中任何片段沒有音檔 → RenderError(`.segments` 列出片段 id),不輸出任何檔案。
+    - 音軌:各片段的(變速後,`tts_service.apply_speed`)音檔轉成 48 kHz 單聲道,放在 layout 的起點、
+      截或補到 layout 長度,片段之間補靜音;總長 = layout.duration
+      (與 T4 一致:片段長度總和 + 片段之間的停頓總和,最後一段之後的停頓不計)。
+    - 畫面:圖片起訖四捨五入到 0.1 秒,後開始的圖蓋過先前的圖,沒有圖的時段為黑畫面;
+      輸出影格率 `-r 10`,輸出檔名前加 `-t <layout.duration,小數 3 位>`(修訂 3,R3-5)。
+    - 素材與音檔只依 asset id / 片段音檔 id 在本專案 `assets/`、`audio/` 內解析,符號連結一律拒絕;
+      ffmpeg 的 argv 只有伺服器產生的路徑(暫存目錄、輸出佔位檔),片段音檔經 stdin 傳入。
+    - 輸出以 `taiwan_ai.reserve()` 排他佔位(mp4 + 同主檔名 .srt),失敗時刪除佔位檔與暫存目錄。
+    """
+    missing = [s["id"] for s in project.segments if not s.get("audio")]
+    if missing:
+        raise RenderError(f"✗ 還有 {len(missing)} 個片段尚未合成,無法匯出", missing)
+    if not project.segments:
+        raise RenderError("✗ 沒有可匯出的語音片段")
+    total, spans, cues = _check_layout(project, layout)
+    images = _resolve_images(project, layout, total)
+    audio_paths = _segment_audio(project)
+
+    path = tai.reserve("podcast", ".mp4", also=(".srt",))
+    srt = path.with_suffix(".srt")
+    with tai.discard_on_error(path, srt):
+        work_name, work_fd = _mkdtemp_out(".render-")
+        work = Path(tai.OUT) / work_name   # 只交給外部 ffmpeg(殘餘風險);本程式寫入一律相對 work_fd
+        try:
+            _build_audio(audio_paths, spans, total, work_fd, "audio.wav")
+            wav = work / "audio.wav"
+            listing = work / _build_video_list(images, total, work_fd)
+            _write_timeline_srt(cues, srt)
+            cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-y",
+                   "-f", "concat", "-i", str(listing), "-i", str(wav)]
+            if cues:
+                cmd += ["-i", str(srt), "-map", "0:v", "-map", "1:a", "-map", "2:s",
+                        "-c:s", "mov_text", "-metadata:s:s:0", "language=chi"]
+            else:
+                cmd += ["-map", "0:v", "-map", "1:a"]
+            # concat 的靜止圖每張只有一幀;只靠 `-r 10` 時最後一張不會補幀(實測影片軌只到最後一張的起點),
+            # 所以先以 fps 濾鏡展開成每 0.1 秒一幀,再由 `-t` 截止
+            cmd += ["-vf", "fps=10",
+                    "-c:v", "libx264", "-tune", "stillimage", "-r", "10", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-t", f"{total / 1000:.3f}", str(path)]  # 本機計算的秒數,不是使用者字串
+            try:
+                subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=max(RENDER_TIMEOUT, total / 1000 * 2))
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                raise RenderError("✗ 影片渲染失敗") from None
+        finally:
+            os.close(work_fd)
+            _rmtree_in_out(work_name)
+    return path, srt

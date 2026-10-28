@@ -116,7 +116,7 @@
 | 編號 | 需求 | 優先級 | 對應 CHG |
 |------|------|--------|----------|
 | FR-31 | 網頁**只有三個分頁**:建立 Podcast、設定、免責說明與授權;頁首與各頁**不放**步驟順序說明或「本機執行」之類的說明文字 | P0 | CHG-20261022-04 |
-| FR-32 | 「建立 Podcast」為**步驟精靈**:每次只顯示一個步驟,只有「上一步 / 下一步」;步驟由「設定 › 進階流程」目前選用的流程決定,預設 ① 文稿 ② 語音 ③ 封面 ④ 剪輯(時間軸)⑤ 匯出;每一步都可拖入自己的檔案取代該步的 AI 產出 | P0 | CHG-20261022-04 |
+| FR-32 | 「建立 Podcast」為**步驟精靈**:每次只顯示一個步驟,只有「上一步 / 下一步」;步驟由「設定 › 進階流程」目前選用的流程決定,預設 ① 文稿 ② 語音 ③ 封面 ④ 剪輯(時間軸)⑤ 匯出;每一步都可拖入自己的檔案取代該步的 AI 產出。註(v1.8,CHG-20261022-04 修訂 3 R3-1):「目前選用的流程」即預設範本 `workflows/default.json`,精靈讀 `GET /api/workflows/default` 的頂層 `steps`,不另設選用流程的設定鍵 | P0 | CHG-20261022-04 |
 | FR-33 | **語速倍率**:設定中有全域預設(預設 1.15×);語音步驟與剪輯步驟中每一句可個別覆寫,範圍 0.5–2.0×、精度 0.05;以 ffmpeg `atempo` 變速並保留音高;**只改語速不重新合成** | P0 | CHG-20261022-04 |
 | FR-34 | 「免責說明與授權」分頁:AI 生成內容聲明、各模型與元件的授權(逐項列出,來源取自各模型卡 / LICENSE,取不到標「未知」)、聲線複製須取得聲音所有人同意的提醒 | P1 | CHG-20261022-04 |
 | FR-16(修改) | 節點畫布由主畫面改放「設定 › 進階流程」,用來調整精靈的步驟與模型;一般使用不需要看到它 | P1 | CHG-20261022-01 |
@@ -188,6 +188,19 @@
 - [ ] NFR 安全:錯誤 `Host` 的請求(含 GET)、缺 `X-Studio-Token` 或錯誤 `Origin` 的改變狀態請求一律 403;`/files/` 取不到 `outputs/` 以外的檔案
 - [ ] FR-15:乾淨環境執行 `setup_breezyvoice.sh` 成功,正規化測試輸出含「兩千零二十六年」
 
+> v1.8(2026-10-28,CHG-20261022-04 結構文件更新):加入 FR-24~35。條件取自 CHG-20261022-04 的 Acceptance operation / observe / pass,狀態仍以 ACC 為準。
+
+- [ ] FR-31/34/35:首頁只有「精靈」「完整模式」兩張卡片、右上角一個 ⚙(`aria-label="設定"`)、底部一個「免責說明與授權」連結,任何頁面沒有分頁列(`role="tab"`)、沒有「本機」字樣或以「→」串起的步驟說明;免責頁逐項列出模型與元件授權(取不到標「未知」)與聲線同意提醒
+- [ ] FR-32:精靈一次只顯示一步、只有上一步 / 下一步;步驟取自 `workflows/default.json` 的 `steps`;在「設定 › 進階流程」刪除封面步驟節點並覆寫 `default` 後,精靈步驟不含「封面」且仍含「剪輯」
+- [ ] FR-35/24:完整模式在同一畫面顯示文稿、語音、封面、素材庫、預覽、屬性、時間軸三軌,沒有上一步 / 下一步;精靈與完整模式顯示同一份專案內容
+- [ ] FR-25:逐句合成,第一句在整批合成結束前就出現在語音軌並可播放;改一句只重新合成該句(伺服器 log 的合成次數);合成期間 worker 對外連線數為 0(ADP-12)
+- [ ] FR-26:停頓可在設定(逗號、句號、段落預設)、屬性面板與時間軸拖拉空隙設定,範圍 0–5 秒、精度 0.1 秒;停頓 0 秒的空隙仍可拖拉;匯出的 MP4 第 2、3 句之間以 `silencedetect`(-40 dB)測得 1.5 ± 0.1 秒靜音
+- [ ] FR-27:改一個字的聲調(例「好」改四聲)只重新合成該句,試聽確認念法
+- [ ] FR-28:SRT 每個 cue 起點與對應片段起點差 ≤ 0.05 秒;超過 24 字的片段切成多個 cue
+- [ ] FR-29:畫面軌可放多張圖並拖邊緣調整起訖;預覽中字幕、語音、畫面同步
+- [ ] FR-30:匯出 1920×1080 H.264 + AAC + mov_text 與 SRT;專案存檔保留最近 10 版,可還原
+- [ ] FR-33:每句語速 0.5–2.0×、精度 0.05,改語速只重做變速、不重新合成;全域預設 1.15×
+
 ## 8. AI 開發約定
 
 - **進場**:每個 session 先讀 `AGENTS.md` → 本文件 → `docs/structure/*.md` → `docs/knowledge/INDEX.md`。
@@ -227,7 +240,7 @@
 | ADP-9 | `speak()` 子程序環境只給 `PYTHONUTF8`、`PATH`,沒有 `HOME` | `taiwan_ai.py:139` | 〔觀察〕;〔未知〕是否影響(文件稱 CLI 曾成功) | 依賴 `HOME` 的快取路徑(HF / matplotlib)可能寫到非預期位置或失敗 |
 | ADP-10 | **已失效**:`podcast_studio.py` 已隨 CHG-20261022-01 T13 刪除,新版 `make-video` 節點的參數名為 `subtitles`。原內容:網頁勾選框變數名 `burn_subs`(燒錄),實作是軟字幕 mov_text;行為與 `PODCAST_STUDIO.md §8 #3` 一致,只是命名誤導 | `podcast_studio.py:62,99` | 〔觀察〕 | 後續修改者可能誤以為是硬字幕 |
 | ADP-11 | `PODCAST_STUDIO.md` 標示「MCP 伺服器已實作並測試」等狀態——是**自述**,導入時未重驗 | `PODCAST_STUDIO.md` 開頭與 §11 | 〔觀察〕 | 不得當作驗收證據;已盤點 ≠ 已驗收 |
-| ADP-12 | **由 CHG-20261022-01 處理**(T4:`taiwan_ai.speak()` 子程序環境加入 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`;CHG-20261022-04 的 `breezy_worker` 另行處理;結案以 ACC 為準)。BreezyVoice 每次載入模型都呼叫 `snapshot_download`(預設 `--model_path` 是 Hugging Face repo id `MediaTek-Research/BreezyVoice-300M`,不是本機路徑);G2PW 以 `BertTokenizer.from_pretrained('bert-base-chinese')` 載入分詞器;`speak()` 的子程序環境沒有 `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` | `tools/BreezyVoice/single_inference.py:207`(呼叫)、`:400`(預設值);`tools/BreezyVoice/cosyvoice/cli/cosyvoice.py:27`;`tools/BreezyVoice/.venv/lib/python3.10/site-packages/g2pw/api.py:84`;`taiwan_ai.py:194`(env 只有 `PYTHONUTF8`、`PATH`) | 〔觀察〕路徑;〔推論〕執行期實際連線未以封包觀察重現(2026-10-26 新增,非導入時盤點) | 每次語音合成都可能連線 Hugging Face 查詢模型版本,與 §5「不送資料出本機」衝突;修正規劃:CHG-20261022-01 T4(`speak()`)、CHG-20261022-04 T1(`breezy_worker`)設定兩個離線變數 |
+| ADP-12 | **由 CHG-20261022-01 處理**(T4:`taiwan_ai.speak()` 子程序環境加入 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`;CHG-20261022-04 的 `breezy_worker` 另行處理——v1.8 註:由 CHG-20261022-04 T3 處理,`tts_service` 以 `env=taiwan_ai.BREEZY_ENV` 啟動 worker(修訂 3 R3-3),離線變數只有一個來源;結案以 ACC 為準)。BreezyVoice 每次載入模型都呼叫 `snapshot_download`(預設 `--model_path` 是 Hugging Face repo id `MediaTek-Research/BreezyVoice-300M`,不是本機路徑);G2PW 以 `BertTokenizer.from_pretrained('bert-base-chinese')` 載入分詞器;`speak()` 的子程序環境沒有 `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` | `tools/BreezyVoice/single_inference.py:207`(呼叫)、`:400`(預設值);`tools/BreezyVoice/cosyvoice/cli/cosyvoice.py:27`;`tools/BreezyVoice/.venv/lib/python3.10/site-packages/g2pw/api.py:84`;`taiwan_ai.py:194`(env 只有 `PYTHONUTF8`、`PATH`) | 〔觀察〕路徑;〔推論〕執行期實際連線未以封包觀察重現(2026-10-26 新增,非導入時盤點) | 每次語音合成都可能連線 Hugging Face 查詢模型版本,與 §5「不送資料出本機」衝突;修正規劃:CHG-20261022-01 T4(`speak()`)、CHG-20261022-04 T1(`breezy_worker`)設定兩個離線變數 |
 
 ## 10. 導入記錄(治理基準點)
 
@@ -252,5 +265,6 @@
 | v1.5 | 2026-10-26 | 修改 FR-21(設定改存 SQLite)、FR-25(逐句合成定案 B2)、FR-31(首頁雙卡片 + 設定圖示,取代三分頁)、FR-34(免責說明改為連結);新增 FR-35(完整模式);§9 新增 ADP-12(BreezyVoice 可能連線 Hugging Face) | 使用者指示;2026-10-26 實測與查證;CHG-20261022-01、CHG-20261022-04 修訂 2 |
 | v1.4 | 2026-10-23 | §5 新增「merge 前 CI 全綠」;§8 新增 CI/CD 約定(每步驟 PR、四項檢查、程式變更使用者核准、infra-approved、只允許 squash、暫停 27B 期間的 `--codex-seats`) | CHG-20261022-03 結構文件更新;DIR-1、DIR-2 |
 | v1.6 | 2026-10-26 | §7 驗收條件改寫為新介面(`studio_server.py`、設定 › 進階流程、檔案拖放、設定資料庫);§9 ADP-1、ADP-2、ADP-8、ADP-12 標「由 CHG-20261022-01 處理」(結案以 ACC 為準),ADP-10 隨 Gradio 版刪除失效 | CHG-20261022-01 結構文件更新 |
+| v1.8 | 2026-10-28 | §7 加入 FR-24~35 驗收條件;FR-32 註明「目前選用的流程」即 `workflows/default.json`;§9 ADP-12 註明 worker 部分由 CHG-20261022-04 T3 以 `taiwan_ai.BREEZY_ENV` 處理 | CHG-20261022-04 結構文件更新(DIR-5 修正輪) |
 | v1.7 | 2026-10-26 | §7 新增「設定頁改生圖步數與聲線後網頁與 MCP 皆生效」「存工作流程後工作樹乾淨」兩項;FR-5/6/12 條件補「影片軌與音軌長度差 ≤ 0.1 秒」 | CHG-20261026-01 結構文件更新 |
 | v1.8 | 2026-10-28 | §8 CI/CD 約定:`review` 檢查改看統整席判定(各席為意見,不具否決效力);治理基礎設施清單加 `scripts/review_decision.py`;本機審議步驟補統整席與 `review_decision.py`,並註明統整席(雲端 Claude)讀取待審資料屬 DIR-6 第 10 條的資料外送例外 | CHG-20261028-02;DIR-6 |

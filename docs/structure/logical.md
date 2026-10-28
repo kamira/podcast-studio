@@ -3,6 +3,7 @@
 > 導入反推(2026-10-22,基準點 `7da165b6048897abb8acac4bba69db9677827471`)。來源等級:〔觀察〕/〔推論〕/〔未知〕,定義見 `docs/ai-guideline.md` 表頭。
 > 本文件描述**現況**,不代表現況正確;已知缺陷見 Guideline §9(ADP-n)。
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:網頁改為 `studio_server.py`(FastAPI + 原生 JS 節點畫布),移除 Gradio 版與 CLI;架構圖與流程 A 改寫,新增檔案拖放流程與設定讀寫流程(以 T1~T13 合併後的 main 為準;端到端驗收結果以 `docs/acceptance/` 為準)。
+> 2026-10-28 依 CHG-20261022-04 結構文件更新:新增「專案編輯器」節(首頁雙卡片、精靈、完整模式、編輯器元件、專案模組;流程 E 逐句合成含合成中途試聽、流程 F 改聲調、流程 G 匯出)與相依方向。
 > 2026-10-26 依 CHG-20261026-01 結構文件更新:媒體層改經 `taiwan_ai.role_config()` 讀生圖設定(不再讀 `FLUX`),語音改讀聲線設定;耦合點補上 `roles.image`、`roles.voice` 的讀取端(以 T1~T5 合併後的 main 為準)。
 > 2026-10-28 依 CHG-20261028-01 結構文件更新:CI/CD 流程的本機審議步驟補記 Codex 席讀取完整程式的方式。
 > 2026-10-28 依 CHG-20261028-02 結構文件更新:本機審議改為「六席意見 → 統整席判定」;流程圖補統整席與 `scripts/review_decision.py`;`review` 檢查與 DIR-4 改依統整判定。
@@ -11,12 +12,13 @@
 
 | 層/模組 | 職責 | 依賴 | 回應需求 | 等級 |
 |---------|------|------|----------|------|
-| 前端 `static/`(`index.html`、`app.js`、`style.css`、`vendor/drawflow.*`) | 首頁右上角 ⚙ 進入設定頁;設定頁子頁:模型、審議席位、進階流程(節點畫布:拖出節點、連線型別檢查、執行 / 停止、SSE 狀態與預覽、文字輸出可編輯並釘住、檔案拖放、工作流程存檔 / 載入) | `studio_server` 的 HTTP API;Drawflow 0.0.60 | FR-16~21、23、31 | 〔觀察〕 |
+| 前端 `static/`(`index.html`、`app.js`、`style.css`、`vendor/drawflow.*`;專案編輯器的 `project.js`、`timeline.js`、`wizard.js`、`edit.js` 見「專案編輯器」節) | 首頁右上角 ⚙ 進入設定頁;設定頁子頁:模型、審議席位、語音預設(CHG-20261022-04 T8)、進階流程(節點畫布:拖出節點、連線型別檢查、執行 / 停止、SSE 狀態與預覽、文字輸出可編輯並釘住、檔案拖放、工作流程存檔 / 載入) | `studio_server` 的 HTTP API;Drawflow 0.0.60 | FR-16~21、23、31 | 〔觀察〕 |
 | 入口層:網頁 `studio_server.py` | FastAPI,只綁 `127.0.0.1:7860`;Host / Origin / 權杖中介層;靜態檔、執行 API + SSE、上傳、檔案服務、工作流程存取、設定 API | `executor`、`nodes`、`settings`、`taiwan_ai`(`local_open`、`OLLAMA`、`MFLUX`、`BREEZY`)、fastapi、uvicorn | FR-16~21、23 | 〔觀察〕 |
 | 節點引擎 `executor.py` + `nodes.py` | `executor`:流程圖驗證(種類、型別、有環、必填、參數範圍、節點數)、拓撲排序、依序執行、pinned 跳過、上游失敗下游略過、可取消、重型節點包在 `heavy_lock()` 內;`nodes`:十種節點的埠、參數宣告與 `run()` | `heavy_lock`、`media`、`taiwan_ai` | FR-1~7(功能保留)、FR-16、17、20 | 〔觀察〕 |
 | 入口層:MCP `local_models_mcp.py` | 把模型包成 6 個 stdio 工具;每次工具呼叫重讀設定;重型工具在跨行程 `heavy_lock()` 內執行並把 stdout 導向 stderr | `media`、`taiwan_ai`、`settings`、`heavy_lock`、mcp SDK、Ollama `/api/tags` `/api/ps` | FR-8~13、21 | 〔觀察〕 |
 | 設定 `settings.py` | 模型角色與審議席位設定的唯一存取點:`load()` / `save()` / `validate()` / `load_meta()` / `voice_options()`;SQLite `config/studio.db`;一次性從 `config/models.json` 匯入 | sqlite3(標準函式庫) | FR-21、23 | 〔觀察〕 |
-| 鎖 `heavy_lock.py` | 跨行程排他鎖 `outputs/.heavy.lock`(`fcntl.flock(LOCK_EX)`),網頁與 MCP 共用 | — | NFR 重型工作互斥(ADP-2) | 〔觀察〕 |
+| 鎖 `heavy_lock.py` | 跨行程排他鎖 `outputs/.heavy.lock`(`fcntl.flock(LOCK_EX)`),網頁與 MCP 共用 | `safe_fs` | NFR 重型工作互斥(ADP-2) | 〔觀察〕 |
+| 安全路徑 `safe_fs.py` | 自受信根目錄以 `dir_fd` 逐層 `O_RDONLY \| O_NOFOLLOW \| O_DIRECTORY` 走到目標;開檔(`O_NOFOLLOW` + `fstat` 驗一般檔)、列舉(`os.scandir(fd)`)、排他建立、刪除與 fd 遞迴刪除樹(符號連結只刪連結本身)、rename / replace / link(皆相對 dir_fd)。專案資料、`outputs/`、`static/`、`workflows/`、`config/` 的讀寫刪搬一律經它,取代「先以路徑檢查、再以路徑操作」 | 標準庫 | 安全影響(security-boundary) | 〔觀察〕CHG-20261022-04 DIR-5 修正 4 |
 | 媒體層 `media.py` | 生圖、16:9 裁切、疊標題、切句、SRT、ffmpeg 合成 | `taiwan_ai`(`OUT`、`reserve`、`unload_llms`、`MFLUX`、`role_config("image")`)、Pillow、imageio-ffmpeg | FR-4~6、10、12 | 〔觀察〕 |
 | 模型層 `taiwan_ai.py` | `model(role)` / `role_config(role)`(每次經 `settings.load()`)、`chat()`、`unload_llms()`(卸載 `/api/ps` 列出的全部模型)、`speak()`(每次經 `role_config("voice")` 取聲線;子程序帶離線變數)、`to_tw()`、`local_open()`、`stamp()` / `reserve()` | Ollama HTTP、BreezyVoice 子程序、mflux 子程序、OpenCC、`settings` | FR-1~3、8、9、11 | 〔觀察〕 |
 | 外部引擎 | Ollama(`localhost:11434`)、`mflux-generate`、`tools/BreezyVoice/.venv`、內附 ffmpeg | — | — | 〔觀察〕皆不在 repo 內 |
@@ -193,9 +195,114 @@ flowchart TD
 - 〔觀察〕網頁 `PUT /api/config` 先 `validate(cfg, None)`,再向 Ollama `/api/tags` 取已下載清單做第二次 `validate`(連不上回 503,不儲存),合格才 `save()`。MCP 每次工具呼叫經 `taiwan_ai.model()` / `settings.load()` 重讀,改設定後下一次呼叫生效。
 - 〔觀察〕資料庫不存在或還沒有任何表時,建立、匯入、第一次存入在 `config/.studio.db.lock`(`flock`)內進行。
 
+## 專案編輯器(CHG-20261022-04)
+
+> 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 T1~T9 與修正為準)。端到端驗收結果以 `docs/acceptance/` 為準。
+
+### 分層 / 模組
+
+| 層/模組 | 職責 | 依賴 | 回應需求 | 等級 |
+|---------|------|------|----------|------|
+| 前端首頁 `wizard.js` | 首頁「精靈」「完整模式」兩張卡片、右上角 ⚙、底部「免責說明與授權」連結(無分頁列);步驟精靈(步驟取自 `GET /api/workflows/default` 的 `steps`,只有上一步 / 下一步);完整模式(文稿、語音、封面、素材庫、預覽、屬性、時間軸同一畫面) | `app.js` 路由、`project.js` 面板 | FR-31、32、34、35 | 〔觀察〕 |
+| 前端專案 `project.js` | `Store`(專案檢視、`reload()` 只採用最後一次回應)、文稿 / 封面 / ② 語音 / ⑤ 匯出面板、逐句合成(每句完成即重新讀取專案檢視) | `/api/projects/*` | FR-25、30、33、35 | 〔觀察〕 |
+| 前端時間軸 `timeline.js` | 三軌(字幕、語音、畫面)、預覽(依 layout 排程播放片段並切換圖片與字幕)、屬性面板(文字只顯示,DIR-5 修正 M-8)、素材庫 | `project.js` 的 `Store` | FR-24、28、29 | 〔觀察〕 |
+| 前端編輯 `edit.js` | 拖空隙改停頓(點擊範圍以交界為中心至少 12px)、屬性面板停頓 / 語速、注音彈出框、畫面軌拖邊緣(設定「語音預設」子頁在 `app.js`) | `Studio.hook` 鉤子、`/api/annotate` | FR-26、27、29、33 | 〔觀察〕 |
+| 專案 API(`studio_server.py`) | `/api/projects/*`、`/api/annotate`;synth / render 以背景執行緒 + SSE;合成中途在記憶體疊上已完成的句子 | `project`、`timeline`、`tts_service`、`media` | FR-24~35 | 〔觀察〕 |
+| 專案模組 `project.py` | 資料模型、分句、停頓、標註、history、`.trash/`、專案鎖 | `names`、`breezy_worker`(注音格式) | FR-25~27、30 | 〔觀察〕 |
+| 時間軸 `timeline.py` | `layout()` 純函式 | `project` | FR-26、28、29 | 〔觀察〕 |
+| 合成服務 `tts_service.py` | 髒片段、快取、逐句 emit、`apply_speed` | `heavy_lock`、`project`、`media`、`taiwan_ai` | FR-25、27、33 | 〔觀察〕 |
+| worker `breezy_worker.py` | BreezyVoice venv 子程序:`synth`、`annotate` | BreezyVoice(`single_inference`、`CustomCosyVoice`、`G2PWConverter`) | FR-25、27 | 〔觀察〕 |
+
+### 架構圖
+
+```mermaid
+flowchart TD
+  subgraph 瀏覽器
+    HOME["首頁:精靈 · 完整模式 兩張卡片<br/>右上角 ⚙ · 底部免責連結"]
+    WIZ["精靈(上一步 / 下一步)<br/>① 文稿 ② 語音 ③ 封面 ④ 剪輯 ⑤ 匯出"]
+    FULL["完整模式(單一畫面)"]
+    ED["編輯器元件:素材庫 · 預覽 · 屬性 · 時間軸三軌<br/>timeline.js + edit.js"]
+  end
+  HOME --> WIZ --> ED
+  HOME --> FULL --> ED
+  subgraph 伺服器["studio_server.py"]
+    PAPI["/api/projects/* · /api/annotate<br/>同一個安全中介層"]
+    LIVE["合成中途記憶體疊加<br/>(不存檔)"]
+  end
+  ED --> PAPI
+  PAPI --> PROJ["project.py"] --> PJ[("projects/<名稱>/")]
+  PAPI --> TL["timeline.py"]
+  PAPI --> TTS["tts_service.py"] --> LOCK[["heavy_lock"]]
+  TTS --> WORKER["breezy_worker.py<br/>(BreezyVoice venv,env = BREEZY_ENV)"]
+  PAPI --> LIVE
+  PAPI --> REND["media.render_timeline"] --> FF[["ffmpeg"]]
+  NODES["nodes.py 送到素材庫"] --> PROJ
+```
+
+### 流程 E:逐句合成(含合成中途試聽,FR-25、使用者故事 13)
+
+```mermaid
+sequenceDiagram
+  participant B as 瀏覽器
+  participant S as studio_server
+  participant T as tts_service
+  participant W as breezy_worker
+  B->>S: POST /api/projects/{p}/synth
+  S-->>B: {run_id};B 開 SSE
+  S->>T: synth(snapshot, emit)
+  T->>T: 髒片段 → 快取命中的直接 emit
+  T->>W: argv list + jobs.json(heavy_lock 內;env = BREEZY_ENV)
+  loop 每一句
+    W-->>T: stdout {id, seconds}(<id>.wav 已寫完)
+    T->>T: 移入 audio/,更新 snapshot 片段
+    T-->>S: emit segment {id, seconds, cached, audio}
+    S->>S: 記入記憶體(片段 id → 合成文字, audio)
+    S-->>B: SSE segment
+    B->>S: GET /api/projects/{p}(疊上已完成的句子)
+    S-->>B: View:該句有音檔,語音軌出現、試聽可按、media 端點可取
+  end
+  S->>S: merge_audio:只寫回同 id、合成文字未變、不是自錄音檔的片段(一次存檔)
+  S->>S: 清除記憶體記錄
+  S-->>B: SSE finished;B 再讀一次 View
+```
+
+- 〔觀察〕逾時:第一個進度行另給 180 秒模型載入額度,之後每句 120 秒(CHG 修訂 4);逾時終止 worker,已完成的句子仍寫回(快取保留,重跑會命中)。
+- 〔觀察〕合成期間改了某句文字:該句合成當時的文字與目前文字不同,不疊加、不寫回。
+
+### 流程 F:改一個字的聲調(FR-27)
+
+```mermaid
+sequenceDiagram
+  actor U as 使用者
+  participant B as 編輯器
+  participant S as studio_server
+  participant W as breezy_worker
+  U->>B: 屬性面板點字「好」
+  B->>S: POST /api/annotate {text: 該句}
+  S->>W: annotate(heavy_lock 內,逾時 60 秒)
+  W-->>B: 逐字注音
+  U->>B: 在彈出框選四聲並套用
+  B->>S: PATCH /segments/{id} {annotations}
+  S-->>B: View(該句快取鍵改變,變髒)
+  B->>S: POST /synth(流程 E,只合成這一句)
+```
+
+### 流程 G:匯出(FR-30)
+
+```mermaid
+flowchart LR
+  A["POST /api/projects/{p}/render"] --> V{"所有片段有音檔且快取鍵未過期?"}
+  V -- 否 --> E["400:segments 列出片段"]
+  V -- 是 --> L["timeline.layout()"]
+  L --> M["media.render_timeline:<br/>片段經 apply_speed、ffmpeg 解碼(-t 截在片段長度)、依起點補靜音<br/>圖片 concat(0.1 秒格,後開始者優先、空檔黑畫面)<br/>-r 10、-vf fps=10、-t 總長、mov_text"]
+  M --> O["outputs/podcast-<stamp>.mp4 + .srt(reserve 佔位)"]
+```
+
 ## 相依方向
 
 〔觀察〕單向、無循環:入口(`studio_server` / `local_models_mcp`)→ `executor` → `nodes` → `media` → `taiwan_ai` → `settings`;`executor` 與 `local_models_mcp` 另依賴 `heavy_lock`;`studio_server` 也直接用 `settings`、`taiwan_ai`。`media` 依賴 `taiwan_ai`,`taiwan_ai` 不依賴 `media`;`settings` 不依賴其他專案模組。
+
+〔觀察〕CHG-20261022-04 新增的相依:`studio_server` → `project`、`timeline`、`tts_service`、`names`、`media`;`tts_service` → `project`、`media`、`heavy_lock`、`taiwan_ai`、`breezy_worker`(只取常數,worker 本身以子程序執行);`timeline` → `project`;`project` → `names`、`breezy_worker`(注音格式);`nodes` → `project`、`names`(送到素材庫)、`media`(`sniff_binary`)。`media.render_timeline` 在函式內延後匯入 `project` 與 `tts_service`(`tts_service` 在模組層匯入 `media`),避免循環匯入。`breezy_worker.py` 不匯入 repo 內任何模組。
 
 〔觀察〕耦合點:`media.py` 直接讀 `taiwan_ai` 的模組層常數(`OUT`、`MFLUX`)與函式(`role_config`、`reserve`、`unload_llms`);`roles.image` 的讀取端是 `media.generate_image()`、`roles.voice` 的讀取端是 `taiwan_ai.speak()`,兩者每次呼叫經 `taiwan_ai.role_config()` → `settings.load()` 讀一次,網頁與 MCP 兩個行程都經這兩個函式(CHG-20261026-01 T1、T2);設定資料(`config/studio.db`)是網頁與 MCP 兩個行程共享的**資料契約**,只經 `settings.py` 存取(CHG-20261022-01 Global Constraints)。
 

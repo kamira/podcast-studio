@@ -274,3 +274,25 @@ def test_快取存在的模型離線生圖成功(fake_mflux, out, cfg):
     assert p.read_bytes() == b"PNG-fake"
     assert sorted(x.name for x in out.iterdir()) == [p.name]
     assert _downloads(fake_mflux) == []
+
+
+# ---------- DIR-5 修正 5:生圖暫存目錄建立後被換成符號連結 ----------
+
+def test_generate_image暫存目錄建立後被換成連結_不搬入外部內容(out, tmp_path, monkeypatch):
+    outside = tmp_path / "outside-mflux"
+    outside.mkdir()
+    real = media._mkdtemp_out
+
+    def swapping(prefix):
+        name, fd = real(prefix)
+        d = out / name
+        d.rename(d.with_name(name + "-moved"))
+        d.symlink_to(outside, target_is_directory=True)
+        return name, fd
+    monkeypatch.setattr(media, "_mkdtemp_out", swapping)
+    monkeypatch.setattr(media.subprocess, "run", _fake_mflux)   # 外部程式依路徑寫進連結目標(殘餘風險)
+    with pytest.raises(OSError):
+        media.generate_image("a cat")
+    assert not [x for x in out.iterdir() if x.name.startswith("image-")]   # 外部內容沒有被搬進 outputs/
+    # 暫存目錄的連結本身被刪(不跟隨),原目錄(以 fd 持有)仍在
+    assert [x.name for x in out.iterdir() if x.name.startswith(".mflux-") and not x.name.endswith("-moved")] == []

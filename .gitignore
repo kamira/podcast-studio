@@ -18,3 +18,6 @@ config/models.json
 # workflows/ 之下只追蹤預設範本 default.json(CHG-20261026-01 T3)
 workflows/*
 !workflows/default.json
+
+# 專案資料(projects/<名稱>/、.trash/)屬使用者資料,不入 git(CHG-20261022-04 T2)
+projects/
