@@ -2,7 +2,7 @@
 
 - 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
 - 分支(Branch):main
-- 版本:v1.7(變更歷程見 §11)
+- 版本:v1.8(變更歷程見 §11)
 - 日期:2026-10-22
 - 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24;v1.5 修改 FR-21、FR-25、FR-31、FR-34 並新增 ADP-12,待 CHG-20261022-01/04 修訂 2 確認閘)
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
@@ -203,11 +203,11 @@
 - **結構設計圖**:預設畫給使用者看並等確認(使用者未表示要跳過)。
 - **CI/CD(v1.4,CHG-20261022-03 / DIR-2)**:
   - 每個步驟一個 PR:開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號(只改 `docs/knowledge/` 者除外),不直接 push main。
-  - merge 前 `document`、`chg`、`program`、`review` 四項 check 必須全部通過。
+  - merge 前 `document`、`chg`、`program`、`review` 四項 check 必須全部通過。`review` 檢查看擁有者對目前 head 的六席意見留言,以及排在其後、CHG 相同的統整判定留言(`review-decision` 標記)為 `merge`(DIR-6,CHG-20261028-02);各席判決為意見,不具否決效力。
   - 改到任何程式路徑的 PR,不論風險分級,merge 前一律等使用者核准;只改 `docs/`、`features/` 的 PR 可在 CI 綠後自動 merge。
-  - 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/deploy_local.sh`)的 PR,另需擁有者留言 `<!-- infra-approved sha=<head> -->`。
+  - 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/review_decision.py`、`scripts/deploy_local.sh`)的 PR,另需擁有者留言 `<!-- infra-approved sha=<head> -->`。
   - main 只允許 squash merge,squash 標題帶 CHG 編號。
-  - 本機審議以 `scripts/local_review.py` 執行;DIR-1 第 10 條暫停 27B 期間,一律帶 `--codex-seats risk,security,compliance`。
+  - 本機審議以 `scripts/local_review.py` 執行(六席意見);DIR-1 第 10 條(暫停 27B)期間,一律帶 `--codex-seats risk,security,compliance`。意見留言貼出後,派發者派一個獨立 Claude subagent(預設 Opus、effort medium,非該 PR 施工者)擔任統整席,寫判定 JSON 至 `outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,再以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定;派發者不得修改 JSON 內容(DIR-6)。統整席是雲端 Claude,讀取待審資料屬 DIR-6 第 10 條的使用者明示資料外送例外,範圍只限本 repo(已公開)PR 的意見留言、CHG 全文、diff 與 head 檔案內容,不含 `config/studio.db`、`outputs/`、聲線檔等repo 外資料;DIR-1 第 9 條(Codex 席)的例外不因此擴大。
 
 ## 9. 導入盤點:具名待補項
 
@@ -253,3 +253,4 @@
 | v1.4 | 2026-10-23 | §5 新增「merge 前 CI 全綠」;§8 新增 CI/CD 約定(每步驟 PR、四項檢查、程式變更使用者核准、infra-approved、只允許 squash、暫停 27B 期間的 `--codex-seats`) | CHG-20261022-03 結構文件更新;DIR-1、DIR-2 |
 | v1.6 | 2026-10-26 | §7 驗收條件改寫為新介面(`studio_server.py`、設定 › 進階流程、檔案拖放、設定資料庫);§9 ADP-1、ADP-2、ADP-8、ADP-12 標「由 CHG-20261022-01 處理」(結案以 ACC 為準),ADP-10 隨 Gradio 版刪除失效 | CHG-20261022-01 結構文件更新 |
 | v1.7 | 2026-10-26 | §7 新增「設定頁改生圖步數與聲線後網頁與 MCP 皆生效」「存工作流程後工作樹乾淨」兩項;FR-5/6/12 條件補「影片軌與音軌長度差 ≤ 0.1 秒」 | CHG-20261026-01 結構文件更新 |
+| v1.8 | 2026-10-28 | §8 CI/CD 約定:`review` 檢查改看統整席判定(各席為意見,不具否決效力);治理基礎設施清單加 `scripts/review_decision.py`;本機審議步驟補統整席與 `review_decision.py`,並註明統整席(雲端 Claude)讀取待審資料屬 DIR-6 第 10 條的資料外送例外 | CHG-20261028-02;DIR-6 |
