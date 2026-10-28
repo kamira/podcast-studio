@@ -995,29 +995,13 @@ def _fd_response(fd: int, size: int, ctype: str, range_header: str | None):
     return StreamingResponse(body(), status_code=status, media_type=ctype, headers=headers)
 
 
-def _disk_usage(name: str) -> int:
-    """專案 `assets/` 與 `audio/` 內一般檔(不跟隨符號連結)的位元組合計;素材與自錄音檔的共同配額以此計算。"""
-    total = 0
-    for sub in ("assets", "audio"):
-        try:
-            base = pj.subdir(name, sub)
-        except FileNotFoundError:
-            continue
-        with os.scandir(base) as it:
-            for entry in it:
-                if entry.is_file(follow_symlinks=False):
-                    total += entry.stat(follow_symlinks=False).st_size
-    return total
-
-
 def _check_quota(name: str, incoming: int) -> None:
-    """加入 incoming 位元組後,素材與自錄音檔合計超過 project.MAX_ASSET_BYTES → 413(DIR-5 修正 2)。
-
-    以磁碟實際用量計算,反覆取代同一句留下的舊自錄檔也算在內;舊檔不刪(history 版本可能仍引用)。
-    呼叫端須在專案鎖內(mutate)呼叫,檢查與複製之間不會有其他寫入。"""
-    limit = pj.MAX_ASSET_BYTES
-    if _disk_usage(name) + incoming > limit:
-        raise ApiError(413, f"素材與自錄音檔合計超過 {limit / 1024 ** 3:g} GB 上限,無法再加入")
+    """素材與自錄音檔的共同配額:規則在 `project.check_quota()`(DIR-5 修正 3 起與「送到素材庫」節點共用),
+    超過 → 413。呼叫端須在專案鎖內(mutate)、複製前呼叫。"""
+    try:
+        pj.check_quota(name, incoming)
+    except pj.QuotaExceeded as e:
+        raise ApiError(413, str(e)) from None
 
 
 def _voice_defaults() -> dict:

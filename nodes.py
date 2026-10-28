@@ -401,7 +401,11 @@ def _send_to_library(inputs, params):
             opened.append((kind, *_library_source(value, kind)))
         created: list[Path] = []
 
+        payload = text.encode("utf-8") if text is not None else b""
+
         def change(proj):
+            # 專案鎖內、複製前檢查素材與自錄音檔的共同磁碟配額(DIR-5 修正 3);超過丟 QuotaExceeded,不留新檔
+            pj.check_quota(name, sum(os.fstat(fd).st_size for _, fd, _, _ in opened) + len(payload))
             assets = pj.subdir(name, "assets", create=True)
             added = []
             for kind, fd, ext, label in opened:
@@ -414,7 +418,7 @@ def _send_to_library(inputs, params):
                 added.append({"id": aid, "kind": kind, "ext": ext, "bytes": size,
                               **({"label": label} if label else {})})
             if text is not None:
-                aid, dest, size = _copy_into(assets, "txt", lambda f: f.write(text.encode("utf-8")))
+                aid, dest, size = _copy_into(assets, "txt", lambda f: f.write(payload))
                 created.append(dest)
                 added.append({"id": aid, "kind": "text", "ext": "txt", "bytes": size,
                               "label": LIBRARY_TEXT_LABEL})
