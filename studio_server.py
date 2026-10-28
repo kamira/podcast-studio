@@ -130,16 +130,21 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
                                          只看前 12 位元組,必須是 RIFF/WAVE,否則 422「取代語音只接受 WAV 音檔」、
                                          片段不變;長度以 media.wav_seconds() 取得(不轉檔);複製成
                                          `audio/<新 id>.wav`,audio = {"id", "seconds"}(沒有 key,合成不覆蓋)。
+                                         配額(DIR-5 修正 2):複製前以磁碟實際用量計算——該專案 `assets/` 與
+                                         `audio/` 內一般檔的位元組合計 + 新檔大小超過 project.MAX_ASSET_BYTES
+                                         → 413,片段不變;舊的自錄檔不刪(history 版本可能仍引用)。
                                        audio:只能為 null(清除音檔,改回由合成產生)。
   POST   /api/projects/{p}/assets      {"file_id", "label"?} → View + {"asset": {"id", "kind", "ext", "bytes",
-                                       "label"?}};把上傳檔複製到 `assets/<新 id>.<副檔名>`(素材庫用)
+                                       "label"?}};把上傳檔複製到 `assets/<新 id>.<副檔名>`(素材庫用);
+                                       與自錄音檔共用同一配額(磁碟用量超過 → 413)
   POST   /api/projects/{p}/images      {"asset": 圖片素材 id} 或 {"file_id": 上傳的圖片}(擇一),"start"?(預設 0)、
                                        "end"?(null = 到結尾)→ View + {"image": 新圖片 id}
   PATCH  /api/projects/{p}/images/{id} {"start"?, "end"?} → View
   DELETE /api/projects/{p}/images/{id} → View;只移除時間軸項目,不刪素材檔
   GET    /api/projects/{p}/media/{id}  只依 id 解析:專案素材 → `assets/<id>.<ext>`、片段音檔 → `audio/<id>.wav`;
-                                       resolve() 後必須直接位於該專案的 assets/ 或 audio/(符號連結、他專案的 id、
-                                       不存在 → 404);只送 MEDIA_TYPES 的副檔名,帶 nosniff。送的是合成原檔
+                                       自 repo 根目錄以 dir_fd 逐層 O_NOFOLLOW 開檔、fstat 確認是一般檔,回應直接
+                                       讀該 fd(不再以路徑重開,DIR-5 修正 2,RS-15);任一層是符號連結、他專案的 id、
+                                       不存在 → 404;支援單一 Range(206 / 416);只送 MEDIA_TYPES 的副檔名,帶 nosniff。送的是合成原檔
                                        (變速前);預覽以 `<audio>.playbackRate = 語速`(保留音高)播放。
   POST   /api/projects/{p}/synth       → {"run_id", "events": "/api/run/<run_id>/events"};事件(SSE,格式同 /api/run):
                                        {"type": "waiting"}、{"type": "segment", "id", "seconds", "cached", "audio"}(每句完成)、
@@ -893,12 +898,36 @@ def _copy_in(fd: int, dest_dir: Path, ext: str) -> tuple[str, Path, int]:
     return new, dest, size
 
 
-def _media_file(name: str, aid: str, overlay: Callable | None = None) -> tuple[Path, str]:
+def _open_under(top: Path, parts) -> int:
+    """自 top 起以 dir_fd 逐層開啟 parts:每層 O_NOFOLLOW,中間層另加 O_DIRECTORY;回傳最後一層的 fd。
+
+    任一層是符號連結、不是目錄或不存在都丟 OSError;檢查與開檔是同一個系統呼叫,沒有可替換的空檔。"""
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(top, os.O_RDONLY | directory | cloexec)
+    try:
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            nxt = os.open(part, os.O_RDONLY | nofollow | cloexec | (0 if last else directory), dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _media_file(name: str, aid: str, overlay: Callable | None = None) -> tuple[int, int, str]:
     """`/api/projects/{p}/media/{aid}`:只依 id 在該專案的素材清單或片段音檔中解析,
-    resolve() 後必須直接位於該專案的 `assets/` 或 `audio/` 內;其他一律 404。
+    開啟該專案 `assets/` 或 `audio/` 內的 `<id>.<ext>`,回傳 (fd, 位元組數, Content-Type);其他一律 404。
+
+    開檔自 repo 根目錄(`project.ROOT`)以 dir_fd 逐層 O_NOFOLLOW(`projects/<名稱>/<sub>/<檔名>`),
+    再以 fstat 確認是一般檔;呼叫端只讀這個 fd,不再以路徑重開(DIR-5 修正 2,RS-15:檢查與開檔之間
+    換成符號連結的競態)。
 
     overlay(name, project):合成期間把本次已完成、尚未寫回的片段音檔疊上(DIR-5 統整 M-1),
-    這些音檔 id 因此也可取用;路徑檢查不變。"""
+    這些音檔 id 因此也可取用;開檔規則不變。"""
     _check_item_id(aid, "檔案")
     proj = pj.load(name)
     if overlay is not None:
@@ -911,18 +940,84 @@ def _media_file(name: str, aid: str, overlay: Callable | None = None) -> tuple[P
     sub, ext = found
     try:
         base = pj.subdir(name, sub)
-    except (FileNotFoundError, pj.ProjectNotFound):
+        top = Path(pj.ROOT).resolve()
+        parts = (*base.relative_to(top).parts, f"{aid}.{ext}")
+    except (OSError, ValueError, pj.ProjectError):
         raise ApiError(404, "找不到這個檔案") from None
-    path = base / f"{aid}.{ext}"
     try:
-        if path.is_symlink():
-            raise ApiError(404, "找不到這個檔案")
-        real = path.resolve(strict=True)
-    except (OSError, RuntimeError):
+        fd = _open_under(top, parts)
+    except OSError:
         raise ApiError(404, "找不到這個檔案") from None
-    if real.parent != base or not real.is_file():
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
         raise ApiError(404, "找不到這個檔案")
-    return real, MEDIA_TYPES[ext]
+    return fd, st.st_size, MEDIA_TYPES[ext]
+
+
+RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+
+
+def _fd_response(fd: int, size: int, ctype: str, range_header: str | None):
+    """以已開啟的 fd 串流回應(不以路徑重開);支援單一 Range(多段或格式不合則忽略,回整檔 200)。
+
+    fd 一律由本函式負責關閉:包成檔案物件,串流結束、中斷或回應未送出時都會關閉。"""
+    f = os.fdopen(fd, "rb", buffering=0)
+    headers = {"Cache-Control": "no-store", "Accept-Ranges": "bytes"}
+    start, end, status = 0, size, 200
+    m = RANGE_RE.fullmatch(range_header.strip()) if range_header else None
+    if m and (m.group(1) or m.group(2)):
+        a, b = m.group(1), m.group(2)
+        if a:
+            start = int(a)
+            end = min(int(b) + 1, size) if b else size
+            bad = start >= size or (b and int(b) < start)
+        else:   # bytes=-n:最後 n 位元組
+            n = int(b)
+            start, bad = max(size - n, 0), n == 0
+        if bad or size == 0:
+            f.close()
+            return JSONResponse({"error": "要求的範圍不在檔案之內"}, status_code=416,
+                                headers={**headers, "Content-Range": f"bytes */{size}"})
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end - 1}/{size}"
+    headers["Content-Length"] = str(end - start)
+
+    def body():
+        with f:
+            pos = start
+            while pos < end:
+                chunk = os.pread(f.fileno(), min(COPY_CHUNK, end - pos), pos)
+                if not chunk:
+                    break
+                pos += len(chunk)
+                yield chunk
+    return StreamingResponse(body(), status_code=status, media_type=ctype, headers=headers)
+
+
+def _disk_usage(name: str) -> int:
+    """專案 `assets/` 與 `audio/` 內一般檔(不跟隨符號連結)的位元組合計;素材與自錄音檔的共同配額以此計算。"""
+    total = 0
+    for sub in ("assets", "audio"):
+        try:
+            base = pj.subdir(name, sub)
+        except FileNotFoundError:
+            continue
+        with os.scandir(base) as it:
+            for entry in it:
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def _check_quota(name: str, incoming: int) -> None:
+    """加入 incoming 位元組後,素材與自錄音檔合計超過 project.MAX_ASSET_BYTES → 413(DIR-5 修正 2)。
+
+    以磁碟實際用量計算,反覆取代同一句留下的舊自錄檔也算在內;舊檔不刪(history 版本可能仍引用)。
+    呼叫端須在專案鎖內(mutate)呼叫,檢查與複製之間不會有其他寫入。"""
+    limit = pj.MAX_ASSET_BYTES
+    if _disk_usage(name) + incoming > limit:
+        raise ApiError(413, f"素材與自錄音檔合計超過 {limit / 1024 ** 3:g} GB 上限,無法再加入")
 
 
 def _voice_defaults() -> dict:
@@ -1466,6 +1561,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                     head = os.pread(fd, 12, 0)
                     if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
                         raise ApiError(422, WAV_ONLY)
+                    _check_quota(name, os.fstat(fd).st_size)
                     aid, dest, _size = _copy_in(fd, pj.subdir(name, "audio", create=True), "wav")
                 finally:
                     os.close(fd)
@@ -1550,6 +1646,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             kind = UPLOAD_KINDS[f".{ext}"]
             if kind not in kinds:
                 raise ApiError(422, "這個檔案類型不能放在這裡")
+            _check_quota(name, os.fstat(fd).st_size)
             aid, dest, size = _copy_in(fd, pj.subdir(name, "assets", create=True), ext)
         finally:
             os.close(fd)
@@ -1622,9 +1719,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
 
     @app.get("/api/projects/{p}/media/{aid}")
     @_guard
-    def api_media(p: str, aid: str):
-        path, ctype = _media_file(_pname(p), aid, overlay)
-        return FileResponse(path, media_type=ctype, headers={"Cache-Control": "no-store"})
+    def api_media(p: str, aid: str, request: Request):
+        fd, size, ctype = _media_file(_pname(p), aid, overlay)
+        return _fd_response(fd, size, ctype, request.headers.get("range"))
 
     @app.post("/api/projects/{p}/synth")
     @_guard
