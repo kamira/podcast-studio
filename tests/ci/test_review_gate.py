@@ -1079,8 +1079,32 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(self.VIEW.exists())
         self.assertFalse(local_review.VIEW_ROOT.exists())
-        self.assertEqual(len(self.git_calls(env, "remove")), 1)
+        self.assertEqual(self.git_calls(env, "remove"), [])  # 不用 git worktree remove
         self.assertTrue(self.git_calls(env, "prune"))
+        for argv in env.calls:
+            self.assertNotIn("--force", argv)
+
+    def test_files_added_during_review_are_kept(self):
+        env = self.big_env()
+        orig = env.codex
+
+        def codex(argv, input_text, timeout):
+            if argv[1] == "exec":
+                (self.VIEW / "執行期間放入.txt").write_text("保留", encoding="utf-8")
+            return orig(argv, input_text, timeout)
+        env.codex = codex
+        orig_rmtree = local_review.shutil.rmtree
+        local_review.shutil.rmtree = lambda *a, **kw: self.fail("不得遞迴刪除")
+        try:
+            code, out, err = self.run_main(env, ["--pr", "9", "--dry-run"])
+        finally:
+            local_review.shutil.rmtree = orig_rmtree
+        self.assertEqual(code, 0)
+        self.assertIn("<!-- local-review", out)  # 審議結果照常回報
+        self.assertIn("警告:唯讀檢視", err)
+        self.assertEqual((self.VIEW / "執行期間放入.txt").read_text(encoding="utf-8"), "保留")
+        self.assertTrue((self.VIEW / ".git").is_file())
+        self.assertEqual(self.git_calls(env, "remove"), [])
 
     def test_view_removed_when_panel_raises(self):
         env = self.big_env()
@@ -1096,10 +1120,21 @@ class CodexViewTest(unittest.TestCase):
         finally:
             local_review.run_panel = orig
         self.assertFalse(self.VIEW.exists())
-        self.assertEqual(len(self.git_calls(env, "remove")), 1)
+        self.assertEqual(self.git_calls(env, "remove"), [])
+
+    def test_extra_item_after_add_exit_2_and_kept(self):
+        env = self.big_env()
+        env.git_fail = "extra"  # add 後目錄多出檔案:中止,且不刪該檔
+        code, _, err = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 2)
+        self.assertIn("唯讀檢視", err)
+        self.assertIn("警告:唯讀檢視", err)
+        self.assertEqual(env.codex_calls, [])
+        self.assertTrue((self.VIEW / "x.py").is_file())
+        self.assertEqual(self.git_calls(env, "remove"), [])
 
     def test_view_failures_exit_2_without_leftover(self):
-        for mode in ("fetch", "add", "head", "extra"):
+        for mode in ("fetch", "add", "head"):
             with self.subTest(mode=mode):
                 env = self.big_env()
                 if mode == "head":
@@ -1181,7 +1216,7 @@ class CodexViewTest(unittest.TestCase):
         before = calls[:first_fetch]
         self.assertFalse(any("remove" in a for a in before))  # 舊檢視不以 worktree remove 移除
         self.assertTrue(any("prune" in a for a in before))   # 刪指標檔與空目錄後 prune
-        self.assertEqual(len(self.git_calls(env, "remove")), 1)  # 只有審完清這次建立的
+        self.assertEqual(self.git_calls(env, "remove"), [])  # 本次與舊檢視都不用 worktree remove
         self.assertFalse(self.VIEW.exists())
 
     def test_registered_leftover_with_user_files_is_refused_untouched(self):
@@ -1197,7 +1232,6 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(keep.read_text(encoding="utf-8"), "不能刪")
         self.assertEqual(sorted(p.name for p in self.VIEW.iterdir()), [".git", "使用者的檔.txt"])
         self.assertEqual(self.git_calls(env, "remove"), [])
-        self.assertEqual(self.git_calls(env, "prune"), [])
         self.assertEqual(self.git_calls(env, "fetch"), [])
         self.assertEqual(env.codex_calls, [])
 
