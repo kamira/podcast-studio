@@ -472,6 +472,36 @@ def test_send_to_library把輸出檔與文字登記到專案素材(out):
     assert len(pj.list_history(name)) == 1  # 一次存檔(先移舊版入 history)
 
 
+def test_send_to_library自錄檔佔滿配額後被拒且不留新檔(out, monkeypatch):
+    """素材與自錄音檔共用磁碟配額(DIR-5 修正 3):audio/ 的自錄檔佔滿後,經節點加入素材被拒。"""
+    name = _library_project()
+    audio = Path(pj.ROOT) / "projects" / name / "audio"
+    audio.mkdir(exist_ok=True)
+    (audio / "0123456789abcdef.wav").write_bytes(b"\x00" * 1000)   # 模擬已存在的自錄音檔
+    img = out / "cover-q.png"
+    Image.new("RGB", (32, 18), "red").save(img)
+    monkeypatch.setattr(pj, "MAX_ASSET_BYTES", 1000 + img.stat().st_size - 1)
+    before = _asset_files(name)
+    with pytest.raises(pj.QuotaExceeded, match="上限"):
+        _run("send-to-library", {"image": str(img)}, {"project": name})
+    assert _asset_files(name) == before
+    assert pj.load(name).assets == []
+    assert len(pj.list_history(name)) == 0   # 沒有存檔
+
+
+def test_send_to_library未超過配額仍成功(out, monkeypatch):
+    name = _library_project()
+    audio = Path(pj.ROOT) / "projects" / name / "audio"
+    audio.mkdir(exist_ok=True)
+    (audio / "0123456789abcdef.wav").write_bytes(b"\x00" * 1000)
+    img = out / "cover-q.png"
+    Image.new("RGB", (32, 18), "red").save(img)
+    monkeypatch.setattr(pj, "MAX_ASSET_BYTES", 1000 + img.stat().st_size + len("大家好".encode("utf-8")))
+    res = _run("send-to-library", {"image": str(img), "text": "大家好"}, {"project": name})
+    assert "2 個素材" in res["text"]
+    assert [a["kind"] for a in pj.load(name).assets] == ["image", "text"]
+
+
 def test_send_to_library接受outputs下的相對路徑(out):
     name = _library_project()
     (out / "uploads").mkdir()

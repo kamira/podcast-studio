@@ -147,6 +147,10 @@ class ProjectExists(ProjectError):
     """新增專案時已有同名(含只差大小寫)的專案(T6:伺服器據此回 409)。"""
 
 
+class QuotaExceeded(ProjectError):
+    """素材與自錄音檔的磁碟用量超過 MAX_ASSET_BYTES(DIR-5 修正 2 / 3:伺服器據此回 413)。"""
+
+
 # ---------- 基本檢查 ----------
 
 def check_name(name) -> str:
@@ -664,6 +668,34 @@ def subdir(name, sub: str, *, create: bool = False) -> Path:
     except FileNotFoundError:
         raise ProjectNotFound("找不到這個專案") from None
     return _safe_child(_project_dir(root, name, create=create), sub, sub, create=create)
+
+
+def disk_usage(name) -> int:
+    """專案 `assets/` 與 `audio/` 內一般檔(不跟隨符號連結)的位元組合計;素材與自錄音檔的共同配額以此計算。
+
+    (CHG-20261022-04 DIR-5 修正 3:由 studio_server 搬來共用,規則不變。)"""
+    total = 0
+    for sub in ("assets", "audio"):
+        try:
+            base = subdir(name, sub)
+        except FileNotFoundError:
+            continue
+        with os.scandir(base) as it:
+            for entry in it:
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def check_quota(name, incoming: int) -> None:
+    """加入 incoming 位元組後,素材與自錄音檔合計超過 MAX_ASSET_BYTES → 丟 QuotaExceeded。
+
+    以磁碟實際用量計算,反覆取代同一句留下的舊自錄檔也算在內;舊檔不刪(history 版本可能仍引用)。
+    呼叫端須在專案鎖內(studio_server 的 mutate、nodes 的 update)、複製前呼叫,檢查與複製之間不會有其他寫入。
+    studio_server 與「送到素材庫」節點共用此函式。"""
+    limit = MAX_ASSET_BYTES
+    if disk_usage(name) + incoming > limit:
+        raise QuotaExceeded(f"素材與自錄音檔合計超過 {limit / 1024 ** 3:g} GB 上限,無法再加入")
 
 
 # ---------- 讀寫 ----------
