@@ -1216,7 +1216,7 @@ class CodexViewTest(unittest.TestCase):
             self.assertIn("不得以 git show 或 git diff 讀 docs/changes/CHG-*.md", stdin)
             self.assertIn("## 變更檔案\nscripts/x.py\n" + CHG, stdin)
             self.assertIn("### diffstat\n scripts/x.py | 1 +", stdin)
-            self.assertNotIn("截斷於", stdin)
+            self.assertNotIn("截斷於", stdin.split("<<<待審資料開始>>>", 1)[1])  # 參考資料可能被截,待審資料不截
             self.assertNotIn("y\ny\ny\n", stdin)  # 不放截短後的 diff
             self.assertNotIn("## diff\n<<<待審資料結束>>>", stdin)  # diff 區不是空的
         self.assertEqual(env.codex_dir_exists, [True] * 4)  # 審議期間檢視存在
@@ -1333,7 +1333,7 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         for _, stdin, _, _ in env.codex_calls:
             self.assertIn(env.diff_text, stdin)
-            self.assertNotIn("截斷於", stdin)
+            self.assertNotIn("截斷於", stdin.split("<<<待審資料開始>>>", 1)[1])  # 參考資料可能被截,待審資料不截
         for body, _ in env.ollama_calls:
             self.assertNotIn("z\nz\n", body["messages"][1]["content"])
 
