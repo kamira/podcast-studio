@@ -31,12 +31,12 @@
      - Codex 是雲端模型,送審資料(PR、CHG、diff、參考文件)會送出本機;這是第 1 條「本機模型」原則與「不送資料出本機」的**使用者明示例外**,前提是 repo 已公開。例外只限審議席位,不擴及其他用途。
      - Codex 一律只用 `-s read-only`;不得使用 `workspace-write`、`danger-full-access`、`--dangerously-bypass-approvals-and-sandbox`。prompt 由 stdin 傳入,判決以 `--output-schema`(與 Ollama 席同一份 JSON schema)強制;格式不合格、失敗或逾時(15 分鐘)= 沒有回答 → 重派一次,仍失敗記 `no-answer`。
      - 判決行與留言的 `<model>` 欄記 `codex-cli <版本>`(取自 `codex --version`),留言註明哪些席位由 Codex 擔任。
-  10. **送審 CHG 去除審議紀錄**:送給所有席位(Ollama 與 Codex)的 CHG 刪除「## 審議」節(標題到下一個 `## ` 標題或檔尾),獨立階段不得看到前輪判決。統整席(DIR-6)不受此限。
   10. **暫停 27B(2026-10-23 使用者指示,原話:「目前先暫不使用27B模型審議」)**:
      - 暫停期間任何審議席位一律不使用 `hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M`。
      - 原本由 27B 擔任的席位(高風險 CHG 的 risk 席)改由 Codex 擔任,與第 9 條同一套限制(read-only、prompt 經 stdin、記錄實際版本)。
      - 執行方式:`python3 scripts/local_review.py --pr <N> --codex-seats risk,security,compliance`;`scripts/local_review.py` 的預設值仍含 27B,**暫停期間不得省略此參數**。
      - 恢復須使用者明示;恢復時把本條移入「歷史」。
+  11. **送審 CHG 去除審議紀錄**:送給所有席位(Ollama 與 Codex)的 CHG 刪除「## 審議」節(標題到下一個 `## ` 標題或檔尾),獨立階段不得看到前輪判決。統整席(DIR-6)不受此限。
 - 原因:使用者指示(2026-10-22):「審議交由 qwen, glm 等可用的本地邏輯模型」。推得的理由:與本專案「不送資料出本機」一致,並讓席位跨模型分散。
 - 證據(2026-10-22 對照題:CHG 把 Gradio `server_name` 由 `127.0.0.1` 改 `0.0.0.0`,依 Guideline §5 應判 fail):
   - `qwen3:8b`(think)→ fail,理由正確;`<model>` 欄填錯
@@ -59,7 +59,8 @@
     - 第 5 條席位表 compliance 列:| compliance(否決席) | Codex(codex-cli,read-only sandbox,雲端) | 2026-10-23 使用者決定(第 9 條);改回 Ollama 時用 `huihui_ai/qwen3-abliterated:8b`,`think:true` |
     - 第 6 條:**glm4 不得擔任否決席**(risk / security / compliance)。
     - 第 8 條:限制要寫進每次審議記錄:目前只有 Qwen、GLM 兩個模型家族,席位間會共享盲點;本機 8–9B 模型的判斷力低於雲端大模型——**否決席 pass 不能取代使用者在確認閘的判斷**。
-    - 第 10 條(送審 CHG 去除審議紀錄):**送審 CHG 去除審議紀錄**:送給所有席位(Ollama 與 Codex)的 CHG 刪除「## 審議」節(標題到下一個 `## ` 標題或檔尾),獨立階段不得看到前輪判決。
+    - 條次(本次重新編號):原規則有兩個「第 10 條」。「暫停 27B」維持第 10 條(產品程式 `settings.validate()` 的錯誤訊息與其測試引用此條次);「送審 CHG 去除審議紀錄」改為第 11 條,移到「暫停 27B」之後。依據:CHG-20261028-02 草案 PR #84 審議發現,派發者 2026-10-28 指示消除條次歧義。
+    - 原第一個第 10 條(送審 CHG 去除審議紀錄,現第 11 條):**送審 CHG 去除審議紀錄**:送給所有席位(Ollama 與 Codex)的 CHG 刪除「## 審議」節(標題到下一個 `## ` 標題或檔尾),獨立階段不得看到前輪判決。
   - 2026-10-23 risk 席高風險改由 Codex(第 10 條,暫停 27B)取代。原席位表 risk 列:
     | risk(否決席) | `hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M`,`think:true` | 高風險 CHG 改用 `hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M`(慢,可能 >10 分鐘) |
   - 2026-10-23 由使用者規則取代(27B 30 分鐘改派 Codex)。原敘述:
@@ -167,8 +168,9 @@
   5. 派發者以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定留言(標記 `<!-- review-decision CHG-… sha=<head> decision=merge|fix model=… effort=… -->`)。`model`、`effort` 由派發者填,不信任子代理自填。**派發者不得修改 JSON 內容**;格式不合格重派一次,仍不合格交使用者。
   6. CI `review` 檢查:需要擁有者對目前 head 的意見留言(標記含六席)與排在其後、CHG 相同的擁有者判定留言,且判定為 `merge`。
   7. 判定 `fix`:由開發的模型依修法清單修正,產生新 head 後重跑意見與統整(新派子代理)。同一 PR **連續兩輪**判定 `fix` 時停下交使用者。
-  8. 統整席的職責就是讀全部意見與前輪紀錄,**不受 DIR-1 第 10 條(獨立階段不得看到前輪判決)約束**;意見席的隔離不變。
+  8. 統整席的職責就是讀全部意見與前輪紀錄,**不受 DIR-1 第 11 條(送審 CHG 去除審議紀錄;獨立階段不得看到前輪判決)約束**;意見席的隔離不變。
   9. 統整判定 `merge` 不能取代使用者在確認閘的判斷;判定只決定 DIR-4 預授權的條件是否成立。
-- 原因:使用者指示(2026-10-28,原話):「改為審議席提供意見 最後統整為單一獨立審議席全部審議再決議如何修」;追問後選擇:合併由統整席決定、統整席 Opus medium、CI 閘改看統整判定、PR #76 重審暫停待新流程生效。
-- 信度:使用者確認(第 2 條模型、第 6 條閘為使用者選擇;呼叫方式、標記格式、JSON 欄位、連續兩輪停下、隔離不適用為 agent 補上的執行細節,見 CHG-20261028-02 代決事項,使用者可推翻)
+  10. **統整席的資料外送例外**:統整席是 Claude subagent(雲端,Anthropic),讀取的待審資料會送出本機。這是 DIR-1 第 9 條(Codex 席,只限審議席位)之外、另一項**使用者明示**的資料外送例外(使用者 2026-10-28 選擇統整席為「Opus medium(獨立子代理)」,確認閘原話「全部照草案核准」)。範圍只限:本 repo(已公開)PR 的意見留言、CHG 全文、PR diff 與 head 的檔案內容;不含 `config/studio.db`、`outputs/` 產出物、使用者聲線檔或其他 repo 外的資料,也不擴及審議以外的用途。施工者本來就是 Claude subagent(DIR-3),統整席不是新的資料去處。
+- 原因:使用者指示(2026-10-28,原話):「改為審議席提供意見 最後統整為單一獨立審議席全部審議再決議如何修」;追問後選擇:合併由統整席決定、統整席 Opus medium、CI 閘改看統整判定、PR #76 重審暫停待新流程生效。與 DIR-2 第 3 條「merge 的停點只准加嚴」的關係:本條移除否決席的單席否決,是**使用者明示指示的規則變更**(2026-10-28 原話如上;確認閘 2026-10-28 原話「全部照草案核准」),不是 agent 自行放寬;DIR-2 第 3 條的停點本身(程式變更須使用者核准或依 DIR-4 預授權、治理基礎設施需 `infra-approved`)不變。
+- 信度:使用者確認(第 2 條模型、第 6 條閘、第 10 條統整席為雲端 Claude 為使用者選擇;呼叫方式、標記格式、JSON 欄位、連續兩輪停下、隔離不適用為 agent 補上的執行細節,見 CHG-20261028-02 代決事項,使用者可推翻)
 - 狀態:生效(CHG-20261028-02 合進 main 時)
