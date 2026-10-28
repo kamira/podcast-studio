@@ -37,6 +37,16 @@
     當 執行本機審議
     那麼 腳本以退出碼 2 拒絕,該目錄與其中檔案原封不動
 
+  場景: 登記的舊檢視含其他檔案時不刪
+    假設 .review/pr-<編號>-<sha12> 是登記的 worktree,但目錄內除 .git 外還有使用者的檔案
+    當 執行本機審議
+    那麼 腳本以退出碼 2 拒絕,不呼叫 git worktree remove,該目錄與其中檔案原封不動
+
+  場景: 只含 .git 的登記舊檢視被安全清除
+    假設 .review/pr-<編號>-<sha12> 是登記的 worktree,目錄內只有 .git 指標檔
+    當 執行本機審議
+    那麼 腳本只刪 .git 指標檔與空目錄並 git worktree prune,不使用 git worktree remove --force
+
   場景: fork 與非擁有者 PR 不取用內容
     假設 PR 來自 fork 或作者不是 repo 擁有者
     當 執行本機審議

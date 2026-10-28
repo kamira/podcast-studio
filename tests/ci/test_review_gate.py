@@ -1176,8 +1176,30 @@ class CodexViewTest(unittest.TestCase):
         env.registered = [str(self.VIEW)]  # 上次中斷留下、仍登記的 worktree
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(self.git_calls(env, "remove")), 2)  # 先清舊的,審完再清這次的
+        calls = [a for a in env.calls if a[0] == "git"]
+        first_fetch = next(i for i, a in enumerate(calls) if "fetch" in a)
+        before = calls[:first_fetch]
+        self.assertFalse(any("remove" in a for a in before))  # 舊檢視不以 worktree remove 移除
+        self.assertTrue(any("prune" in a for a in before))   # 刪指標檔與空目錄後 prune
+        self.assertEqual(len(self.git_calls(env, "remove")), 1)  # 只有審完清這次建立的
         self.assertFalse(self.VIEW.exists())
+
+    def test_registered_leftover_with_user_files_is_refused_untouched(self):
+        env = self.big_env()
+        self.VIEW.mkdir(parents=True)
+        (self.VIEW / ".git").write_text("gitdir: /dev/null\n", encoding="utf-8")
+        keep = self.VIEW / "使用者的檔.txt"
+        keep.write_text("不能刪", encoding="utf-8")
+        env.registered = [str(self.VIEW)]
+        code, _, err = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 2)
+        self.assertIn("還有其他項目", err)
+        self.assertEqual(keep.read_text(encoding="utf-8"), "不能刪")
+        self.assertEqual(sorted(p.name for p in self.VIEW.iterdir()), [".git", "使用者的檔.txt"])
+        self.assertEqual(self.git_calls(env, "remove"), [])
+        self.assertEqual(self.git_calls(env, "prune"), [])
+        self.assertEqual(self.git_calls(env, "fetch"), [])
+        self.assertEqual(env.codex_calls, [])
 
     def test_unregistered_leftover_dir_is_refused_untouched(self):
         env = self.big_env()
