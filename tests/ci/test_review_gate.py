@@ -39,6 +39,17 @@ def owner(body):
     return {"author_association": "OWNER", "body": body}
 
 
+def dec(kind="merge", sha=HEAD, chg="CHG-20261022-03", model="claude-opus-5-5", effort="medium"):
+    """統整席判定留言(DIR-6,CHG-20261028-02)。"""
+    return "統整判定\n<!-- review-decision {} sha={} decision={} model={} effort={} -->".format(
+        chg, sha, kind, model, effort)
+
+
+def reviewed(seats=None, chg="CHG-20261022-03", kind="merge"):
+    """擁有者的六席意見留言 + 其後的統整判定。"""
+    return [owner(marker(seats, chg=chg)), owner(dec(kind, chg=chg))]
+
+
 def other(body, assoc="NONE"):
     return {"author_association": assoc, "body": body}
 
@@ -60,7 +71,7 @@ class EvaluateTest(unittest.TestCase):
         self.assertTrue(any("需使用者核准" in m for m in msgs))
 
     def test_infra_path_with_owner_head_approval_passes(self):
-        self.check(["scripts/ci/review_gate.py"], [owner(marker()), owner(infra())])
+        self.check(["scripts/ci/review_gate.py"], reviewed() + [owner(infra())])
 
     def test_infra_approval_with_old_sha_is_invalid(self):
         self.check(["scripts/ci/review_gate.py"], [owner(marker()), owner(infra(OLD))], expect=False)
@@ -96,7 +107,7 @@ class EvaluateTest(unittest.TestCase):
         self.check([CHG], [], {CHG: None}, expect=False)
 
     def test_medium_risk_with_owner_comment_passes(self):
-        self.check([CHG], [owner(marker())], {CHG: "中"})
+        self.check([CHG], reviewed(), {CHG: "中"})
 
     def test_non_owner_valid_marker_is_ignored(self):
         msgs = self.check(["podcast_studio.py"], [other(marker(), "CONTRIBUTOR")], expect=False)
@@ -106,53 +117,102 @@ class EvaluateTest(unittest.TestCase):
         self.check(["podcast_studio.py"], [owner(marker(sha=OLD))], expect=False)
 
     def test_multiple_comments_use_the_one_matching_head(self):
-        bad_old = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        bad_old["security"]["verdict"] = "fail"
-        # 舊 sha 的 fail 留言不影響;對應 head 的 pass 留言被採用
-        self.check(["podcast_studio.py"], [owner(marker(bad_old, sha=OLD)), owner(marker())])
-        # 反過來:對應 head 的是 fail → 失敗(即使有舊 sha 的 pass)
-        self.check(["podcast_studio.py"], [owner(marker()), owner(marker(bad_old, sha=OLD)),
-                                           owner(marker(bad_old))], expect=False)
+        # 舊 sha 的意見留言不被採用;對應 head 的意見留言 + 其後判定被採用
+        self.check(["podcast_studio.py"], [owner(marker(sha=OLD)), owner(marker()), owner(dec())])
+        # 只有舊 sha 的意見留言 → 不通過(即使有判定)
+        self.check(["podcast_studio.py"], [owner(marker(sha=OLD)), owner(dec())], expect=False)
 
-    def test_security_fail_fails(self):
+    # --- CHG-20261028-02 T3:意見留言 + 統整判定(DIR-6)
+    @staticmethod
+    def seats_with(**verdicts):
         seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        seats["security"]["verdict"] = "fail"
-        msgs = self.check(["podcast_studio.py"], [owner(marker(seats))], expect=False)
-        self.assertTrue(any("security" in m for m in msgs))
+        for k, v in verdicts.items():
+            seats[k]["verdict"] = v
+        return seats
+
+    def test_security_fail_with_merge_decision_passes(self):
+        msgs = self.check(["podcast_studio.py"], reviewed(self.seats_with(security="fail")))
+        self.assertTrue(any("decision=merge" in m for m in msgs), msgs)
+        self.assertFalse(any("否決席" in m for m in msgs), msgs)
 
     def test_non_veto_fail_and_concern_pass(self):
-        seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        seats["impact"]["verdict"] = "fail"
-        seats["risk"]["verdict"] = "concern"
-        self.check(["podcast_studio.py"], [owner(marker(seats))])
+        self.check(["podcast_studio.py"], reviewed(self.seats_with(impact="fail", risk="concern")))
 
-    def test_no_answer_fails(self):
-        seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        seats["consistency"]["verdict"] = "no-answer"
-        self.check(["podcast_studio.py"], [owner(marker(seats))], expect=False)
+    def test_no_answer_with_merge_passes_and_lists_unanswered(self):
+        msgs = self.check(["podcast_studio.py"],
+                          reviewed(self.seats_with(consistency="no-answer", risk="no-answer")))
+        self.assertTrue(any("未回答" in m and "risk" in m and "consistency" in m for m in msgs), msgs)
 
     def test_missing_seat_fails(self):
         seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS if s != "compliance"}
-        self.check(["podcast_studio.py"], [owner(marker(seats))], expect=False)
+        msgs = self.check(["podcast_studio.py"], reviewed(seats), expect=False)
+        self.assertTrue(any("缺少席位" in m and "compliance" in m for m in msgs), msgs)
+
+    def test_opinion_without_decision_fails_with_hint(self):
+        msgs = self.check(["podcast_studio.py"], [owner(marker())], expect=False)
+        hint = [m for m in msgs if "統整判定留言" in m]
+        self.assertEqual(len(hint), 1, msgs)
+        self.assertIn("scripts/review_decision.py", hint[0])
+
+    def test_fix_decision_fails(self):
+        msgs = self.check(["podcast_studio.py"], reviewed(kind="fix"), expect=False)
+        self.assertTrue(any("需修正" in m for m in msgs), msgs)
+
+    def test_ignored_decisions(self):
+        cases = {
+            "sha 不是 head": ([owner(marker()), owner(dec(sha=OLD))], "不是目前 head"),
+            "非擁有者": ([owner(marker()), other(dec(), "COLLABORATOR")], "非擁有者"),
+            "一則兩個標記": ([owner(marker()), owner(dec() + "\n" + dec())], "格式不合格"),
+            "CHG 與意見不同": ([owner(marker()), owner(dec(chg="CHG-20261022-01"))], "不同"),
+            "排在意見之前": ([owner(dec()), owner(marker())], "之前"),
+            "model 含非法字元": ([owner(marker()), owner(dec(model="a b"))], "格式不合格"),
+            "effort 不在白名單": ([owner(marker()), owner(dec(effort="extreme"))], "格式不合格"),
+        }
+        for name, (comments, word) in cases.items():
+            with self.subTest(name=name):
+                msgs = self.check(["podcast_studio.py"], comments, expect=False)
+                self.assertTrue(any("統整判定留言" in m for m in msgs), msgs)
+                self.assertTrue(any("review-decision" in m and word in m for m in msgs), msgs)
+
+    def test_last_decision_wins(self):
+        self.check(["podcast_studio.py"], [owner(marker()), owner(dec("fix")), owner(dec("merge"))])
+        self.check(["podcast_studio.py"], [owner(marker()), owner(dec("merge")), owner(dec("fix"))], expect=False)
+
+    def test_decision_must_follow_adopted_opinion(self):
+        # 判定之後又貼了新的意見留言(同 head):採用新的意見留言,舊判定排在其前 → 不通過
+        self.check(["podcast_studio.py"], [owner(marker()), owner(dec()), owner(marker())], expect=False)
 
     def test_comment_with_two_markers_is_ignored(self):
-        self.check(["podcast_studio.py"], [owner(marker() + "\n" + marker())], expect=False)
+        self.check(["podcast_studio.py"], [owner(marker() + "\n" + marker()), owner(dec())], expect=False)
+
+    def test_review_decision_script_is_infra(self):
+        msgs = self.check(["scripts/review_decision.py"], reviewed(), expect=False)
+        self.assertTrue(any("需使用者核准" in m and "scripts/review_decision.py" in m for m in msgs), msgs)
+        self.check(["scripts/review_decision.py"], reviewed() + [owner(infra())])
+
+    def test_parse_decision(self):
+        self.assertEqual(review_gate.parse_decision(dec()),
+                         {"chg": "CHG-20261022-03", "sha": HEAD, "decision": "merge",
+                          "model": "claude-opus-5-5", "effort": "medium"})
+        self.assertIsNone(review_gate.parse_decision("沒有標記"))
+        self.assertIsNone(review_gate.parse_decision(dec() + dec()))
+        self.assertIsNone(review_gate.parse_decision(dec(kind="maybe")))
 
     # --- 標記的 CHG 編號比對
     def test_marker_chg_must_be_changed_chg(self):
         other_chg = "docs/changes/CHG-20261022-01.md"
         # PR 改到 CHG-01,標記寫 CHG-03(即使 commit 引用 CHG-03)→ 失敗
-        msgs = self.check(["podcast_studio.py", other_chg], [owner(marker())], {other_chg: "中"},
+        msgs = self.check(["podcast_studio.py", other_chg], reviewed(), {other_chg: "中"},
                           expect=False)
         self.assertTrue(any("不是本 PR 改到" in m for m in msgs))
         # 標記寫 CHG-01 → 通過
-        self.check(["podcast_studio.py", other_chg], [owner(marker(chg="CHG-20261022-01"))],
+        self.check(["podcast_studio.py", other_chg], reviewed(chg="CHG-20261022-01"),
                    {other_chg: "中"})
 
     def test_marker_chg_must_be_cited_when_no_chg_changed(self):
-        self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=["CHG-20261022-01"], expect=False)
-        self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=[], expect=False)
-        self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=["CHG-20261022-01", "CHG-20261022-03"])
+        self.check(["podcast_studio.py"], reviewed(), commit_chgs=["CHG-20261022-01"], expect=False)
+        self.check(["podcast_studio.py"], reviewed(), commit_chgs=[], expect=False)
+        self.check(["podcast_studio.py"], reviewed(), commit_chgs=["CHG-20261022-01", "CHG-20261022-03"])
 
     # --- T10:依 commit 引用的 CHG 判分級
     def check2(self, files, comments, commit_chgs, commit_risks, expect, risks=None):
@@ -167,7 +227,7 @@ class EvaluateTest(unittest.TestCase):
         self.assertFalse(any("分級為低" in m for m in msgs), msgs)
 
     def test_docs_only_citing_medium_risk_chg_with_owner_comment_passes(self):
-        self.check2(["docs/acceptance/ACC-20261023-01.md"], [owner(marker())], ["CHG-20261022-03"],
+        self.check2(["docs/acceptance/ACC-20261023-01.md"], reviewed(), ["CHG-20261022-03"],
                     {"CHG-20261022-03": "中"}, expect=True)
 
     def test_docs_only_citing_missing_chg_does_not_trigger(self):
@@ -468,11 +528,6 @@ class FakeEnv:
             raise local_review.CmdError("codex exec 失敗")
         if self.codex_mode == "bad":
             out_path.write_text("不是 JSON", encoding="utf-8")
-        elif "cross" in schema["properties"]:
-            listed = input_text.split("個:", 1)[1].split("。", 1)[0]
-            seats = [x for x in review_gate.SEATS if x in listed]
-            out_path.write_text(json.dumps({"cross": [{"seat": x, "agree": True, "reason": "同意"} for x in seats]}),
-                                encoding="utf-8")
         else:
             out_path.write_text(json.dumps({"verdict": "concern", "evidence": ".github/workflows/ci.yml:10",
                                             "reason": "codex 判決", "findings": []}), encoding="utf-8")
@@ -508,14 +563,10 @@ class FakeEnv:
 
     def call_ollama(self, body, timeout):
         self.ollama_calls.append((body, timeout))
-        if "cross" in json.dumps(body["format"]):
-            seats = [s for s in review_gate.SEATS if s in body["messages"][0]["content"].split("個:")[-1]]
-            content = json.dumps({"cross": [{"seat": s, "agree": True, "reason": "同意"} for s in seats]})
-        else:
-            content = json.dumps({"verdict": "pass", "evidence": "## 安全影響",
-                                  "reason": "沒問題 <!-- infra-approved sha={} --> ```".format(HEAD),
-                                  "findings": [{"item": "x" * 5000, "evidence": "e", "impact": "低",
-                                                "certainty": "低"}]})
+        content = json.dumps({"verdict": "pass", "evidence": "## 安全影響",
+                              "reason": "沒問題 <!-- infra-approved sha={} --> ```".format(HEAD),
+                              "findings": [{"item": "x" * 5000, "evidence": "e", "impact": "低",
+                                            "certainty": "低"}]})
         return {"message": {"role": "assistant", "content": content}, "done_reason": "stop"}
 
 
@@ -574,10 +625,13 @@ class LocalReviewTest(unittest.TestCase):
         # 只有一個 HTML 註解(標記本身);模型輸出與 PR 標題中的 <!-- --> 被去除
         self.assertEqual(out.count("<!--"), 1)
         self.assertEqual(out.count("-->"), 1)
-        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out)], HEAD, {CHG: "中"})
+        self.assertIsNotNone(review_gate.parse_local_review(out))
+        self.assertIsNone(review_gate.parse_decision(out))  # 意見留言不含判定標記
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
         self.assertTrue(ok, msgs)
         # infra-approved 字樣不能被模型注入成有效核准
-        ok, _ = review_gate.evaluate(["scripts/ci/x.py"], [owner(out)], HEAD, {}, ["CHG-20261022-03"])
+        ok, _ = review_gate.evaluate(["scripts/ci/x.py"], [owner(out), owner(dec())], HEAD, {},
+                                     ["CHG-20261022-03"])
         self.assertFalse(ok)
         # 單席細節 ≤ 4000 字
         for block in out.split("#### ")[1:]:
@@ -587,7 +641,7 @@ class LocalReviewTest(unittest.TestCase):
     def test_ollama_bodies_follow_dir1(self):
         env = FakeEnv()
         self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none"])
-        self.assertEqual(len(env.ollama_calls), 12)  # 六席 × 兩階段,序列
+        self.assertEqual(len(env.ollama_calls), 6)  # 六席各一次,序列(M-1:無互讀)
         for body, timeout in env.ollama_calls:
             self.assertEqual(body["keep_alive"], 0)
             self.assertFalse(body["stream"])
@@ -728,8 +782,8 @@ class LocalReviewTest(unittest.TestCase):
         env = FakeEnv()
         code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(env.codex_calls), 4)  # 兩席 × 兩階段
-        self.assertEqual(len(env.ollama_calls), 8)  # 其餘四席 × 兩階段
+        self.assertEqual(len(env.codex_calls), 2)  # 兩席各一次
+        self.assertEqual(len(env.ollama_calls), 4)  # 其餘四席各一次
         codex_seats = {s for _, stdin, _, _ in env.codex_calls for s in ("security", "compliance")
                        if "審議會的 {} 席".format(s) in stdin}
         self.assertEqual(codex_seats, {"security", "compliance"})
@@ -742,7 +796,7 @@ class LocalReviewTest(unittest.TestCase):
             self.assertEqual(parsed["seats"][s]["verdict"], "concern")
         self.assertIn("[verdict] security | codex-cli 0.163.0 | concern", out)
         self.assertIn("security / compliance 由 Codex(雲端,read-only sandbox)擔任,使用者 2026-10-23 決定", out)
-        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out)], HEAD, {CHG: "中"})
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
         self.assertTrue(ok, msgs)
 
     def test_codex_seats_none_uses_ollama_only(self):
@@ -750,7 +804,7 @@ class LocalReviewTest(unittest.TestCase):
         code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none"])
         self.assertEqual(code, 0)
         self.assertFalse(any(a[0].endswith("codex") for a in env.calls))
-        self.assertEqual(len(env.ollama_calls), 12)
+        self.assertEqual(len(env.ollama_calls), 6)
         self.assertNotIn("codex-cli", out)
 
     def test_codex_seats_override(self):
@@ -763,7 +817,7 @@ class LocalReviewTest(unittest.TestCase):
     def test_codex_argv_read_only_and_prompt_via_stdin(self):
         env = FakeEnv()
         self.run_main(env, ["--pr", "9", "--dry-run"])
-        self.assertEqual(len(env.codex_calls), 4)
+        self.assertEqual(len(env.codex_calls), 2)
         for (argv, stdin, timeout, schema) in env.codex_calls:
             joined = " ".join(argv)
             for bad in ("danger-full-access", "workspace-write", "--dangerously-bypass-approvals-and-sandbox"):
@@ -800,7 +854,7 @@ class LocalReviewTest(unittest.TestCase):
         bad.codex_mode = "fail"
         self.run_main(bad, ["--pr", "9", "--dry-run", "--seats", "compliance"])
         files = env.codex_files + bad.codex_files
-        self.assertEqual(len(files), 12)  # (4 + 2 次呼叫)× schema 與輸出各一
+        self.assertEqual(len(files), 8)  # (2 + 2 次呼叫)× schema 與輸出各一
         tmp = local_review.REPO_ROOT / "outputs" / ".tmp" / "local_review"
         for f in files:
             self.assertEqual(f.parent, tmp)
@@ -814,7 +868,7 @@ class LocalReviewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         prompts = ["\n".join(m["content"] for m in b["messages"]) for b, _ in env.ollama_calls]
         prompts += [stdin for _, stdin, _, _ in env.codex_calls]
-        self.assertEqual(len(prompts), 12)
+        self.assertEqual(len(prompts), 6)
         for p in prompts:
             self.assertNotIn("XYZZY", p)
             self.assertIn("保留字串-KEEP", p)
@@ -830,7 +884,7 @@ class LocalReviewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         prompts = ["\n".join(m["content"] for m in b["messages"]) for b, _ in env.ollama_calls]
         prompts += [stdin for _, stdin, _, _ in env.codex_calls]
-        self.assertEqual(len(prompts), 12)
+        self.assertEqual(len(prompts), 6)
         for p in prompts:
             self.assertNotIn("PLUGH", p)
             self.assertIn(local_review.CHG_DIFF_OMITTED, p)
@@ -845,7 +899,7 @@ class LocalReviewTest(unittest.TestCase):
         self.assertEqual(code, 0)
         prompts = ["\n".join(m["content"] for m in b["messages"]) for b, _ in env.ollama_calls]
         prompts += [stdin for _, stdin, _, _ in env.codex_calls]
-        self.assertEqual(len(prompts), 12)
+        self.assertEqual(len(prompts), 6)
         return prompts
 
     def test_rename_chg_to_code_not_omitted(self):
@@ -886,15 +940,165 @@ class LocalReviewTest(unittest.TestCase):
                               .format(CHG))[0], "mixed")
 
 
+    # --- CHG-20261028-02 T1:意見化與非 think 席 CHG 截短
+    @staticmethod
+    def system_prompts(env):
+        prompts = [b["messages"][0]["content"] for b, _ in env.ollama_calls]
+        prompts += [stdin.split("\n\n# 本席參考資料", 1)[0] for _, stdin, _, _ in env.codex_calls]
+        return prompts
+
+    def test_system_prompts_are_advisory(self):
+        for argv in (["--codex-seats", "none"], []):
+            with self.subTest(argv=argv):
+                env = FakeEnv()
+                code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"] + argv)
+                self.assertEqual(code, 0)
+                prompts = self.system_prompts(env)
+                self.assertEqual(len(prompts), 6)  # 六席各一次
+                seats = {s for p in prompts for s in review_gate.SEATS if "審議會的 {} 席".format(s) in p}
+                self.assertEqual(seats, set(review_gate.SEATS))
+                for p in prompts:
+                    self.assertIn("不具否決效力", p)
+                    self.assertNotIn("否決", p.replace("不具否決效力", ""))
+                    self.assertNotIn("fail 即否決", p)
+
+    def test_advisory_comment_marker_and_verdict_lines_unchanged(self):
+        env = FakeEnv()
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("## 審議意見(DIR-1 / DIR-6)— CHG-20261022-03", out)
+        self.assertIn("各席為意見,不具否決效力;是否合併由統整席判定(DIR-6)", out)
+        self.assertNotIn("否決席 pass", out)
+        parsed = review_gate.parse_local_review(out)
+        self.assertEqual(set(parsed["seats"]), set(review_gate.SEATS))
+        self.assertEqual(parsed["sha"], HEAD)
+        vlines = [l for l in out.splitlines() if l.startswith("[verdict] ")]
+        self.assertEqual(len(vlines), 6)
+        for line in vlines:
+            cols = line[len("[verdict] "):].split(" | ")
+            self.assertGreaterEqual(len(cols), 5, line)
+            self.assertIn(cols[0], review_gate.SEATS)
+            self.assertIn(cols[2], review_gate.VERDICTS)
+        self.assertNotIn("CHG 截斷", out)
+
+    def test_big_chg_clipped_only_for_non_think_ollama_seats(self):
+        big = "長" * 90000
+        env = FakeEnv(chg_text=CHG_TEXT + big)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        plain = [b for b, _ in env.ollama_calls if not b.get("think")]
+        think = [b for b, _ in env.ollama_calls if b.get("think")]
+        self.assertEqual({b["model"] for b in plain}, {"glm4:latest"})
+        self.assertEqual(len(plain), 2)  # impact、consistency 各一次
+        for body in plain:
+            self.assertLessEqual(math.ceil(prompt_chars(body) / 1.5) + body["options"]["num_predict"], 40960)
+            self.assertNotIn(big, body["messages"][1]["content"])
+            self.assertIn("截斷於", body["messages"][1]["content"])
+        self.assertRegex(out, r"CHG 由 \d+ 字截短為 \d+ 字\(放進 num_ctx 40960\)")
+        self.assertIn("CHG 截斷:impact、consistency", out)
+        # think 席(risk、drift)維持「思考預算不足」路徑,CHG 不截
+        self.assertTrue(think)
+        for body in think:
+            self.assertIn(big, body["messages"][1]["content"])
+        self.assertIn("思考預算不足", out)
+        # Codex 席收到 CHG 全文
+        self.assertTrue(env.codex_calls)
+        for _, stdin, _, _ in env.codex_calls:
+            self.assertIn(big, stdin)
+        self.assertEqual(set(review_gate.parse_local_review(out)["seats"]), set(review_gate.SEATS))
+
+    def test_small_chg_prompt_unchanged_and_no_chg_limit(self):
+        calls, asked = [], []
+
+        def make_block(diff_text, chg_limit=None):
+            calls.append(chg_limit)
+            return "# 待審資料\n## CHG\n短 CHG\n## diff\n" + diff_text
+
+        def fake_ask(cfg, system, user, schema, check):
+            asked.append((cfg["model"], system, user))
+            return {"ok": True, "out": {"verdict": "pass", "evidence": "e", "reason": "r", "findings": []},
+                    "secs": 1, "attempt": 1}
+
+        seats = local_review.seat_config("中", set())
+        diff = "diff --git a/scripts/x.py b/scripts/x.py\n+print('hi')\n"
+        orig = (local_review.ask, local_review.log)
+        local_review.ask, local_review.log = fake_ask, (lambda m: None)
+        try:
+            result = local_review.run_panel(seats, make_block, diff)
+        finally:
+            local_review.ask, local_review.log = orig
+        self.assertEqual(set(calls), {None})
+        self.assertEqual(len(asked), 6)  # 六席各一次,無互讀(M-1)
+        for (model, system, user), (name, cfg) in zip(asked, seats.items()):
+            expect = "# 本席參考資料(main 工作副本)\n{}\n\n".format(
+                local_review.clip(cfg["ref"], cfg.get("ref_limit", local_review.REF_CHAR_LIMIT))) + make_block(diff)
+            self.assertEqual(user, expect, name)
+        for r in result.values():
+            self.assertEqual(r["diff_notes"], [])
+
+
+    # --- CHG-20261028-02 DIR-5 修正 M-1:移除互讀階段
+    def test_each_seat_called_once_without_cross_reading(self):
+        for argv in (["--codex-seats", "none"], []):
+            with self.subTest(argv=argv):
+                env = FakeEnv()
+                code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"] + argv)
+                self.assertEqual(code, 0)
+                prompts = self.system_prompts(env)
+                counts = {s: sum("審議會的 {} 席".format(s) in p for p in prompts) for s in review_gate.SEATS}
+                self.assertEqual(counts, {s: 1 for s in review_gate.SEATS})
+                self.assertNotIn("互讀", out)
+                self.assertFalse(any("cross" in json.dumps(b["format"]) for b, _ in env.ollama_calls))
+                self.assertFalse(any("cross" in schema["properties"] for _, _, _, schema in env.codex_calls))
+                self.assertEqual(set(review_gate.parse_local_review(out)["seats"]), set(review_gate.SEATS))
+        self.assertFalse(hasattr(local_review, "CROSS_SCHEMA"))
+
+    # --- CHG-20261028-02 DIR-5 修正 M-2:compliance 席參考資料完整送達
+    def test_compliance_ref_contains_dir6_and_guideline_8_untruncated(self):
+        directives = (ROOT / "docs/knowledge/directives.md").read_text(encoding="utf-8")
+        rule10 = next(l for l in directives.splitlines() if l.startswith("  10. **統整席的資料外送例外**"))
+        for codex in (set(), {"compliance"}):
+            with self.subTest(codex=codex):
+                cfg = local_review.seat_config("高", codex)["compliance"]
+                ref = local_review.clip(cfg["ref"], cfg.get("ref_limit", local_review.REF_CHAR_LIMIT))
+                self.assertNotIn("截斷於", ref)
+                self.assertIn("## DIR-6 — 審議席提供意見,單一獨立統整席判定可否合併", ref)
+                self.assertIn(rule10, ref)
+                self.assertIn("## 8. AI 開發約定", ref)
+                self.assertIn("review_decision.py", ref.split("## 8. AI 開發約定", 1)[1])
+                self.assertNotIn("- 歷史", ref)
+        # 其他席位的上限不變
+        for name, cfg in local_review.seat_config("高", set()).items():
+            if name != "compliance":
+                self.assertNotIn("ref_limit", cfg)
+
+    def test_compliance_prompt_via_main_has_full_dir6(self):
+        env = FakeEnv()
+        code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "compliance"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.codex_calls), 1)
+        stdin = env.codex_calls[0][1]
+        self.assertIn("## DIR-6 — 審議席提供意見", stdin)
+        self.assertIn("統整席的資料外送例外", stdin)
+        self.assertNotIn("截斷於", stdin)
+
+    def test_strip_history(self):
+        text = ("## DIR-1 — x\n- 規則:a\n- 狀態:生效\n- 歷史:\n  - 舊 1\n    | 表 |\n\n"
+                "## DIR-2 — y\n- 規則:b\n- 歷史:\n  - 舊 2\n- 備註:保留\n")
+        out = local_review.strip_history(text)
+        self.assertNotIn("舊", out)
+        self.assertIn("- 狀態:生效", out)
+        self.assertIn("## DIR-2 — y", out)
+        self.assertIn("- 備註:保留", out)
+
     # --- 27B 超過 30 分鐘改派 Codex(使用者 2026-10-23 規則)
-    def heavy_timeout_env(self, phases=("verdict", "cross")):
-        """27B 在指定階段逾時;其餘照常回答。"""
+    def heavy_timeout_env(self):
+        """27B 逾時;其餘照常回答。"""
         env = FakeEnv(chg_text=CHG_HIGH)
         orig = env.call_ollama
 
         def call(body, timeout):
-            phase = "cross" if "cross" in json.dumps(body["format"]) else "verdict"
-            if "27B" in body["model"] and phase in phases:
+            if "27B" in body["model"]:
                 env.ollama_calls.append((body, timeout))
                 raise socket.timeout("timed out")
             return orig(body, timeout)
@@ -906,18 +1110,18 @@ class LocalReviewTest(unittest.TestCase):
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none"])
         self.assertEqual(code, 0)
         heavy = [t for b, t in env.ollama_calls if b["model"] == local_review.HEAVY]
-        self.assertEqual(len(heavy), 4)  # risk、security × 兩階段
+        self.assertEqual(len(heavy), 2)  # risk、security 各一次
         self.assertEqual(set(heavy), {1800})
         self.assertEqual({t for b, t in env.ollama_calls if b["model"] != local_review.HEAVY}, {900})
         self.assertEqual(env.codex_calls, [])
 
-    def test_heavy_timeout_falls_back_to_codex_per_phase(self):
+    def test_heavy_timeout_falls_back_to_codex(self):
         env = self.heavy_timeout_env()
         code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,drift"])
         self.assertEqual(code, 0)
         heavy = [b for b, _ in env.ollama_calls if b["model"] == local_review.HEAVY]
-        self.assertEqual(len(heavy), 2)  # 每階段只試 27B 一次,不重派;互讀仍先試 27B
-        self.assertEqual(len(env.codex_calls), 2)  # 第一階段、互讀各一次
+        self.assertEqual(len(heavy), 1)  # 27B 只試一次,不重派
+        self.assertEqual(len(env.codex_calls), 1)
         self.assertTrue(all("審議會的 risk 席" in stdin for _, stdin, _, _ in env.codex_calls))
         self.assertTrue(all(argv[argv.index("-s") + 1] == "read-only" for argv, _, _, _ in env.codex_calls))
         parsed = review_gate.parse_local_review(out)
@@ -925,17 +1129,7 @@ class LocalReviewTest(unittest.TestCase):
                                                    "verdict": "concern"})
         self.assertEqual(parsed["seats"]["drift"]["model"], "qwen3:8b")
         self.assertIn("[verdict] risk | codex-cli 0.163.0(27B 逾時 30 分鐘改派) | concern", out)
-        self.assertIn("27B 改派 Codex:risk(第一階段、互讀)", out)
-
-    def test_heavy_fallback_only_in_phase1_keeps_27b_for_cross(self):
-        env = self.heavy_timeout_env(phases=("verdict",))
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,drift"])
-        self.assertEqual(code, 0)
-        heavy = [b for b, _ in env.ollama_calls if b["model"] == local_review.HEAVY]
-        self.assertEqual(len(heavy), 2)  # 第一階段逾時一次 + 互讀 27B 成功一次
-        self.assertEqual(len(env.codex_calls), 1)
-        self.assertIn("27B 改派 Codex:risk(第一階段)", out)
-        self.assertIn("27B 逾時 30 分鐘改派", review_gate.parse_local_review(out)["seats"]["risk"]["model"])
+        self.assertIn("27B 改派 Codex:risk 席", out)
 
     def test_heavy_fallback_codex_fails_twice_is_no_answer(self):
         env = self.heavy_timeout_env()
@@ -1042,7 +1236,7 @@ class CodexViewTest(unittest.TestCase):
         env = self.big_env()
         code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(env.codex_calls), 4)  # security、compliance × 兩階段
+        self.assertEqual(len(env.codex_calls), 2)  # security、compliance 各一次
         for argv, stdin, _, _ in env.codex_calls:
             self.assertEqual(argv[argv.index("-C") + 1], str(self.VIEW))
             self.assertEqual(argv[argv.index("-s") + 1], "read-only")
@@ -1056,17 +1250,17 @@ class CodexViewTest(unittest.TestCase):
             self.assertNotIn("截斷於", stdin)
             self.assertNotIn("y\ny\ny\n", stdin)  # 不放截短後的 diff
             self.assertNotIn("## diff\n<<<待審資料結束>>>", stdin)  # diff 區不是空的
-        self.assertEqual(env.codex_dir_exists, [True] * 4)  # 審議期間檢視存在
-        self.assertEqual(env.codex_dir_listing, [[".git"]] * 4)  # 不落地:除 .git 指標檔外沒有任何追蹤檔
+        self.assertEqual(env.codex_dir_exists, [True] * 2)  # 審議期間檢視存在
+        self.assertEqual(env.codex_dir_listing, [[".git"]] * 2)  # 不落地:除 .git 指標檔外沒有任何追蹤檔
         self.assertIn("Codex 席以 PR head 唯讀檢視", out)
-        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out)], HEAD, {CHG: "中"})
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
         self.assertTrue(ok, msgs)
 
     def test_ollama_seats_still_truncated(self):
         env = self.big_env()
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(env.ollama_calls), 8)
+        self.assertEqual(len(env.ollama_calls), 4)
         for body, _ in env.ollama_calls:
             user = body["messages"][1]["content"]
             self.assertIn("截斷於", user)
