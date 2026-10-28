@@ -312,7 +312,7 @@ def _add_title(inputs, params):
         raise ValueError("需要圖片和標題")
     path = tai.reserve("cover", ".png")
     with tai.discard_on_error(path):
-        media.add_title(media.to_16x9(image), title).save(path)
+        media.save_image(media.add_title(media.to_16x9(image), title), path)   # 經 outputs/ 目錄 fd 寫入
     return {"image": str(path)}
 
 

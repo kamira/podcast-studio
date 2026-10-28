@@ -2,9 +2,10 @@
 import os
 import re
 import contextlib
+import secrets
+import stat
 import struct
 import subprocess
-import tempfile
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -27,21 +28,59 @@ def generate_image(prompt, width=1024, height=1024):
     path = tai.reserve("image", ".png")
     # mflux 遇到已存在的輸出檔不覆寫,而是改存成 `<名>_1.png`;所以讓它寫進新建的私有暫存目錄,
     # 完成後再以 os.replace 換到先佔下的路徑(rename 取代佔位檔本身,不跟隨連結)。
-    tmpdir = tempfile.mkdtemp(prefix=".mflux-", dir=tai.OUT)
+    tmpname, tmp_fd = _mkdtemp_out(".mflux-")
     try:
         with tai.discard_on_error(path):
-            tmp = Path(tmpdir) / "image.png"
+            tmp = Path(tai.OUT) / tmpname / "image.png"   # mflux 是外部程式,只能給路徑(殘餘風險)
             subprocess.run([str(tai.MFLUX), "--model", conf["model"], "--base-model", "schnell",
                             "--steps", str(conf["steps"]),
                             "--width", str(width), "--height", str(height), "--prompt", prompt,
                             "--output", str(tmp)], check=True, stdout=subprocess.DEVNULL, env=env)
-            # (DIR-5 修正 4)相對兩個目錄 fd 搬移:私有暫存目錄 → outputs/ 的佔位檔名
-            with safe_fs.closing(safe_fs.open_dir(tai.OUT, [Path(tmpdir).name])) as src, \
-                    safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
-                safe_fs.replace(src, tmp.name, out, Path(path).name)
+            # (DIR-5 修正 4)相對兩個目錄 fd 搬移:私有暫存目錄(建立時取得的 fd)→ outputs/ 的佔位檔名
+            st = safe_fs.lstat(tmp_fd, tmp.name)
+            if st is None or not stat.S_ISREG(st.st_mode):
+                raise OSError("生圖結果不是一般檔案")
+            with safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
+                safe_fs.replace(tmp_fd, tmp.name, out, Path(path).name)
     finally:
-        _rmtree_in_out(tmpdir)
+        os.close(tmp_fd)
+        _rmtree_in_out(tmpname)
     return path
+
+
+def _mkdtemp_out(prefix: str) -> tuple[str, int]:
+    """在 outputs/ 正下方建立私有暫存目錄(mkdir(dir_fd), 0700)並以 O_NOFOLLOW 開啟;回傳 (名稱, 目錄 fd)。
+
+    (DIR-5 修正 5)取代 tempfile.mkdtemp(路徑);之後本程式在暫存目錄內的寫入一律相對這個 fd。"""
+    with safe_fs.closing(safe_fs.open_dir(tai.OUT, create=False)) as out:
+        for _ in range(16):
+            name = f"{prefix}{secrets.token_hex(8)}"
+            try:
+                os.mkdir(name, 0o700, dir_fd=out)
+            except FileExistsError:
+                continue
+            return name, safe_fs.open_child(out, name)
+    raise FileExistsError("無法建立不重複的暫存目錄")
+
+
+def open_reserved(path):
+    """以寫入模式開啟 `taiwan_ai.reserve()` 佔下的 outputs/ 正下方檔案(DIR-5 修正 5)。
+
+    相對 outputs/ 的目錄 fd 以 O_WRONLY | O_TRUNC | O_NOFOLLOW 開啟既有佔位檔,fstat 確認是一般檔;
+    回傳二進位檔案物件(PIL 與文字寫入都經它,不再以路徑寫)。不在 outputs/ 正下方丟 ValueError。"""
+    p = Path(path)
+    if p.parent != Path(tai.OUT) and p.parent.resolve() != Path(tai.OUT).resolve():
+        raise ValueError("輸出檔必須在 outputs/ 之下")
+    with safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
+        fd = safe_fs.open_file(out, p.name, os.O_WRONLY | os.O_TRUNC)
+    return os.fdopen(fd, "wb")
+
+
+def save_image(img, path) -> None:
+    """把 PIL 圖片寫進 outputs/ 的佔位檔(格式依副檔名;經 open_reserved 的 fd 寫入)。"""
+    fmt = Image.registered_extensions().get(Path(path).suffix.lower())
+    with open_reserved(path) as f:
+        img.save(f, format=fmt)
 
 
 def _rmtree_in_out(path) -> None:
@@ -96,7 +135,7 @@ def make_cover(prompt, title):
     raw = generate_image(prompt, FLUX_W, FLUX_H)
     path = tai.reserve("cover", ".png")
     with tai.discard_on_error(path):
-        add_title(to_16x9(raw), title).save(path)
+        save_image(add_title(to_16x9(raw), title), path)
     return path
 
 
@@ -198,7 +237,8 @@ def make_srt(script, seconds, path):
         end = t + seconds * len(s) / total
         rows.append(f"{i}\n{_ts(t)} --> {_ts(end)}\n{s.rstrip('。，,')}\n")
         t = end
-    Path(path).write_text("\n".join(rows), encoding="utf-8")
+    with open_reserved(path) as f:   # (DIR-5 修正 5)佔位檔經 outputs/ 的目錄 fd 開啟
+        f.write("\n".join(rows).encode("utf-8"))
     return path
 
 
@@ -499,9 +539,14 @@ class _PcmWriter:
         self.f.write(pcm)
 
 
-def _build_audio(paths: list, spans: list, total: int, dest: Path) -> None:
+def _create_in(work: int, name: str):
+    """在暫存目錄(目錄 fd)內排他建立 name(O_CREAT | O_EXCL | O_NOFOLLOW),回傳二進位寫入檔案物件。"""
+    return os.fdopen(safe_fs.create_excl(work, name, 0o600), "wb")
+
+
+def _build_audio(paths: list, spans: list, total: int, work: int, name: str) -> None:
     """依 layout 把各片段放到起點(片段之間補靜音),每段截或補到 layout 長度;總長 = layout.duration。"""
-    with open(dest, "wb") as f:
+    with _create_in(work, name) as f:
         w = _PcmWriter(f, _to_sample(total))
         pos = 0
         for path, (_, a_ms, b_ms) in zip(paths, spans):
@@ -515,7 +560,7 @@ def _build_audio(paths: list, spans: list, total: int, dest: Path) -> None:
         _write_silence(w, _to_sample(total) - pos)
 
 
-def _letterbox(path: Path, dest: Path) -> None:
+def _letterbox(path: Path, work: int, name: str) -> None:
     """圖片等比縮放進 1920×1080、黑邊置中(與 make_video 的 scale + pad 相同);以 O_NOFOLLOW 開啟。"""
     fd = _open_nofollow(path)
     try:
@@ -527,10 +572,11 @@ def _letterbox(path: Path, dest: Path) -> None:
     img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
     canvas = Image.new("RGB", (VIDEO_W, VIDEO_H))
     canvas.paste(img, ((VIDEO_W - img.width) // 2, (VIDEO_H - img.height) // 2))
-    canvas.save(dest)
+    with _create_in(work, name) as f:
+        canvas.save(f, format="PNG")
 
 
-def _build_video_list(images: list, total: int, work: Path) -> Path:
+def _build_video_list(images: list, total: int, work: int) -> str:
     """畫面軌 → concat demuxer 清單(0.1 秒一格;後開始的圖蓋過先前的圖,沒有圖的時段為黑畫面)。"""
     total_d = -(-total // 100)
     slots = [None] * total_d
@@ -542,9 +588,10 @@ def _build_video_list(images: list, total: int, work: Path) -> Path:
             name = f"v{len(names_of):03d}.png"
             names_of[p] = name
             if p is None:
-                Image.new("RGB", (VIDEO_W, VIDEO_H)).save(work / name)
+                with _create_in(work, name) as f:
+                    Image.new("RGB", (VIDEO_W, VIDEO_H)).save(f, format="PNG")
             else:
-                _letterbox(p, work / name)
+                _letterbox(p, work, name)
         if runs and runs[-1][0] == names_of[p]:
             runs[-1][1] += 1
         else:
@@ -553,14 +600,18 @@ def _build_video_list(images: list, total: int, work: Path) -> Path:
     for name, n in runs:
         lines += [f"file {name}", f"duration {n / 10:.1f}"]
     lines.append(f"file {runs[-1][0]}")  # concat demuxer 會忽略最後一筆的 duration,重複最後一張補足長度
-    listing = work / "video.ffconcat"
-    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return listing
+    with _create_in(work, "video.ffconcat") as f:
+        f.write(("\n".join(lines) + "\n").encode("utf-8"))
+    return "video.ffconcat"
 
 
 def _write_timeline_srt(cues: list, path: Path) -> None:
     rows = [f"{i}\n{_ts(a / 1000)} --> {_ts(b / 1000)}\n{text}\n" for i, (a, b, text) in enumerate(cues, 1)]
-    Path(path).write_text("\n".join(rows), encoding="utf-8")
+    try:   # (DIR-5 修正 5)SRT 佔位檔經 outputs/ 的目錄 fd 開啟(O_NOFOLLOW + fstat)
+        with open_reserved(path) as f:
+            f.write("\n".join(rows).encode("utf-8"))
+    except (OSError, ValueError):
+        raise RenderError("✗ 字幕檔無法寫入(不接受符號連結)") from None
 
 
 def render_timeline(project, layout):
@@ -588,11 +639,12 @@ def render_timeline(project, layout):
     path = tai.reserve("podcast", ".mp4", also=(".srt",))
     srt = path.with_suffix(".srt")
     with tai.discard_on_error(path, srt):
-        work = Path(tempfile.mkdtemp(prefix=".render-", dir=tai.OUT))
+        work_name, work_fd = _mkdtemp_out(".render-")
+        work = Path(tai.OUT) / work_name   # 只交給外部 ffmpeg(殘餘風險);本程式寫入一律相對 work_fd
         try:
+            _build_audio(audio_paths, spans, total, work_fd, "audio.wav")
             wav = work / "audio.wav"
-            _build_audio(audio_paths, spans, total, wav)
-            listing = _build_video_list(images, total, work)
+            listing = work / _build_video_list(images, total, work_fd)
             _write_timeline_srt(cues, srt)
             cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-y",
                    "-f", "concat", "-i", str(listing), "-i", str(wav)]
@@ -613,5 +665,6 @@ def render_timeline(project, layout):
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
                 raise RenderError("✗ 影片渲染失敗") from None
         finally:
-            _rmtree_in_out(work)
+            os.close(work_fd)
+            _rmtree_in_out(work_name)
     return path, srt

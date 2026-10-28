@@ -311,3 +311,55 @@ def test_音檔目錄在檢查後被換成連結時拒絕(env, monkeypatch):
         return got
     monkeypatch.setattr(media, "_contained_file", swapping)
     _reject(env)
+
+
+# ---------- DIR-5 修正 5:匯出的暫存目錄、暫存檔與 SRT 佔位檔 ----------
+
+def test_匯出暫存目錄建立後被換成連結_不寫到外部(env, monkeypatch):
+    outside = env.tmp / "outside-work"
+    outside.mkdir()
+    real = media._mkdtemp_out
+
+    def swapping(prefix):
+        name, fd = real(prefix)
+        d = Path(media.tai.OUT) / name
+        d.rename(d.with_name(name + "-moved"))
+        d.symlink_to(outside, target_is_directory=True)
+        return name, fd
+    monkeypatch.setattr(media, "_mkdtemp_out", swapping)
+    with pytest.raises(media.RenderError):   # ffmpeg 依路徑讀到的是空的連結目標而失敗
+        media.render_timeline(env.project, timeline.layout(env.project))
+    assert list(outside.iterdir()) == []                      # 暫存檔都寫進原目錄(fd),沒寫到外部
+    moved = [p for p in Path(media.tai.OUT).iterdir() if p.name.endswith("-moved")]
+    assert moved and sorted(x.name for x in moved[0].iterdir())[:1] == ["audio.wav"]
+    assert _outputs(env) == []
+
+
+def test_SRT佔位檔在預留後被換成連結_拒絕且不寫外部(env, monkeypatch):
+    outside = env.tmp / "outside.srt"
+    outside.write_text("不可覆寫", encoding="utf-8")
+    real = media.tai.reserve
+
+    def swapping(prefix, suffix, also=()):
+        path = real(prefix, suffix, also)
+        srt = path.with_suffix(".srt")
+        srt.unlink()
+        srt.symlink_to(outside)
+        return path
+    monkeypatch.setattr(media.tai, "reserve", swapping)
+    err = _reject(env, match="字幕檔無法寫入")
+    assert err is not None
+    assert outside.read_text(encoding="utf-8") == "不可覆寫"
+
+
+def test_open_reserved拒絕符號連結與outputs以外(env):
+    outside = env.tmp / "outside.png"
+    outside.write_bytes(b"KEEP")
+    out = Path(media.tai.OUT)
+    out.mkdir(exist_ok=True)
+    (out / "cover-x.png").symlink_to(outside)
+    with pytest.raises(OSError):
+        media.save_image(Image.new("RGB", (4, 4)), out / "cover-x.png")
+    with pytest.raises(ValueError):
+        media.open_reserved(env.tmp / "elsewhere.png")
+    assert outside.read_bytes() == b"KEEP"

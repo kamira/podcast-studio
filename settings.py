@@ -947,7 +947,10 @@ def save(cfg) -> None:
     if msg:
         raise ValueError([msg])
     db = _db_file()
-    db.parent.mkdir(exist_ok=True)
+    try:   # (DIR-5 修正 5)config/ 自 repo 根以 mkdir(dir_fd) 建立、O_NOFOLLOW 開啟(是符號連結即拒絕)
+        os.close(safe_fs.open_dir(ROOT.resolve(), ["config"], create=True))
+    except OSError:
+        raise ValueError([WARN_UNSAFE_PATH]) from None
     msg = _db_path_error()
     if msg:
         raise ValueError([msg])
