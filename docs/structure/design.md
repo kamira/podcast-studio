@@ -3,6 +3,7 @@
 > 導入反推(2026-10-22,基準點 `7da165b6048897abb8acac4bba69db9677827471`)。來源等級見 `docs/ai-guideline.md` 表頭。現況不等於規範;缺陷見 Guideline §9。
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:新增 HTTP API 契約、節點登錄表、設定模組介面、跨行程鎖;CLI 與 Gradio 版移除;設計決策表加入本筆決策(以 T1~T13 合併後的 main 為準)。
 > 2026-10-26 依 CHG-20261026-01 結構文件更新:新增 `taiwan_ai.role_config()`;生圖與聲線改讀設定、mflux 子程序加 `HF_HUB_OFFLINE=1`;移除 `FLUX` 常數;`wav_seconds()` 改為自寫 RIFF/WAVE 解析;影片合成 `-r 10`、WAV 加 `-t`;設計決策表加入本筆代決(以 T1~T5 合併後的 main 為準)。
+> 2026-10-28 依 CHG-20261028-01 結構文件更新:設計決策表新增「Codex 席以 PR head 唯讀檢視讀完整程式」。
 
 > 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 T1~T9 與修正為準):新增專案 API 契約、`breezy_worker` 介面(jobs 格式、stdout 進度行、G2PW `num_workers = 0`、環境由 `tts_service` 傳入 `taiwan_ai.BREEZY_ENV`)、合成快取鍵、`project` / `timeline` / `tts_service` / `names` 元件、`media.render_timeline` 與 `media.sniff_binary`;設計決策表加入本筆決策(含修訂 2 合成粒度與實測依據);畫布存檔改為保留 `steps`。
 
@@ -283,6 +284,7 @@ classDiagram
 | main 保護以 ruleset 強制 | ruleset vs 只靠約定 | repo 已公開,ruleset 免費可用;要求四項 check 通過、禁止直接 push 與 force push、只允許 squash | 〔觀察〕CHG-20261022-03 |
 | security、compliance 審議席由 Codex 擔任 | 本機 Ollama vs Codex(雲端,`-s read-only`) | 實審中 8B / 27B 輸出截斷或誤判,Codex 回答證據具體;送審資料送出本機屬使用者明示例外,前提是 repo 已公開 | 〔觀察〕DIR-1 第 9 條(使用者 2026-10-23 指示) |
 | 暫停 27B 審議 | 27B vs Codex 擔任高風險 risk 席 | 使用者指示暫不使用 27B;`scripts/local_review.py` 預設仍含 27B,暫停期間須帶 `--codex-seats risk,security,compliance` | 〔觀察〕DIR-1 第 10 條(使用者 2026-10-23 指示) |
+| Codex 席以 PR head 唯讀檢視讀完整程式 | 整份 diff 內嵌 vs 分檔送審 vs PR head 唯讀檢視 | Codex 席沿用 Ollama 的 `num_ctx` 截短時,大 CHG 讓 diff 被截到空(PR #76);Codex 以 `-s read-only` 執行,可唯讀執行 `git show`、`git diff`。diff 經過濾後 ≤ 30000 字內嵌完整 diff,超過改用 `.review/` 下以 head sha 建立的 `--no-checkout` detached worktree(不寫出追蹤檔以免依 PR 的 `.gitattributes` 觸發本機 filter、停用 hook、比對 HEAD、審完移除;Codex 只以 `git show`、`git diff --no-textconv --no-ext-diff` 讀取);本次與舊檢視共用安全清理:只有 `.git` 才刪指標檔與空目錄並 prune,不用 git 的強制移除與遞迴刪除,否則留下並警告;同名舊目錄另須為登記的 worktree;Ollama 席不變 | 〔觀察〕CHG-20261028-01(使用者 2026-10-28 核准 C-2) |
 | 27B 逾時 30 分鐘改派 Codex | 重派 27B vs 改派 Codex | 27B 太慢;某階段逾時或累計超過 30 分鐘沒有回答即改派,該席判決的模型欄註明改派 | 〔觀察〕DIR-1(使用者 2026-10-23 規則) |
 | 生圖與聲線設定每次呼叫重讀 | 每次呼叫重讀 vs 行程啟動時讀一次 | 與 `taiwan_ai.model()` 一致;MCP 是長駐行程,改了設定要立刻生效 | 〔觀察〕CHG-20261026-01 代決 1 |
 | 新增 `taiwan_ai.role_config()` | 新增介面 vs 各處直接讀 `settings.load()["roles"]` | `_role()` 要求 `model` 鍵,`voice` 沒有;設定只經 `settings.load()` 存取 | 〔觀察〕CHG-20261026-01 代決 1 |
