@@ -263,3 +263,15 @@ def test_ffmpeg失敗時移除佔位檔且訊息不含路徑(env, monkeypatch):
     _reject(env)
     leftovers = [p.name for p in env.out.iterdir()] if env.out.exists() else []
     assert leftovers == [], leftovers
+
+
+# ---------- DIR-5 統整 M-3:解碼只取需要的長度 ----------
+
+def test_解碼以t截止_只取片段需要的長度(tmp_path):
+    src = tmp_path / "long.wav"
+    _sine(src, seconds=5.0)
+    assert media._decode_argv(1.0)[-3:] == ["-t", "1.000", "pipe:1"]
+    pcm = media._decode_pcm(src, 1.0)
+    assert len(pcm) <= 1 * media.RENDER_RATE * 2 + 2           # ≤ 1 秒 × 48000 × 2 位元組(+1 個樣本)
+    assert len(pcm) >= int(0.95 * media.RENDER_RATE * 2)
+    assert len(media._decode_pcm(src)) >= int(4.9 * media.RENDER_RATE * 2)   # 不帶秒數時照舊解全檔

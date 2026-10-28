@@ -427,8 +427,9 @@ STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ"}
 
 # 替身 worker:參數格式同 breezy_worker.py synth;每句寫一個真的 16 kHz 正弦波 WAV,
 # stdout 逐句印 {"id", "seconds"};呼叫紀錄寫到同目錄的 calls.log(一行一次呼叫)。
+# 同目錄有 delay.txt 時,第 2 句起每句先等該秒數(合成中途試聽情境,DIR-5 統整 M-1)。
 FAKE_WORKER = """# -*- coding: utf-8 -*-
-import json, math, os, struct, sys
+import json, math, os, struct, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 SECONDS = %r
 args = sys.argv[1:]
@@ -440,7 +441,13 @@ with open(os.path.join(HERE, "calls.log"), "a", encoding="utf-8") as f:
 rate = 16000
 n = int(SECONDS * rate)
 pcm = b"".join(struct.pack("<h", int(6000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(n))
-for job in body["jobs"]:
+delay = 0.0
+if os.path.exists(os.path.join(HERE, "delay.txt")):
+    with open(os.path.join(HERE, "delay.txt"), encoding="utf-8") as f:
+        delay = float(f.read().strip() or 0)
+for n, job in enumerate(body["jobs"]):
+    if n:
+        time.sleep(delay)
     head = (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE" + b"fmt " + struct.pack("<I", 16)
             + struct.pack("<HHIIHH", 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(pcm)))
     with open(os.path.join(out, job["id"] + ".wav"), "wb") as w:
@@ -483,6 +490,9 @@ class EditorStubs:
 
     def worker_argv(self, jobs_path, out_dir):
         return [sys.executable, str(self.fake / "worker.py"), "synth", "--jobs", str(jobs_path), "--out", str(out_dir)]
+
+    def set_delay(self, seconds: float) -> None:
+        (self.fake / "delay.txt").write_text(str(seconds), encoding="utf-8")
 
     def worker_calls(self) -> list[list[dict]]:
         p = self.fake / "calls.log"
@@ -634,9 +644,27 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         page.locator("#wizard-next").click()
         current_step("② 語音")
 
-        begin("② 語音:逐句合成三句(替身 worker)")
+        begin("② 語音:逐句合成三句(替身 worker 每句間隔 1.2 秒),第一句在整批結束前就能試聽")
+        stubs.set_delay(1.2)
+        h0 = len(pj.list_history(PROJECT_NAME))
         page.locator("#voice-synth").click()
+        play1 = page.locator('#voice-list li.voice-row button[aria-label="試聽第 1 句"]')
+        expect(play1).to_be_enabled()
+        mid = page.evaluate("""() => {
+          const s = window.Studio.Store.view.project.segments;
+          const tl = document.querySelector('#tl-voice .tl-seg[data-segment="' + s[0].id + '"]');
+          return {status: document.getElementById('voice-status').textContent, running: window.Studio.Voice.running,
+                  first: !!s[0].audio, last: !!s[2].audio, tl: tl ? tl.className : null};
+        }""")
+        check(mid["running"] and "合成中" in mid["status"] and "新合成" not in mid["status"],
+              f"第一句可試聽時整批合成應尚未結束,實際 {mid}")
+        check(mid["first"] and not mid["last"], f"合成中途專案檢視應只有已完成的句子有音檔,實際 {mid}")
+        check(mid["tl"] is not None and "is-pending" not in mid["tl"],
+              f"語音軌第一句在合成中途應為已合成的片段(不是 ⏳ 合成中),實際 class={mid['tl']}")
+        check(len(pj.list_history(PROJECT_NAME)) == h0, "合成中途不應存檔(history 不應增加)")
         expect(page.locator("#voice-status")).to_contain_text("新合成 3 句、沿用 0 句")
+        stubs.set_delay(0)
+        check(len(pj.list_history(PROJECT_NAME)) == h0 + 1, "一次合成應只多一個 history 版本")
         check([len(c) for c in calls()] == [3], f"worker 應被呼叫一次、三句,實際 {[len(c) for c in calls()]}")
         rows = page.locator("#voice-list li.voice-row")
         for i in range(3):
@@ -696,6 +724,54 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
               f"時間軸上第 2、3 句間隔應為 1.5 秒,實際 {lay1[2]['start'] - lay1[1]['end']:.3f}")
         check(abs((lay1[2]["start"] - lay0[2]["start"]) - 1.1) < 0.01, "第 3 句應往後移 1.1 秒")
         check(len(calls()) == 1, "改停頓不應呼叫合成 worker")
+
+        begin("④ 剪輯:屬性面板把第 2 句之後的停頓設為 0,空隙仍可點到並拖到 1.5 秒(DIR-5 統整 M-2)")
+
+        def set_pause_in_props(sid, value):
+            page.locator(f'#tl-voice .tl-seg[data-segment="{sid}"]').click()
+            inp = page.locator('#props-body [data-hook="pause"] input.pause-input')
+            inp.fill(value)
+            inp.dispatch_event("change")
+            wait_until(lambda: proj().segments[1]["pause_after"] == float(value),
+                       f"第 2 句之後的停頓應存成 {value} 秒")
+
+        set_pause_in_props(seg_ids[1], "0")
+        gap = page.locator(f'#tl-voice .tl-gap[data-after="{seg_ids[1]}"]')
+        expect(gap).to_have_attribute("aria-valuenow", "0.0")
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[2]}"]').click()   # 先選取第 3 句
+        expect(page.locator(f'#tl-voice .tl-seg.is-selected[data-segment="{seg_ids[2]}"]')).to_have_count(1)
+        gap.scroll_into_view_if_needed()
+        hit = page.evaluate("""(after) => {
+          const g = document.querySelector('#tl-voice .tl-gap[data-after="' + after + '"]');
+          const r = g.getBoundingClientRect();
+          const c = document.getElementById('tl-content').getBoundingClientRect();
+          const segs = window.Studio.Store.view.layout.segments;
+          const prev = segs.find(s => s.id === after);
+          const x = c.left + prev.end * window.Studio.Timeline.zoom, y = r.top + r.height / 2;
+          const e = document.elementFromPoint(x, y);
+          return {width: r.width, x: x, y: y, isGap: e === g, got: e ? e.className : null};
+        }""", seg_ids[1])
+        check(hit["width"] >= 12, f"停頓 0 秒的空隙點擊範圍應至少 12px,實際 {hit['width']:.1f}")
+        check(hit["isGap"], f"選取第 3 句後,交界處最上層應是空隙,實際 {hit['got']}")
+        n_calls = len(calls())
+        page.mouse.move(hit["x"], hit["y"])
+        page.mouse.down()
+        page.mouse.move(hit["x"] + 0.75 * zoom, hit["y"], steps=5)
+        page.mouse.move(hit["x"] + 1.5 * zoom, hit["y"], steps=5)
+        page.mouse.up()
+        expect(toast).to_have_text("停頓改為 1.5 秒")
+        check(proj().segments[1]["pause_after"] == 1.5, "從 0 秒拖拉後停頓應存成 1.5 秒")
+        check(len(calls()) == n_calls, "改停頓不應呼叫合成 worker")
+
+        begin("④ 剪輯:停頓 0 秒的空隙以鍵盤 → 改成 0.1 秒")
+        set_pause_in_props(seg_ids[1], "0")
+        gap = page.locator(f'#tl-voice .tl-gap[data-after="{seg_ids[1]}"]')
+        expect(gap).to_have_attribute("aria-valuenow", "0.0")
+        gap.focus()
+        page.keyboard.press("ArrowRight")
+        wait_until(lambda: proj().segments[1]["pause_after"] == 0.1, "鍵盤 → 後停頓應存成 0.1 秒")
+        set_pause_in_props(seg_ids[1], "1.5")                                     # 還原,後續步驟照舊
+        check(len(calls()) == n_calls, "改停頓不應呼叫合成 worker")
 
         begin("④ 剪輯:點第 1 句的「好」,在注音彈出框改成四聲並套用,只重新合成這一句")
         page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[0]}"]').click()

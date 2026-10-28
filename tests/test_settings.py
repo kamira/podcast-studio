@@ -1118,3 +1118,11 @@ def test_升級時初始化鎖檔是符號連結則不讀不寫(env, tmp_path_fa
     assert got.pop("_warnings") == [settings.WARN_UNSAFE_PATH]
     assert got == settings.DEFAULTS
     assert sha(db(env)) == before and target.read_bytes() == b"keep"
+
+
+def test_voice_speed_error_message_says_0_5_to_2_0(env):
+    """DIR-5 統整 RS-32:語速範圍訊息寫成 0.5–2.0 倍(與規格一致)。"""
+    c = cfg()
+    c["voice_defaults"] = {**c["voice_defaults"], "speed": 2.5}
+    errs = settings.validate(c, None)
+    assert any("0.5–2.0 倍" in e for e in errs), errs

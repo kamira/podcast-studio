@@ -1120,3 +1120,44 @@ def test_drag_handles_suppress_click_and_use_pointer_capture():
     js = _js("edit.js")
     assert "setPointerCapture" in js and "suppressClick" in js
     assert 'content.addEventListener("click"' in js
+
+
+
+# ---------- CHG-20261022-04 DIR-5 統整修正 ----------
+
+def test_gap_hit_box_is_centered_and_at_least_12px_run_in_js():
+    """M-2:停頓 × zoom 不足 12px(含 0 秒)時,點擊範圍以交界為中心、寬 12px。"""
+    got = _run_js_funcs(EDIT_FUNCS, """var result = {
+      zero: gapBox(2, 0, 60), tiny: gapBox(2, 0.1, 60), wide: gapBox(2, 0.4, 60), hit: GAP_HIT
+    };""")
+    assert got["hit"] == 12
+    assert got["zero"] == {"left": 114, "width": 12}            # 交界 120px 為中心
+    assert abs(got["tiny"]["left"] - (120 + 3 - 6)) < 1e-9 and got["tiny"]["width"] == 12
+    assert got["wide"]["left"] == 120 and abs(got["wide"]["width"] - 24) < 1e-9
+
+
+def test_draggable_gap_sits_above_selected_segment():
+    """M-2:可拖拉的空隙層級高於已選取的片段(.tl-seg.is-selected)。"""
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    gap = re.search(r"\.tl-gap\.is-draggable \{[^}]*z-index: (\d+)", css)
+    sel = re.search(r"\.tl-seg\.is-selected[^{]*\{[^}]*z-index: (\d+)", css)
+    assert gap and sel and int(gap.group(1)) > int(sel.group(1))
+    assert "min-width: 12px" in gap.group(0)
+    assert "gapBox(prev.end, v, zoom)" in _js("edit.js")
+
+
+def test_props_panel_has_no_segment_text_editor():
+    """M-8(RS-23 取窄):屬性面板的文字只顯示,沒有 aria-label="片段文字" 的 textarea 與「套用文字」。"""
+    js = _js("timeline.js")
+    assert "textarea" not in js and "片段文字" not in js and "套用文字" not in js
+    assert "{ text:" not in js                                    # 不從時間軸送出改文字的 PATCH
+    assert 'this.row(box, "文字", seg.text)' in js
+
+
+def test_synth_progress_reloads_view_without_waiting_for_finish():
+    """M-1:收到 segment 事件即重新讀取專案檢視(不等 finished);reload 只採用最後一次回應。"""
+    js = _js("project.js")
+    synth = js[js.index("    async synth() {"):js.index("  // 試聽單一句")]
+    seg_branch = synth[synth.index('if (ev.type === "segment"'):synth.index('if (ev.type === "error"')]
+    assert "Store.reload()" in seg_branch
+    assert "seq !== this.reloadSeq" in js

@@ -142,11 +142,14 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
                                        不存在 → 404);只送 MEDIA_TYPES 的副檔名,帶 nosniff。送的是合成原檔
                                        (變速前);預覽以 `<audio>.playbackRate = 語速`(保留音高)播放。
   POST   /api/projects/{p}/synth       → {"run_id", "events": "/api/run/<run_id>/events"};事件(SSE,格式同 /api/run):
-                                       {"type": "waiting"}、{"type": "segment", "id", "seconds", "cached"}(每句完成)、
+                                       {"type": "waiting"}、{"type": "segment", "id", "seconds", "cached", "audio"}(每句完成)、
                                        {"type": "error", "message"}、
                                        {"type": "finished", "status": "ok"|"error", "synthesized", "cached", "saved"}。
                                        完成(含中途失敗)時把已合成的句子寫回專案:只更新同 id 且合成文字未變、
-                                       期間沒有改成自錄音檔的片段。
+                                       期間沒有改成自錄音檔的片段(整批只存檔一次,history 最多多一版)。
+                                       合成中途可試聽(DIR-5 統整 M-1):每句完成後,該句音檔在記憶體中疊到
+                                       GET /api/projects/{p}、修改類端點回傳的 View(含 layout)與 media 端點上
+                                       (同樣只疊同 id、合成文字未變、不是自錄音檔的片段;不存檔),結束寫回後清除。
   POST   /api/projects/{p}/render      匯出前檢查:沒有音檔或快取鍵已過期(文字改過)的片段 → 400
                                        {"error", "segments": [片段 id]};通過 → {"run_id", "events"},事件:
                                        {"type": "waiting"}、{"type": "render", "status": "started"}、
@@ -248,7 +251,7 @@ MAX_WORKFLOW_NAME = names.MAX_NAME
 WORKFLOW_NAME_ASCII = names.NAME_ASCII
 WORKFLOW_NAME_RANGES = names.NAME_RANGES
 WORKFLOW_NAME_HINT = "工作流程名稱只能用中文、日文假名、英文字母、數字、底線、連字號,長度 1 到 64 字"
-M4A_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2"})
+M4A_BRANDS = media.M4A_BRANDS
 # /files/* 的回應型別:表內的以 inline 送出;不在表內的一律 octet-stream + attachment
 SERVE_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
@@ -550,26 +553,8 @@ def _upload_ext(name: str | None) -> str | None:
     return ext if ext in UPLOAD_KINDS else None
 
 
-def _sniff_binary(ext: str, head: bytes) -> bool:
-    """依檔頭位元組判斷內容是否與副檔名相符(不信任用戶端 Content-Type)。"""
-    if ext == ".png":
-        return head.startswith(b"\x89PNG\r\n\x1a\n")
-    if ext in (".jpg", ".jpeg"):
-        return head.startswith(b"\xff\xd8\xff")
-    if ext == ".webp":
-        return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
-    if ext == ".wav":
-        return head[:4] == b"RIFF" and head[8:12] == b"WAVE"
-    if ext == ".mp3":
-        if head.startswith(b"ID3"):
-            return True
-        if len(head) < 2 or head[0] != 0xFF or head[1] & 0xE0 != 0xE0:
-            return False
-        version, layer = (head[1] >> 3) & 0x03, (head[1] >> 1) & 0x03
-        return version != 0x01 and layer != 0x00   # 保留值不是合法 MPEG 音訊框
-    if ext == ".m4a":
-        return head[4:8] == b"ftyp" and head[8:12] in M4A_BRANDS
-    return False
+# 內容嗅探規則搬到 media.sniff_binary(DIR-5 統整 M-5,與「送到素材庫」節點共用;規則不變)
+_sniff_binary = media.sniff_binary
 
 
 def _check_upload(ext: str, path: Path, size: int) -> str | None:
@@ -589,7 +574,7 @@ def _check_upload(ext: str, path: Path, size: int) -> str | None:
             return f"文字檔超過 {nodes.MAX_TEXT} 字"
         return None
     with open(path, "rb") as f:
-        head = f.read(16)
+        head = f.read(media.SNIFF_BYTES)
     if not _sniff_binary(ext, head):
         return f"檔案內容與副檔名 {ext} 不符"
     return None
@@ -908,11 +893,16 @@ def _copy_in(fd: int, dest_dir: Path, ext: str) -> tuple[str, Path, int]:
     return new, dest, size
 
 
-def _media_file(name: str, aid: str) -> tuple[Path, str]:
+def _media_file(name: str, aid: str, overlay: Callable | None = None) -> tuple[Path, str]:
     """`/api/projects/{p}/media/{aid}`:只依 id 在該專案的素材清單或片段音檔中解析,
-    resolve() 後必須直接位於該專案的 `assets/` 或 `audio/` 內;其他一律 404。"""
+    resolve() 後必須直接位於該專案的 `assets/` 或 `audio/` 內;其他一律 404。
+
+    overlay(name, project):合成期間把本次已完成、尚未寫回的片段音檔疊上(DIR-5 統整 M-1),
+    這些音檔 id 因此也可取用;路徑檢查不變。"""
     _check_item_id(aid, "檔案")
     proj = pj.load(name)
+    if overlay is not None:
+        overlay(name, proj)
     found = next(((("assets", a["ext"])) for a in proj.assets if a["id"] == aid), None)
     if found is None and any((s.get("audio") or {}).get("id") == aid for s in proj.segments):
         found = ("audio", "wav")
@@ -1322,6 +1312,21 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     plocks: dict[str, threading.Lock] = {}
     plocks_guard = threading.Lock()
     jobs: dict[str, str] = {}   # run_id → 執行合成 / 匯出中的專案名稱(比對鍵),刪除專案時檢查
+    # 合成中途可試聽(DIR-5 統整 M-1):本次合成已完成、尚未寫回專案的片段音檔,只存在記憶體。
+    # 專案比對鍵 → {片段 id: (合成當時的含標註文字, audio)};結束寫回(merge_audio)後清除。
+    live_audio: dict[str, dict[str, tuple[str, dict]]] = {}
+    live_guard = threading.Lock()
+
+    def overlay(name: str, proj):
+        """把 live_audio 疊到剛載入的專案上(不存檔):只疊同 id、合成文字未變、不是自錄音檔的片段。"""
+        with live_guard:
+            done = dict(live_audio.get(names.fold_name(name)) or {})
+        for s in proj.segments if done else ():
+            got = done.get(s["id"])
+            if got is None or _external(s.get("audio")) or pj.tts_text(s) != got[0]:
+                continue
+            s["audio"] = dict(got[1])
+        return proj
 
     def plock(name: str) -> threading.Lock:
         """同一專案的「讀—改—存」一律序列化(本行程內;跨行程的存檔另有 project.py 的檔案鎖)。"""
@@ -1341,7 +1346,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 for p in created:
                     p.unlink(missing_ok=True)
                 raise
-        return {**_view(proj), "version": version, **extra}
+        return {**_view(overlay(name, proj)), "version": version, **extra}
 
     def start_job(name: str | None) -> Run:
         run = runs.start()
@@ -1381,7 +1386,8 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     @app.get("/api/projects/{p}")
     @_guard
     def api_project_get(p: str):
-        return JSONResponse(_view(pj.load(_pname(p))), headers={"Cache-Control": "no-store"})
+        name = _pname(p)
+        return JSONResponse(_view(overlay(name, pj.load(name))), headers={"Cache-Control": "no-store"})
 
     @app.put("/api/projects/{p}")
     @_guard
@@ -1435,7 +1441,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         def work():
             with plock(name):
                 version = pj.restore(name, vid)
-                return {**_view(pj.load(name)), "version": version, "restored": vid}
+                return {**_view(overlay(name, pj.load(name))), "version": version, "restored": vid}
         return await run_in_threadpool(work)
 
     @app.patch("/api/projects/{p}/segments/{sid}")
@@ -1617,7 +1623,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     @app.get("/api/projects/{p}/media/{aid}")
     @_guard
     def api_media(p: str, aid: str):
-        path, ctype = _media_file(_pname(p), aid)
+        path, ctype = _media_file(_pname(p), aid, overlay)
         return FileResponse(path, media_type=ctype, headers={"Cache-Control": "no-store"})
 
     @app.post("/api/projects/{p}/synth")
@@ -1626,6 +1632,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         name = _pname(p)
         pj.load(name)   # 不存在 → 404(不佔執行旗標)
         run = start_job(name)
+        key = names.fold_name(name)
 
         def work():
             done_ids: list[str] = []
@@ -1633,7 +1640,14 @@ def create_app(runner: Callable | None = None, token: str | None = None,
 
             def emit(ev):
                 if isinstance(ev, dict) and ev.get("type") == "segment":
-                    done_ids.append(ev.get("id"))
+                    sid = ev.get("id")
+                    done_ids.append(sid)
+                    seg = next((s for s in snapshot.segments if s["id"] == sid), None) if snapshot else None
+                    audio = ev.get("audio") if isinstance(ev.get("audio"), dict) else (seg or {}).get("audio")
+                    if seg is not None and isinstance(audio, dict) and isinstance(audio.get("id"), str) \
+                            and pj.ID_RE.fullmatch(audio["id"]):
+                        with live_guard:   # 該句立即可在專案檢視、時間軸與 media 端點取用(不存檔)
+                            live_audio.setdefault(key, {})[sid] = (pj.tts_text(seg), dict(audio))
                 run.emit(ev)
 
             status, result = "error", {"synthesized": [], "cached": []}
@@ -1648,11 +1662,14 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 print(f"studio_server:語音合成錯誤 {type(e).__name__}", file=sys.stderr)
                 run.emit({"type": "error", "message": "✗ 語音合成失敗"})
             saved = 0
-            try:   # 已完成的句子一律寫回專案(中途失敗也保留)
+            try:   # 已完成的句子一律寫回專案(中途失敗也保留);整批只存一次,history 最多多一版
                 saved = merge_audio(name, snapshot, done_ids)
             except pj.ProjectError as e:
                 status = "error"
                 run.emit({"type": "error", "message": f"合成結果無法寫回專案:{e}"})
+            finally:
+                with live_guard:
+                    live_audio.pop(key, None)
             run.emit({"type": "finished", "status": status, "synthesized": result.get("synthesized", []),
                       "cached": result.get("cached", []), "saved": saved})
 

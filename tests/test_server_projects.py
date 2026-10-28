@@ -41,7 +41,7 @@ MP3_ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 256
 
 FAKE_WORKER = textwrap.dedent('''
     # -*- coding: utf-8 -*-
-    import json, os, struct, sys, wave
+    import json, os, struct, sys, time, wave
     HERE = os.path.dirname(os.path.abspath(__file__))
     conf = {}
     if os.path.exists(os.path.join(HERE, "conf.json")):
@@ -54,6 +54,8 @@ FAKE_WORKER = textwrap.dedent('''
     with open(os.path.join(HERE, "calls.log"), "a", encoding="utf-8") as f:
         f.write(json.dumps({"jobs": body["jobs"], "jobs_path": jobs_path}, ensure_ascii=False) + "\\n")
     for n, job in enumerate(body["jobs"]):
+        if n:
+            time.sleep(conf.get("delay", 0))
         if conf.get("fail_at") == n:
             print("✗ 第 %d 句合成失敗:替身" % (n + 1), file=sys.stderr, flush=True)
             sys.exit(4)
@@ -604,6 +606,48 @@ def test_synth_failure_keeps_done_segments_and_empties_tmp(client, env):
     assert proj.segments[0]["audio"] is not None and proj.segments[1]["audio"] is None
     assert list((env.repo / "projects" / NAME / "tmp").iterdir()) == []
     assert not Path(env.worker_calls()[0]["jobs_path"]).exists()
+
+
+def test_synth_mid_run_audio_playable_history_once_and_edit_not_overwritten(client, env):
+    """DIR-5 統整 M-1(使用者故事 13):替身 worker 三句、每句間隔 1 秒。
+    第一句完成後、finished 前:專案檢視第一句有 audio、layout 該句 end > start、media 端點 200;
+    合成期間改第二句文字 → 結束後第二句沒有被寫入舊音檔;finished 後 history 只比合成前多 1。"""
+    import time as _time
+    view = create(client)
+    sids = [s["id"] for s in view["project"]["segments"]]
+    assert len(sids) == 3
+    (env.fake / "conf.json").write_text(json.dumps({"delay": 1.0}), encoding="utf-8")
+    r = client.post(f"/api/projects/{NAME}/synth", headers=auth())
+    assert r.status_code == 200, r.text
+    run_id = r.json()["run_id"]
+    deadline = _time.monotonic() + 10
+    while True:
+        v = get(client)
+        if v["project"]["segments"][0]["audio"]:
+            break
+        assert _time.monotonic() < deadline, "第一句一直沒有出現在專案檢視"
+        _time.sleep(0.05)
+    assert v["project"]["segments"][2]["audio"] is None           # 整批尚未結束
+    lay0 = next(x for x in v["layout"]["segments"] if x["id"] == sids[0])
+    assert lay0["end"] > lay0["start"]
+    aid = v["project"]["segments"][0]["audio"]["id"]
+    m = client.get(f"/api/projects/{NAME}/media/{aid}")
+    assert m.status_code == 200 and m.headers["content-type"] == "audio/wav"
+    assert pj.load(NAME).segments[0]["audio"] is None                # 中途沒有存檔
+    r = patch_segment(client, sids[1], {"text": "我們去士林夜市吧！"})   # 合成期間改第二句
+    assert r.status_code == 200, r.text
+    assert r.json()["project"]["segments"][0]["audio"] == v["project"]["segments"][0]["audio"]
+    versions = len(client.get(f"/api/projects/{NAME}/history").json()["versions"])
+    events = read_sse(client, run_id)
+    assert events[-1]["type"] == "finished" and events[-1]["status"] == "ok"
+    assert all("audio" in e for e in events if e["type"] == "segment")
+    assert len(client.get(f"/api/projects/{NAME}/history").json()["versions"]) == versions + 1
+    proj = pj.load(NAME)
+    assert proj.segments[0]["audio"]["id"] == aid
+    assert proj.segments[1]["text"] == "我們去士林夜市吧！" and proj.segments[1]["audio"] is None
+    assert proj.segments[2]["audio"] is not None
+    final = get(client)
+    assert final["project"]["segments"][1]["audio"] is None             # 結束後不再疊記憶體中的音檔
 
 
 def test_synth_unknown_project_is_404_and_does_not_hold_flag(client):

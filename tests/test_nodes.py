@@ -512,6 +512,44 @@ def test_send_to_library拒絕outputs以外與符號連結(out, tmp_path):
     assert pj.load(name).assets == [] and _asset_files(name) == []
 
 
+def test_send_to_library拒絕指向outputs內的符號連結(out):
+    """DIR-5 統整 M-4:outputs/link.png → outputs/real.png(同在 outputs/ 內)也拒絕;目錄連結亦同。"""
+    name = _library_project()
+    real = out / "real.png"
+    Image.new("RGB", (8, 8)).save(real)
+    (out / "link.png").symlink_to(real)
+    (out / "sub").mkdir()
+    Image.new("RGB", (8, 8)).save(out / "sub" / "b.png")
+    (out / "sublink").symlink_to(out / "sub", target_is_directory=True)
+    (out / "self").symlink_to(out, target_is_directory=True)
+    for bad in (str(out / "link.png"), "link.png", "sublink/b.png", str(out / "self" / "real.png")):
+        with pytest.raises(ValueError, match="符號連結"):
+            _run("send-to-library", {"image": bad}, {"project": name})
+    assert pj.load(name).assets == [] and _asset_files(name) == []
+    _run("send-to-library", {"image": "sub/b.png"}, {"project": name})   # 一般檔案照舊接受
+    assert [a["ext"] for a in pj.load(name).assets] == ["png"]
+
+
+def test_send_to_library檢查檔頭_副檔名png但內容是文字被拒絕(out):
+    """DIR-5 統整 M-5:與 /api/upload 同一套嗅探(media.sniff_binary)。"""
+    name = _library_project()
+    (out / "fake.png").write_text("這不是圖片", encoding="utf-8")
+    (out / "fake.mp3").write_bytes(b"hello world, not mp3")
+    with pytest.raises(ValueError, match="不符"):
+        _run("send-to-library", {"image": str(out / "fake.png")}, {"project": name})
+    with pytest.raises(ValueError, match="不符"):
+        _run("send-to-library", {"audio": str(out / "fake.mp3")}, {"project": name})
+    assert pj.load(name).assets == [] and _asset_files(name) == []
+    Image.new("RGB", (8, 8)).save(out / "ok.png")
+    _run("send-to-library", {"image": str(out / "ok.png")}, {"project": name})
+    assert [a["ext"] for a in pj.load(name).assets] == ["png"]
+
+
+def test_送到素材庫與upload共用同一個嗅探函式():
+    import studio_server as ss
+    assert ss._sniff_binary is media.sniff_binary and ss.M4A_BRANDS is media.M4A_BRANDS
+
+
 def test_send_to_library拒絕不在白名單的副檔名與種類不符(out):
     name = _library_project()
     (out / "v.mp4").write_bytes(b"mp4")

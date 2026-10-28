@@ -59,6 +59,15 @@
     return clamp(roundTo(Number(pause0) + dx / zoom, 0.1), 0, PAUSE_MAX);
   }
 
+  // 空隙的可拖拉點擊範圍(DIR-5 統整 M-2):停頓 × zoom 不足 GAP_HIT 像素時(含 0 秒),
+  // 以兩句交界的中點為中心、寬 GAP_HIT 像素;否則就是停頓本身的範圍。回傳 {left, width}(像素)
+  const GAP_HIT = 12;
+  function gapBox(start, pause, zoom) {
+    const w = pause * zoom;
+    if (w >= GAP_HIT) return { left: start * zoom, width: w };
+    return { left: start * zoom + w / 2 - GAP_HIT / 2, width: GAP_HIT };
+  }
+
   // 拖拉圖片邊緣:{start, end}(layout 中的秒數)、edge = start | end → 新的該邊秒數(取到 0.1)
   function edgeFromDrag(range, edge, dx, zoom) {
     const v = (edge === "start" ? range.start : range.end) + dx / zoom;
@@ -508,13 +517,17 @@
       gap.setAttribute("aria-valuemin", "0");
       gap.setAttribute("aria-valuemax", String(PAUSE_MAX));
       gap.setAttribute("aria-valuenow", fmt1(pause0));
-      const left = prev.end * zoom;
+      const place = function (v) {
+        const box = gapBox(prev.end, v, zoom);
+        gap.style.left = box.left + "px";
+        gap.style.width = box.width + "px";
+      };
+      place(pause0);
       gap.addEventListener("pointerdown", function (e) {
         let value = pause0;
         dragOn(gap, e, function (dx) {
           value = pauseFromDrag(pause0, dx, zoom);
-          gap.style.left = left + "px";
-          gap.style.width = Math.max(2, value * zoom) + "px";
+          place(value);
           gap.dataset.value = fmt1(value) + " 秒";
           gap.setAttribute("aria-valuenow", fmt1(value));
         }, async function () {
@@ -622,5 +635,6 @@
   // 專案換了或重新整理時關掉彈出框
   Store.on(function () { Tone.close(); });
 
-  S.Edit = { Tone: Tone, speedOptions: speedOptions, pauseFromDrag: pauseFromDrag, edgeFromDrag: edgeFromDrag };
+  S.Edit = { Tone: Tone, speedOptions: speedOptions, pauseFromDrag: pauseFromDrag, edgeFromDrag: edgeFromDrag,
+    gapBox: gapBox, GAP_HIT: GAP_HIT };
 })();

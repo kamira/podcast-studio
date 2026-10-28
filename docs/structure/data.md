@@ -4,15 +4,18 @@
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:新增設定資料庫 `config/studio.db`(取代導入時「沒有設定檔」的描述與修訂 2 前規劃的 `config/models.json` schema)、工作流程 JSON、`outputs/uploads/`;輸出檔時間戳改為毫秒 + 隨機碼(以 T1~T13 合併後的 main 為準)。
 > 2026-10-26 依 CHG-20261026-01 結構文件更新:`image`、`voice` 角色接上 `media.generate_image()`、`taiwan_ai.speak()`;移除 `FLUX`、`VOICE_WAV`、`VOICE_TEXT` 常數;`workflows/` 只追蹤 `default.json`;`wav_seconds()` 改為自寫 RIFF/WAVE 解析;影片 `-r 10`、WAV 加 `-t`(以 T1~T5 合併後的 main 為準)。
 
-〔觀察〕持久化資料有四類:設定資料庫 `config/studio.db`(使用者資料,不入 git)、工作流程 JSON(`workflows/`)、`outputs/` 下的產出檔與上傳檔、程式內常數。流程執行中的文字(文案、標題、prompt)只存在伺服器記憶體中的執行事件(最近 20 次 run)與瀏覽器畫布上,另存工作流程時隨節點參數或釘住的編輯值寫入 JSON。
+> 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 T1~T9 與修正為準):新增專案資料(`projects/`:Project、Segment、Annotation、ImageClip、Asset,`schema_version: 1`);設定資料庫升為 schema 2、新增 `voice_defaults` 表;畫布存檔保留 `steps` 的規則(取代「目前不保留 `steps`」)。
+
+〔觀察〕持久化資料有五類:設定資料庫 `config/studio.db`(使用者資料,不入 git)、工作流程 JSON(`workflows/`)、專案資料 `projects/`(使用者資料,不入 git;CHG-20261022-04)、`outputs/` 下的產出檔與上傳檔、程式內常數。流程執行中的文字(文案、標題、prompt)只存在伺服器記憶體中的執行事件(最近 20 次 run)與瀏覽器畫布上,另存工作流程時隨節點參數或釘住的編輯值寫入 JSON。
 
 ## 實體 / 資料表
 
-### 設定資料庫 `config/studio.db`(SQLite,schema v1)〔觀察〕`settings.py`
+### 設定資料庫 `config/studio.db`(SQLite,schema v2)〔觀察〕`settings.py`
 
 | 資料表 | 欄位 | 約束 | 說明 |
 |--------|------|------|------|
-| `meta` | `key TEXT PRIMARY KEY`、`value TEXT NOT NULL` | — | `schema_version`(目前 `"1"`)、`imported_from`(`config/models.json`,只在一次性匯入時寫)、`imported_at`(UTC 時間) |
+| `meta` | `key TEXT PRIMARY KEY`、`value TEXT NOT NULL` | — | `schema_version`(目前 `"2"`;CHG-20261022-04 T8 由 `"1"` 升級)、`imported_from`(`config/models.json`,只在一次性匯入時寫)、`imported_at`(UTC 時間) |
+| `voice_defaults` | `key TEXT PRIMARY KEY`、`value REAL NOT NULL` | 鍵只有 `speed`(0.5–2.0,取到 0.05)、`pause_comma`、`pause_sentence`、`pause_paragraph`(0–5 秒,取到 0.1) | 語音預設(設定頁「語音預設」子頁);預設 1.15 / 0.0 / 0.4 / 0.8;新專案的 `defaults` 取自這裡(`studio_server._voice_defaults()`),不合專案規則時回 `project.DEFAULTS`(CHG-20261022-04 T8) |
 | `roles` | `role TEXT PRIMARY KEY`、`config TEXT NOT NULL` | `config` 為該角色鍵值的 JSON | 角色與允許的鍵見下表 |
 | `review_seats` | `seat TEXT PRIMARY KEY`、`model TEXT NOT NULL` | 六席:risk、impact、drift、compliance、security、consistency | Ollama 模型名稱或 `codex` |
 
@@ -30,7 +33,8 @@
 
 - 〔觀察〕檔案:`config/studio.db` 與 SQLite 的 `-wal`、`-shm`(WAL 模式),初始化鎖 `config/.studio.db.lock`;全部列入 `.gitignore`。資料庫檔權限 0600。
 - 〔觀察〕**一次性匯入**:資料庫不存在、`config/models.json` 存在、路徑安全且內容通過 `validate(cfg, None)` 時,第一次 `load()` 在 `BEGIN IMMEDIATE` 交易內建表、寫入並記 `schema_version`、`imported_from`、`imported_at`;失敗即 rollback 且不留資料庫檔。之後只讀資料庫,程式不刪除也不再讀 JSON。`config/models.json` 已於 CHG-20261022-01 T3 移出 git(列入 `.gitignore`)。
-- 〔觀察〕`schema_version` 不是程式所知的版本時,不讀不寫、回 `DEFAULTS` 並提示,不猜測轉換。
+- 〔觀察〕`schema_version` 不是程式所知的版本(1、2)時,不讀不寫、回 `DEFAULTS` 並提示,不猜測轉換。
+- 〔觀察〕**schema 1 → 2 升級**(CHG-20261022-04 T8):`load()` 唯讀探測到 v1 才取初始化鎖、鎖內再探測,在 `BEGIN IMMEDIATE` 交易內再讀版本後建 `voice_defaults` 表、寫入預設值並把版本改為 2;不改 `roles`、`review_seats`;失敗即 rollback 仍為 v1,回傳 v1 的設定 + 程式內語音預設 + `_warnings`;兩個行程同時觸發時後到者看到版本已是 2 即略過;v1 上的 `save()` 在同一交易內升級再存入;一次性匯入的新資料庫直接寫 schema 2。`validate()` 的 `voice_defaults` 為選填(省略時 `save()` 不動資料庫內的語音預設),`load()` 一律回傳。回滾步驟寫在 `settings.py` 檔頭與 CHG-20261022-04「風險與回滾」。
 - 〔觀察〕讀出的設定一律再經 `validate(cfg, None)`,不合法整份回 `DEFAULTS`(帶 `_warnings`),資料庫不動。
 - 〔觀察〕`image`、`voice` 的讀取端不快取設定:設定頁存檔後,下一次生圖或語音(網頁與 MCP 兩個行程)即使用新值;設定為 `DEFAULTS` 時子程序 argv 與 CHG-20261026-01 之前逐元素相同(`tests/test_media.py`、`tests/test_taiwan_ai.py`)。
 
@@ -52,10 +56,27 @@
 ```
 
 - 〔觀察〕`nodes`、`edges` 由 `executor.validate` 驗證(節點數 ≤ 100、文字參數 ≤ 20000 字);`pinned`、`outputs`、`pos` 選填;`pos` 是畫布座標,只供前端排版。
-- 〔觀察〕`steps` 只出現在預設範本 `workflows/default.json`,定義步驟精靈的預設步驟:① 文稿(`topic`、`write-script`、`taiwanize`)② 語音(`speak`)③ 封面(`title`、`cover-prompt`、`generate-image`、`add-title`)④ 剪輯(沒有節點,時間軸屬 CHG-20261022-04)⑤ 匯出(`make-video`)。`executor.validate` 不讀 `steps`;前端畫布存檔目前不保留 `steps`。
+- 〔觀察〕`steps` 只出現在預設範本 `workflows/default.json`,定義步驟精靈的預設步驟:① 文稿(`topic`、`write-script`、`taiwanize`)② 語音(`speak`)③ 封面(`title`、`cover-prompt`、`generate-image`、`add-title`)④ 剪輯(沒有節點,時間軸屬 CHG-20261022-04)⑤ 匯出(`make-video`)。`executor.validate` 不讀 `steps`;步驟精靈只讀 `GET /api/workflows/default` 的頂層 `steps`(CHG-20261022-04 修訂 3 R3-1)。前端畫布存檔(`buildGraph()` 經 `carrySteps()`)保留載入時的 `steps`:已不在畫布上的節點 id 從各步驟移除,原本有節點、移除後變空的步驟整個刪除,原本就沒有節點的步驟(④ 剪輯)保留(CHG-20261022-04 修訂 3 R3-2;取代先前「目前不保留 `steps`」的觀察)。
 - 〔觀察〕檔名即名稱:中英日白名單字元 1~64 字(見 `design.md`「HTTP API」);存檔以 `json.dumps(ensure_ascii=False, indent=2)` 寫入。
 - 〔觀察〕`workflows/default.json` 入 git;其他檔案(使用者另存的工作流程與存檔暫存檔 `.wf-*.tmp`)由 `.gitignore` 的 `workflows/*`、`!workflows/default.json` 忽略(CHG-20261026-01 T3),存檔後 `git status --porcelain --untracked-files=all` 仍無輸出,`scripts/deploy_local.sh` 不因此中止。
-- 〔觀察〕從畫布覆寫 `default`(`overwrite: true`)會改到入 git 的 `workflows/default.json`:工作樹變髒(`deploy_local.sh` 中止),且畫布存檔不保留頂層 `steps`,步驟精靈的預設步驟遺失;以 `git checkout -- workflows/default.json` 復原(CHG-20261026-01 代決 7,程式不擋)。
+- 〔觀察〕從畫布覆寫 `default`(`overwrite: true`)會改到入 git 的 `workflows/default.json`:工作樹變髒(`deploy_local.sh` 中止);以 `git checkout -- workflows/default.json` 復原(CHG-20261026-01 代決 7,程式不擋)。CHG-20261022-04 起畫布存檔保留 `steps`(見上),覆寫後精靈步驟跟著畫布變更,不再遺失。
+
+### 專案資料(`projects/<名稱>/project.json`,`schema_version: 1`)〔觀察〕`project.py`(CHG-20261022-04 T2)
+
+JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,不猜測轉換。上限:文稿 50000 字、片段 2000 個、單句 500 字、`project.json` 5 MB、素材 200 個且合計 2 GB、音訊總長(變速後)60 分鐘。
+
+| 實體 | 欄位 | 約束 / 說明 |
+|------|------|-------------|
+| Project | `schema_version`、`name`、`script`、`defaults`、`segments`、`images`、`assets` | `name` 與目錄名相同,規則見 `names.py`(中英日白名單 1~64 字,CHG 修訂 4 補記);`defaults` = `{"speed", "pause_comma", "pause_sentence", "pause_paragraph"}`,新專案取自設定資料庫 `voice_defaults` |
+| Segment(語音片段) | `id`、`text`、`break`、`pause_after`、`speed`、`annotations`、`audio` | `id` 為伺服器產生的 `^[0-9a-f]{8,32}$`;`text` 為原文(不含標註,1~500 字);`break` ∈ sentence / paragraph / forced / end;`pause_after` 為 null(依 `break` 取 `defaults`)或 0~5 秒(取到 0.1,0 存為 0、不當成 null);`speed` 為 null(用 `defaults.speed`)或 0.5~2.0(取到 0.05);`audio` 為 null 或 `{"id", "seconds"(變速前), "key"?}`——有 `key`(64 碼快取鍵)為合成音檔,沒有 `key` 為自錄取代的音檔(合成不覆蓋) |
+| Annotation(聲調標註) | `index`、`zhuyin` | `index` 為句內字元索引,只能標在漢字上;`zhuyin` 為聲調符號格式注音(ㄅ–ㄩ + ˊˇˋ˙,1–5 字);合成時以 `字[:注音]` 插入,原文的 `[`、`]` 轉全形 |
+| ImageClip(畫面軌) | `id`、`asset`、`start`、`end` | `asset` 為圖片素材 id(不記路徑);`start` 秒、`end` 為 null(到結尾)或秒,皆取到 0.1 |
+| Asset(素材) | `id`、`kind`、`ext`、`bytes`、`label`? | `kind` ∈ image(png、jpg、jpeg、webp)/ audio(wav、mp3、m4a)/ text(txt、md);檔案存於 `assets/<id>.<ext>`;經 `/api/upload` → `POST /api/projects/{p}/assets` 或「送到素材庫」節點進入(後者同樣做檔頭嗅探,DIR-5 修正 M-5) |
+
+- 〔觀察〕目錄:`project.json`、`history/`(舊版 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`,UTC,只保留最近 10 個)、`audio/`(合成音檔 `<快取鍵前 32 碼>.wav` 與變速快取 `<id>-s<語速×100>.wav`、自錄音檔 `<新 id>.wav`)、`assets/`、`tmp/`(worker 輸入檔,用完即刪,啟動時清空)、`.lock`(`fcntl.flock` 專案層級鎖);`projects/.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案,滿 30 天由 `startup_cleanup()` 清除。
+- 〔觀察〕寫入:每次存檔前把舊檔移入 `history/`,以暫存檔 + `os.replace` 原子寫入,載入到存檔全程持專案鎖(`project.update()`);還原版本也是一次存檔。合成結果在整批結束時一次寫回,一次合成最多新增一個 history 版本;合成中途已完成的句子只在伺服器記憶體中疊到專案檢視上,不存檔(DIR-5 修正 M-1)。
+- 〔觀察〕符號連結:`projects/`、`.trash/`、專案目錄、`tmp/`、`history/` 本身是符號連結時一律拒絕處理並記警告;`.trash/`、`tmp/` 內的符號連結不跟隨。
+- 〔觀察〕合成快取鍵 = SHA-256(JSON 陣列 [含標註的合成文字, 聲線檔 SHA-256, 聲線逐字稿 SHA-256, 模型名]);文字、標註、聲線檔、逐字稿或模型任一改變即不命中(修訂 3 R3-4)。
 
 ### 產出檔(`outputs/`,不入 git)〔觀察〕
 
@@ -67,6 +88,8 @@
 | `podcast-<stamp>.mp4` | `media.make_video` | H.264 yuv420p 10 fps + AAC 192k(+ mov_text 字幕軌,language=chi);音檔為 WAV 時影片長度截在 `wav_seconds()` 秒(`-t`),影片軌與音軌長度差 ≤ 0.1 秒;非 WAV 只靠 `-shortest`,片尾可能多出靜止畫面(ADP-7) |
 | `podcast-<stamp>.srt` | `media.make_srt` | SRT UTF-8 |
 | `uploads/<uuid4 hex>.<ext>` | `POST /api/upload` | 使用者上傳檔;副檔名白名單 `.txt .md .png .jpg .jpeg .webp .wav .mp3 .m4a`,≤ 200 MB,檔頭內容嗅探相符;檔名由伺服器產生,原始檔名只取副檔名 |
+| `podcast-<stamp>.mp4` / `.srt`(時間軸匯出) | `media.render_timeline`(`POST /api/projects/{p}/render`,CHG-20261022-04 T5) | 1920×1080 H.264 + AAC + mov_text;`-r 10`、`-vf fps=10`、`-t <layout.duration>`;音軌為 48 kHz 單聲道 PCM 依 layout 組成(各片段解碼以 `-t` 截在需要的長度,DIR-5 修正 M-3);圖片重疊時後開始者優先、沒有圖的時段為黑畫面 |
+| `.tmp/` | `/api/annotate` | worker 輸入檔,用完即刪;`/files/` 不提供點開頭目錄 |
 | `.heavy.lock` | `heavy_lock` | 跨行程鎖檔,內容不讀不寫、不刪除 |
 | `.studio.pid`、`studio_server.log` | `scripts/deploy_local.sh` | 部署用 pidfile 與伺服器日誌 |
 | `ui_check/*.png` | UI 互動檢查(CHG-20261022-01 T14) | 截圖 |
@@ -116,5 +139,7 @@
 | 埠型別 | text、image、audio、video | 〔觀察〕`nodes.PORT_TYPES` |
 | 節點執行狀態 | running、waiting、done、error、skipped(pinned / upstream)、cancelled;整次 run:ok、error、cancelled | 〔觀察〕`executor.py` |
 | 上傳檔種類 | text(`.txt .md`)、image(`.png .jpg .jpeg .webp`)、audio(`.wav .mp3 .m4a`) | 〔觀察〕`nodes.FILE_KINDS` |
+| 片段切點 `break` | sentence(句尾標點)、paragraph(換行)、forced(強制停頓)、end(文末);停頓預設依序取 `pause_sentence`、`pause_paragraph`、`pause_comma`、0 | 〔觀察〕`project.py` |
+| 合成事件 | waiting、segment(`id`、`seconds`、`cached`、`audio`)、error、finished(`status`、`synthesized`、`cached`、`saved`) | 〔觀察〕`studio_server.py`、`tts_service.py` |
 
 〔觀察〕CLI 模式(ask、code、image、speak、auto)已隨 CLI 移除(CHG-20261022-01 T2)。

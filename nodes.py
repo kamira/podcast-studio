@@ -288,8 +288,10 @@ def _make_video(inputs, params):
 # 把接進來的文字、圖片、音訊登記成專案素材(`projects/<名稱>/assets/<新 id>.<副檔名>` + project.json 的
 # assets),供精靈與完整模式的素材庫使用。安全:
 #   - 專案名稱以 names.py 的中英日白名單檢查;專案必須已存在(不建立專案)。
-#   - 圖片與音訊只接受 outputs/ 之下的一般檔案:解析後必須在 outputs/ 內,以 O_NOFOLLOW 開啟,
-#     副檔名在專案素材白名單(project.ASSET_EXTS)內,單檔不超過 LIBRARY_MAX_BYTES。
+#   - 圖片與音訊只接受 outputs/ 之下的一般檔案:檔案本身與其在 outputs/ 之下的每一層目錄都不得是
+#     符號連結(解析前逐層 lstat,DIR-5 統整 M-4;指向 outputs/ 內的連結也拒絕),解析後必須在 outputs/ 內,
+#     以 O_NOFOLLOW 開啟,副檔名在專案素材白名單(project.ASSET_EXTS)內,單檔不超過 LIBRARY_MAX_BYTES,
+#     檔頭須與副檔名相符(media.sniff_binary,與 /api/upload 同一套嗅探規則,DIR-5 統整 M-5)。
 #   - 複製到 assets/ 一律排他建立新檔(不覆寫),專案只記素材 id、不記路徑;
 #     登記經 project.update() 在專案鎖內完成,驗證(素材數量與總量上限)失敗時刪除本次複製的檔案。
 
@@ -298,14 +300,40 @@ LIBRARY_TEXT_LABEL = "文字(由流程送入)"
 COPY_CHUNK = 1 << 20
 
 
+def _reject_links_under(cand: Path, base: Path) -> None:
+    """解析前逐層檢查:cand 本身與它在 base(outputs/)之下的每一層目錄都不得是符號連結。
+
+    由 cand 往上走到「解析後等於 base 且本身不是符號連結」的那一層為止;走到根目錄都沒遇到 base
+    表示不在 outputs/ 之下。base 以上的路徑(例 macOS 的 /var → /private/var)不檢查。"""
+    cur = cand
+    while True:
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            raise ValueError("找不到要送到素材庫的檔案") from None
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError("只能送出 outputs/ 之下的一般檔案(不接受符號連結)")
+        if cur != cand:
+            try:
+                if cur.resolve(strict=True) == base:
+                    return
+            except (OSError, RuntimeError):
+                raise ValueError("找不到要送到素材庫的檔案") from None
+        if cur.parent == cur:
+            raise ValueError("只能把 outputs/ 之下的檔案送到素材庫")
+        cur = cur.parent
+
+
 def _library_source(value, kind: str) -> tuple[int, str, str]:
     """把節點輸入的檔案路徑解析成 outputs/ 之下的一般檔案;回傳 (已開啟的 fd, 副檔名, 顯示名稱)。"""
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError("輸入的檔案路徑不正確")
     base = tai.OUT.resolve()
     p = Path(value)
+    cand = p if p.is_absolute() else base / p
+    _reject_links_under(cand, base)
     try:
-        real = (p if p.is_absolute() else base / p).resolve(strict=True)
+        real = cand.resolve(strict=True)
     except (OSError, RuntimeError):
         raise ValueError("找不到要送到素材庫的檔案") from None
     if not real.is_relative_to(base) or real == base:
@@ -322,6 +350,9 @@ def _library_source(value, kind: str) -> tuple[int, str, str]:
     if not stat.S_ISREG(st.st_mode) or st.st_size > LIBRARY_MAX_BYTES:
         os.close(fd)
         raise ValueError(f"只能送出 {LIBRARY_MAX_BYTES // 1024 ** 2} MB 以內的一般檔案")
+    if not media.sniff_binary(f".{ext}", os.pread(fd, media.SNIFF_BYTES, 0)):
+        os.close(fd)
+        raise ValueError(f"檔案內容與副檔名 .{ext} 不符")
     label = "".join(c for c in real.name if ord(c) >= 32 and ord(c) != 127)[:pj.MAX_LABEL] or None
     return fd, ext, label
 

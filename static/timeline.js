@@ -418,31 +418,8 @@
       const i = view.project.segments.indexOf(seg);
       box.appendChild(el("h3", "prop-title", "選取:片段 #" + (i + 1)));
 
-      const ta = document.createElement("textarea");
-      ta.className = "prop-text";
-      ta.rows = 3;
-      ta.maxLength = 500;
-      ta.value = seg.text;
-      ta.setAttribute("aria-label", "片段文字");
-      const apply = el("button", "btn btn-small", "套用文字");
-      apply.type = "button";
-      apply.disabled = true;
-      ta.addEventListener("input", function () { apply.disabled = ta.value === seg.text || !ta.value.trim(); });
-      apply.addEventListener("click", async function () {
-        apply.disabled = true;
-        const r = await Store.patchSegment(seg.id, { text: ta.value });
-        if (!r.ok) {
-          apply.disabled = false;
-          S.toast("無法修改這一句:" + S.errorText(r), true);
-        } else {
-          S.toast("已修改,這一句需要重新合成");
-        }
-      });
-      const tw = el("div", "prop-block");
-      tw.appendChild(el("span", "prop-label", "文字"));
-      tw.appendChild(ta);
-      tw.appendChild(apply);
-      box.appendChild(tw);
+      // 文字只顯示(DIR-5 統整 M-8,RS-23 取窄):改句子文字一律在文稿面板進行
+      this.row(box, "文字", seg.text).classList.add("prop-text");
 
       const a = seg.audio;
       this.row(box, "狀態", !a ? "尚未合成"
