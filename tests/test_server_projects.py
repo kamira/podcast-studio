@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 import sys
 import textwrap
@@ -556,42 +557,43 @@ def test_media_serves_segment_audio_and_rejects_symlink(client, env):
 # ---- DIR-5 修正 2:媒體端點開檔競態(RS-15)與自錄音檔配額 ----
 
 def test_media_rejects_file_swapped_to_symlink_after_check(client, env, monkeypatch):
-    """路徑檢查(pj.subdir)之後、開檔之前把檔案換成符號連結:仍回 404,不送連結目標。"""
+    """取得子目錄 fd(pj.open_subdir)之後、開檔之前把檔案換成符號連結:仍回 404,不送連結目標。"""
     view = record_all(client)
     aid = view["project"]["segments"][0]["audio"]["id"]
     outside = env.repo / "secret.wav"
     outside.write_bytes(b"SECRET" + pcm_wav(0.1))
-    real_subdir = pj.subdir
+    real_open = pj.open_subdir
 
     def swapping(name, sub, **kw):
-        base = real_subdir(name, sub, **kw)
-        target = base / f"{aid}.wav"
+        fd = real_open(name, sub, **kw)
+        target = env.repo / "projects" / NAME / sub / f"{aid}.wav"
         if target.exists() and not target.is_symlink():
             target.unlink()
             target.symlink_to(outside)
-        return base
-    monkeypatch.setattr(pj, "subdir", swapping)
+        return fd
+    monkeypatch.setattr(pj, "open_subdir", swapping)
     r = client.get(f"/api/projects/{NAME}/media/{aid}")
     assert r.status_code == 404
     assert b"SECRET" not in r.content
 
 
 def test_media_rejects_dir_swapped_to_symlink_after_check(client, env, monkeypatch):
-    """檢查後把專案的 audio/ 目錄換成指向外部的符號連結:逐層 O_NOFOLLOW 開啟,回 404。"""
+    """依 id 解析(pj.load)之後、開檔之前把專案的 audio/ 換成指向外部的符號連結:逐層 O_NOFOLLOW,回 404。"""
     view = record_all(client)
     aid = view["project"]["segments"][0]["audio"]["id"]
     elsewhere = env.repo / "elsewhere"
     elsewhere.mkdir()
     (elsewhere / f"{aid}.wav").write_bytes(b"SECRET" + pcm_wav(0.1))
-    real_subdir = pj.subdir
+    real_load = pj.load
 
-    def swapping(name, sub, **kw):
-        base = real_subdir(name, sub, **kw)
+    def swapping(name):
+        proj = real_load(name)
+        base = env.repo / "projects" / NAME / "audio"
         if not base.is_symlink():
             base.rename(base.with_name("audio-moved"))
             base.symlink_to(elsewhere)
-        return base
-    monkeypatch.setattr(pj, "subdir", swapping)
+        return proj
+    monkeypatch.setattr(pj, "load", swapping)
     r = client.get(f"/api/projects/{NAME}/media/{aid}")
     assert r.status_code == 404
     assert b"SECRET" not in r.content
@@ -827,8 +829,10 @@ def test_annotate_default_runs_worker_and_removes_tmp(env, monkeypatch):
         stderr = ""
 
     def fake_run(argv, **kw):
-        inp = Path(argv[argv.index("--input") + 1])
-        calls.append({"argv": argv, "kw": kw, "input": json.loads(inp.read_text("utf-8")), "path": inp})
+        inp = argv[argv.index("--input") + 1]
+        fd = int(inp.rsplit("/", 1)[1])
+        calls.append({"argv": argv, "kw": kw, "input": json.loads(os.pread(fd, 4096, 0).decode("utf-8")),
+                      "path": inp, "tmp": sorted(p.name for p in (env.repo / "outputs" / ".tmp").iterdir())})
         return Done()
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
@@ -840,7 +844,9 @@ def test_annotate_default_runs_worker_and_removes_tmp(env, monkeypatch):
     assert c["input"] == {"text": "好"} and "好" not in " ".join(c["argv"])
     assert c["kw"]["env"] == taiwan_ai.BREEZY_ENV and c["kw"]["cwd"] == str(env.breezy)
     assert c["kw"]["timeout"] == ss.ANNOTATE_TIMEOUT
-    assert c["path"].parent == env.repo / "outputs" / ".tmp" and not c["path"].exists()
+    # DIR-5 修正 4:輸入檔建立後即刪除名稱,worker 以 /dev/fd/<n>(pass_fds)讀取;執行時 .tmp/ 已無檔名
+    assert c["path"].startswith("/dev/fd/") and c["kw"]["pass_fds"] == (int(c["path"].rsplit("/", 1)[1]),)
+    assert c["tmp"] == [] and list((env.repo / "outputs" / ".tmp").iterdir()) == []
 
 
 # ---------- 啟動清理 ----------
@@ -874,3 +880,52 @@ def test_error_bodies_have_no_absolute_paths(client, env):
     r = client.get(f"/api/projects/{NAME}")
     assert r.status_code == 422
     assert no_abs_path(r.text, env)
+
+
+# ---------- DIR-5 修正 4:複製與暫存檔的檢查後、操作前換成符號連結 ----------
+
+def test_race_assets_dir_swapped_after_open_copy_stays_inside(client, env, monkeypatch):
+    create(client)
+    elsewhere = env.repo / "elsewhere"
+    elsewhere.mkdir()
+    fid = upload(client, "封面.png", PNG)
+    real = pj.open_subdir
+    adir = env.repo / "projects" / NAME / "assets"
+
+    def swapping(name, sub, **kw):
+        fd = real(name, sub, **kw)
+        if sub == "assets" and kw.get("create") and not adir.is_symlink():
+            adir.rename(adir.with_name("assets-moved"))
+            adir.symlink_to(elsewhere, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(pj, "open_subdir", swapping)
+    r = client.post(f"/api/projects/{NAME}/assets", json={"file_id": fid}, headers=auth())
+    assert list(elsewhere.iterdir()) == []                  # 沒寫進連結目標
+    assert len(list(adir.with_name("assets-moved").iterdir())) == 1
+    assert no_abs_path(r.text, env)
+
+
+def test_race_annotate_tmp_dir_swapped_after_open_writes_stay_inside(env, monkeypatch):
+    elsewhere = env.repo / "elsewhere"
+    elsewhere.mkdir()
+    tdir = env.repo / "outputs" / ".tmp"
+    real_open = ss._open_dir
+
+    def wrapped(r, *parts, create):
+        fd = real_open(r, *parts, create=create)
+        if parts == ("outputs", ".tmp") and not tdir.is_symlink():
+            tdir.rename(tdir.with_name(".tmp-moved"))
+            tdir.symlink_to(elsewhere, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(ss, "_open_dir", wrapped)
+
+    class Done:
+        returncode = 0
+        stdout = json.dumps(["ㄏㄠˇ"], ensure_ascii=False) + "\n"
+        stderr = ""
+    monkeypatch.setattr(ss.subprocess, "run", lambda argv, **kw: Done())
+    app = ss.create_app(token=TOKEN, static_dir=env.repo / "x", root=env.repo)
+    r = TestClient(app, base_url=BASE).post("/api/annotate", json={"text": "好"}, headers=auth())
+    assert r.status_code == 200, r.text
+    assert list(elsewhere.iterdir()) == []
+    assert list((env.repo / "outputs" / ".tmp-moved").iterdir()) == []

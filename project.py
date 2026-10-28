@@ -62,7 +62,6 @@ import math
 import os
 import re
 import secrets
-import shutil
 import stat
 import time
 from dataclasses import dataclass, field
@@ -72,6 +71,7 @@ from pathlib import Path
 
 import breezy_worker
 import names
+import safe_fs
 
 log = logging.getLogger("project")
 
@@ -559,41 +559,36 @@ def effective_pause(project: Project, segment: dict) -> float:
 
 # ---------- 路徑與鎖 ----------
 
-def _check_dir(cur: Path, expected: Path, label: str) -> None:
-    if cur.is_symlink():
-        raise UnsafePath(f"資料目錄「{label}」是符號連結,不接受")
+def _top() -> Path:
+    """受信根目錄(repo 根,`ROOT` 解析後的真實路徑);之下各層一律以 dir_fd 逐層 O_NOFOLLOW 開啟。"""
+    return Path(ROOT).resolve()
+
+
+def _child(dirfd: int, part: str, label: str, create: bool) -> int:
+    """dirfd 內的子目錄 part(DIR-5 修正 4:以 safe_fs 逐層開啟,檢查與使用是同一個 fd)。
+
+    是符號連結或不是目錄丟 UnsafePath;不存在且 create=False 丟 FileNotFoundError(label)。"""
     try:
-        resolved = cur.resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise UnsafePath(f"資料目錄「{label}」無法解析") from None
-    if resolved != expected or not resolved.is_dir():
-        raise UnsafePath(f"資料目錄「{label}」不在預期位置")
+        return safe_fs.open_child(dirfd, part, create=create)
+    except safe_fs.UnsafePathError:
+        st = safe_fs.lstat(dirfd, part)
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            raise UnsafePath(f"資料目錄「{label}」是符號連結,不接受") from None
+        raise UnsafePath(f"資料目錄「{label}」不在預期位置") from None
+    except FileNotFoundError:
+        raise FileNotFoundError(label) from None
 
 
-def _safe_child(base: Path, part: str, label: str, create: bool) -> Path:
-    """base(已檢查過的真實路徑)/part;不得是符號連結、解析後必須等於 base/part。"""
-    cur = base / part
-    if not cur.is_symlink() and not cur.exists():
-        if not create:
-            raise FileNotFoundError(label)
-        try:
-            cur.mkdir(mode=0o755)
-        except FileExistsError:
-            pass
-    _check_dir(cur, base / part, label)
-    return base / part
-
-
-def _projects_root(create: bool) -> Path:
-    root = Path(ROOT).resolve()
-    return _safe_child(root, PROJECTS_NAME, PROJECTS_NAME, create)
+def _root_fd(create: bool) -> int:
+    """`projects/` 的 fd(呼叫端關閉);不存在且 create=False 丟 FileNotFoundError。"""
+    with safe_fs.closing(safe_fs.open_dir(_top())) as top:
+        return _child(top, PROJECTS_NAME, PROJECTS_NAME, create)
 
 
 @contextlib.contextmanager
-def _project_lock(pdir: Path):
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+def _project_lock(pfd: int):
     try:
-        fd = os.open(pdir / LOCK_FILE, flags, 0o600)
+        fd = safe_fs.open_or_create(pfd, LOCK_FILE, os.O_RDWR, 0o600)
     except OSError:
         raise UnsafePath("無法取得專案鎖(鎖檔可能是符號連結)") from None
     try:
@@ -629,61 +624,90 @@ def _warn(warnings: list, message: str) -> None:
     warnings.append(message)
 
 
-def _case_variant(root: Path, name: str) -> str | None:
+def _case_variant(rfd: int, name: str) -> str | None:
     """找出與 name 只差大小寫(casefold 相等、本身不同)的既有項目;macOS 預設檔案系統不分大小寫。"""
     key = names.fold_name(name)
-    with os.scandir(root) as it:
+    with os.scandir(rfd) as it:
         for entry in it:
             if entry.name != name and not entry.name.startswith(".") and names.fold_name(entry.name) == key:
                 return entry.name
     return None
 
 
-def _project_dir(root: Path, name: str, create: bool) -> Path:
-    """專案目錄;已有只差大小寫的其他專案時一律拒絕(不分大小寫的檔案系統上兩者是同一個目錄)。"""
-    if _case_variant(root, name) is not None:
+def _project_fd(rfd: int, name: str, create: bool) -> int:
+    """專案目錄的 fd;已有只差大小寫的其他專案時一律拒絕(不分大小寫的檔案系統上兩者是同一個目錄)。"""
+    if _case_variant(rfd, name) is not None:
         if create:
             raise ProjectExists("已有只差大小寫的同名專案,請改用其他名稱")
         raise ProjectNotFound("找不到這個專案(已有只差大小寫的其他專案)")
     try:
-        return _safe_child(root, name, "專案", create=create)
+        return _child(rfd, name, "專案", create=create)
     except FileNotFoundError:
         raise ProjectNotFound("找不到這個專案") from None
+
+
+def open_project(name, *, create: bool = False) -> int:
+    """`projects/<名稱>/` 的 fd(呼叫端關閉;DIR-5 修正 4)。各層 O_NOFOLLOW,不符丟 UnsafePath;
+    專案不存在丟 ProjectNotFound。"""
+    name = check_name(name)
+    try:
+        rfd = _root_fd(create=create)
+    except FileNotFoundError:
+        raise ProjectNotFound("找不到這個專案") from None
+    with safe_fs.closing(rfd):
+        return _project_fd(rfd, name, create)
 
 
 SUBDIRS = ("audio", "assets", "tmp")
 
 
-def subdir(name, sub: str, *, create: bool = False) -> Path:
-    """專案子目錄 `projects/<名稱>/<sub>`(audio、assets、tmp)的真實路徑(CHG-20261022-04 T3 起共用)。
+def open_subdir(name, sub: str, *, create: bool = False) -> int:
+    """專案子目錄 `projects/<名稱>/<sub>` 的 fd(呼叫端關閉;DIR-5 修正 4)。
 
-    各層一律不得是符號連結、解析後必須在預期位置,不符丟 UnsafePath;create=False 且子目錄不存在時
-    丟 FileNotFoundError,專案不存在時丟 ProjectError。
-    """
+    自 repo 根目錄以 dir_fd 逐層 O_NOFOLLOW | O_DIRECTORY 開啟;任一層是符號連結或不是目錄丟 UnsafePath,
+    create=False 且子目錄不存在丟 FileNotFoundError,專案不存在丟 ProjectError。之後的讀寫刪一律相對此 fd。"""
     if sub not in SUBDIRS:
         raise ValueError(f"不支援的專案子目錄:{sub}")
+    with safe_fs.closing(open_project(name, create=create)) as pfd:
+        return _child(pfd, sub, sub, create=create)
+
+
+def subdir(name, sub: str, *, create: bool = False) -> Path:
+    """專案子目錄 `projects/<名稱>/<sub>`(audio、assets、tmp)的路徑(CHG-20261022-04 T3 起共用)。
+
+    各層一律不得是符號連結、必須在預期位置,不符丟 UnsafePath;create=False 且子目錄不存在時
+    丟 FileNotFoundError,專案不存在時丟 ProjectError。DIR-5 修正 4 起只用於「交給外部程式的路徑」
+    (worker、ffmpeg)與顯示;本程式自己的讀寫刪一律改用 `open_subdir()` 的 fd。
+    """
     name = check_name(name)
+    os.close(open_subdir(name, sub, create=create))
+    return _top() / PROJECTS_NAME / name / sub
+
+
+def unlink_in(name, sub: str, filename: str) -> None:
+    """刪除專案子目錄內的單一檔案(相對 dir_fd,不跟隨;不存在不算錯)。供複製失敗時清理。"""
     try:
-        root = _projects_root(create=create)
-    except FileNotFoundError:
-        raise ProjectNotFound("找不到這個專案") from None
-    return _safe_child(_project_dir(root, name, create=create), sub, sub, create=create)
+        dfd = open_subdir(name, sub)
+    except (FileNotFoundError, ProjectError):
+        return
+    with safe_fs.closing(dfd):
+        safe_fs.unlink(dfd, filename, missing_ok=True)
 
 
 def disk_usage(name) -> int:
     """專案 `assets/` 與 `audio/` 內一般檔(不跟隨符號連結)的位元組合計;素材與自錄音檔的共同配額以此計算。
 
-    (CHG-20261022-04 DIR-5 修正 3:由 studio_server 搬來共用,規則不變。)"""
+    (CHG-20261022-04 DIR-5 修正 3:由 studio_server 搬來共用,規則不變;修正 4 改以 dir_fd 列舉。)"""
     total = 0
     for sub in ("assets", "audio"):
         try:
-            base = subdir(name, sub)
+            dfd = open_subdir(name, sub)
         except FileNotFoundError:
             continue
-        with os.scandir(base) as it:
-            for entry in it:
-                if entry.is_file(follow_symlinks=False):
-                    total += entry.stat(follow_symlinks=False).st_size
+        with safe_fs.closing(dfd):
+            for _, st in safe_fs.entries(dfd):
+                if stat.S_ISREG(st.st_mode):
+                    total += st.st_size
     return total
 
 
@@ -699,18 +723,18 @@ def check_quota(name, incoming: int) -> None:
 
 
 # ---------- 讀寫 ----------
+# DIR-5 修正 4:以下讀、寫、搬移、刪除一律相對已開啟的目錄 fd(safe_fs),不再以路徑檢查後再以路徑操作。
 
-def _read_project_file(path: Path) -> dict:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+def _read_project_file(dirfd: int, filename: str) -> dict:
     try:
-        fd = os.open(path, flags)
+        fd = safe_fs.open_file(dirfd, filename)
     except FileNotFoundError:
         raise ProjectNotFound("找不到這個專案") from None
+    except safe_fs.UnsafePathError:
+        raise ProjectError("專案檔無法讀取(可能是符號連結或不是一般檔案)") from None
     except OSError:
         raise ProjectError("專案檔無法讀取(可能是符號連結)") from None
     with os.fdopen(fd, "rb") as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-            raise ProjectError("專案檔不是一般檔案")
         raw = f.read(MAX_PROJECT_BYTES + 1)
     if len(raw) > MAX_PROJECT_BYTES:
         raise ProjectError(f"專案檔超過 {MAX_PROJECT_BYTES // 1024 ** 2} MB,拒絕載入")
@@ -726,23 +750,19 @@ def _read_project_file(path: Path) -> dict:
 def load(name) -> Project:
     """讀 `projects/<名稱>/project.json`;schema_version 不是 1 一律拒絕載入。"""
     name = check_name(name)
-    try:
-        root = _projects_root(create=False)
-    except FileNotFoundError:
-        raise ProjectNotFound("找不到這個專案") from None
-    data = _read_project_file(_project_dir(root, name, create=False) / PROJECT_FILE)
+    with safe_fs.closing(open_project(name)) as pfd:
+        data = _read_project_file(pfd, PROJECT_FILE)
     _check_version(data.get("schema_version"))
     if data.get("name") != name:
         raise ProjectError("專案檔的名稱與專案目錄不符,拒絕載入")
     return Project.from_dict(data)
 
 
-def _write_atomic(pdir: Path, payload: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+def _write_atomic(pfd: int, payload: bytes) -> None:
     for _ in range(LINK_TRIES):
-        tmp = pdir / f".project-{secrets.token_hex(8)}.tmp"
+        tmp = f".project-{secrets.token_hex(8)}.tmp"
         try:
-            fd = os.open(tmp, flags, 0o644)
+            fd = safe_fs.create_excl(pfd, tmp, 0o644)
             break
         except FileExistsError:
             continue
@@ -753,60 +773,55 @@ def _write_atomic(pdir: Path, payload: bytes) -> None:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, pdir / PROJECT_FILE)
+        safe_fs.replace(pfd, tmp, pfd, PROJECT_FILE)
     except BaseException:
         with contextlib.suppress(OSError):
-            os.unlink(tmp)
+            safe_fs.unlink(pfd, tmp)
         raise
 
 
-def _archive_current(pdir: Path, hdir: Path) -> str | None:
+def _archive_current(pfd: int, hfd: int) -> str | None:
     """把目前的 project.json 以 os.link 排他建立到 history/(檔名唯一,不覆寫);沒有舊檔回 None。"""
-    current = pdir / PROJECT_FILE
-    try:
-        st = current.lstat()
-    except FileNotFoundError:
+    st = safe_fs.lstat(pfd, PROJECT_FILE)
+    if st is None:
         return None
     if not stat.S_ISREG(st.st_mode):
         raise UnsafePath("專案檔不是一般檔案(可能是符號連結),拒絕存檔")
     for _ in range(LINK_TRIES):
         vid = f"{_stamp()}-{_rand4()}"
         try:
-            os.link(current, hdir / f"{vid}.json")
+            safe_fs.link(pfd, PROJECT_FILE, hfd, f"{vid}.json")
             return vid
         except FileExistsError:
             continue
     raise ProjectError("無法建立不重複的版本檔名")
 
 
-def _history_entries(hdir: Path) -> list[tuple]:
+def _history_entries(hfd: int) -> list[tuple]:
     out = []
-    with os.scandir(hdir) as it:
-        for entry in it:
-            m = HISTORY_RE.fullmatch(entry.name)
-            if not m:
-                continue
-            st = entry.stat(follow_symlinks=False)
-            if stat.S_ISREG(st.st_mode):
-                out.append((m.group(1), st.st_mtime_ns, entry.name))
+    for fn, st in safe_fs.entries(hfd):
+        m = HISTORY_RE.fullmatch(fn)
+        if m and stat.S_ISREG(st.st_mode):
+            out.append((m.group(1), st.st_mtime_ns, fn))
     out.sort()
     return out
 
 
-def _rotate(pdir: Path, warnings: list) -> list[str]:
-    """history/ 只保留最近 HISTORY_KEEP 個;history/ 是符號連結或解析到別處時拒絕處理並記警告。"""
+def _rotate(pfd: int, pname: str, warnings: list) -> list[str]:
+    """history/ 只保留最近 HISTORY_KEEP 個;history/ 是符號連結或不是目錄時拒絕處理並記警告。"""
     try:
-        hdir = _safe_child(pdir, "history", "history", create=False)
+        hfd = _child(pfd, "history", "history", create=False)
     except FileNotFoundError:
         return []
     except UnsafePath as e:
-        _warn(warnings, f"專案「{pdir.name}」的 history 目錄不安全,拒絕輪替:{e.errors[0]}")
+        _warn(warnings, f"專案「{pname}」的 history 目錄不安全,拒絕輪替:{e.errors[0]}")
         return []
-    entries = _history_entries(hdir)
-    removed = []
-    for _, _, fn in entries[:max(0, len(entries) - HISTORY_KEEP)]:
-        os.unlink(hdir / fn)
-        removed.append(fn)
+    with safe_fs.closing(hfd):
+        entries = _history_entries(hfd)
+        removed = []
+        for _, _, fn in entries[:max(0, len(entries) - HISTORY_KEEP)]:
+            safe_fs.unlink(hfd, fn, missing_ok=True)
+            removed.append(fn)
     return removed
 
 
@@ -814,28 +829,26 @@ def save(project: Project) -> str | None:
     """原子寫入 project.json;寫入前把舊檔移入 history/,history/ 只留最近 10 個。
 
     同一專案的存檔以專案層級鎖序列化。回傳這次移入 history 的版本 id(第一次存檔為 None)。
-    專案目錄、history/ 是符號連結或解析到別處時拒絕存檔(丟 UnsafePath 並記警告),不寫入連結目標。
+    專案目錄、history/ 是符號連結或不是目錄時拒絕存檔(丟 UnsafePath 並記警告),不寫入連結目標。
     """
     data = validate(project.to_dict())
     name = data["name"]
     warnings: list[str] = []
     try:
-        root = _projects_root(create=True)
-        pdir = _project_dir(root, name, create=True)
-        with _project_lock(pdir):
-            return _save_locked(pdir, data, warnings)
+        with safe_fs.closing(open_project(name, create=True)) as pfd, _project_lock(pfd):
+            return _save_locked(pfd, name, data, warnings)
     except UnsafePath as e:
         _warn(warnings, f"專案「{name}」拒絕存檔:{e.errors[0]}")
         raise
 
 
-def _save_locked(pdir: Path, data: dict, warnings: list) -> str | None:
+def _save_locked(pfd: int, name: str, data: dict, warnings: list) -> str | None:
     """已持有專案鎖時的存檔本體(舊檔移入 history/ → 原子寫入 → 輪替)。"""
     payload = _dump(data)
-    hdir = _safe_child(pdir, "history", "history", create=True)
-    vid = _archive_current(pdir, hdir)
-    _write_atomic(pdir, payload)
-    _rotate(pdir, warnings)
+    with safe_fs.closing(_child(pfd, "history", "history", create=True)) as hfd:
+        vid = _archive_current(pfd, hfd)
+    _write_atomic(pfd, payload)
+    _rotate(pfd, name, warnings)
     return vid
 
 
@@ -847,35 +860,35 @@ def update(name, change):
     回傳 (存檔後的 Project, 版本 id 或 None, change 的回傳值)。專案不存在丟 ProjectNotFound。
     """
     name = check_name(name)
-    try:
-        root = _projects_root(create=False)
-    except FileNotFoundError:
-        raise ProjectNotFound("找不到這個專案") from None
-    pdir = _project_dir(root, name, create=False)
     warnings: list[str] = []
     try:
-        with _project_lock(pdir):
+        with safe_fs.closing(open_project(name)) as pfd, _project_lock(pfd):
             proj = load(name)
             extra = change(proj)
             data = validate(proj.to_dict())
             if data["name"] != name:
                 raise ProjectError("不能在修改時改變專案名稱")
-            vid = _save_locked(pdir, data, warnings)
+            vid = _save_locked(pfd, name, data, warnings)
     except UnsafePath as e:
         _warn(warnings, f"專案「{name}」拒絕存檔:{e.errors[0]}")
         raise
     return Project.from_dict(data), vid, extra
 
 
+def _history_fd(name) -> int:
+    with safe_fs.closing(open_project(name)) as pfd:
+        return _child(pfd, "history", "history", create=False)
+
+
 def list_history(name) -> list[str]:
     """回傳版本 id(舊到新)。"""
     name = check_name(name)
     try:
-        pdir = _project_dir(_projects_root(create=False), name, create=False)
-        hdir = _safe_child(pdir, "history", "history", create=False)
-    except FileNotFoundError:
+        hfd = _history_fd(name)
+    except (FileNotFoundError, ProjectNotFound):
         return []
-    return [fn[:-len(".json")] for _, _, fn in _history_entries(hdir)]
+    with safe_fs.closing(hfd):
+        return [fn[:-len(".json")] for _, _, fn in _history_entries(hfd)]
 
 
 def load_version(name, vid) -> Project:
@@ -884,14 +897,14 @@ def load_version(name, vid) -> Project:
     if not isinstance(vid, str) or not VERSION_RE.fullmatch(vid):
         raise ProjectNotFound("找不到這個版本")
     try:
-        pdir = _project_dir(_projects_root(create=False), name, create=False)
-        hdir = _safe_child(pdir, "history", "history", create=False)
+        hfd = _history_fd(name)
     except FileNotFoundError:
         raise ProjectNotFound("找不到這個版本") from None
-    try:
-        data = _read_project_file(hdir / f"{vid}.json")
-    except ProjectNotFound:
-        raise ProjectNotFound("找不到這個版本") from None
+    with safe_fs.closing(hfd):
+        try:
+            data = _read_project_file(hfd, f"{vid}.json")
+        except ProjectNotFound:
+            raise ProjectNotFound("找不到這個版本") from None
     _check_version(data.get("schema_version"))
     if data.get("name") != name:
         raise ProjectError("版本檔的名稱與專案不符,拒絕還原")
@@ -911,9 +924,9 @@ def create(name, script: str = "", defaults: dict | None = None) -> Project:
                    segments=[{"id": new_id(), "text": p["text"], "break": p["break"], "pause_after": None,
                               "speed": None, "annotations": [], "audio": None} for p in pieces])
     proj = Project.from_dict(proj.to_dict())
-    root = _projects_root(create=True)
-    if _case_variant(root, name) is not None or os.path.lexists(root / name):
-        raise ProjectExists("已有同名的專案,請改用其他名稱")
+    with safe_fs.closing(_root_fd(create=True)) as rfd:
+        if _case_variant(rfd, name) is not None or safe_fs.lstat(rfd, name) is not None:
+            raise ProjectExists("已有同名的專案,請改用其他名稱")
     save(proj)
     return proj
 
@@ -924,43 +937,44 @@ def list_projects() -> list[dict]:
     點開頭的項目(`.trash/` 等)、名稱不合規則、符號連結、沒有一般檔案 project.json 的目錄一律略過。
     """
     try:
-        root = _projects_root(create=False)
+        rfd = _root_fd(create=False)
     except FileNotFoundError:
         return []
     out = []
-    with os.scandir(root) as it:
-        entries = sorted(it, key=lambda e: e.name)
-    for entry in entries:
-        if entry.name.startswith(".") or names.normalize_name(entry.name) is None:
-            continue
-        if not entry.is_dir(follow_symlinks=False):
-            continue
-        try:
-            st = os.lstat(Path(entry.path) / PROJECT_FILE)
-        except OSError:
-            continue
-        if stat.S_ISREG(st.st_mode):
-            out.append({"name": entry.name, "updated": st.st_mtime})
+    with safe_fs.closing(rfd):
+        for name, st in safe_fs.entries(rfd):
+            if name.startswith(".") or names.normalize_name(name) is None or not stat.S_ISDIR(st.st_mode):
+                continue
+            try:
+                pfd = safe_fs.open_child(rfd, name)
+            except OSError:
+                continue
+            with safe_fs.closing(pfd):
+                pst = safe_fs.lstat(pfd, PROJECT_FILE)
+            if pst is not None and stat.S_ISREG(pst.st_mode):
+                out.append({"name": name, "updated": pst.st_mtime})
     return out
 
 
 def trash(name, *, confirm, now: float | None = None) -> str:
-    """把專案移到 `projects/.trash/<名稱>-<時間戳>-<4 碼隨機>/`;confirm 必須為 True,不覆蓋既有項目。"""
+    """把專案移到 `projects/.trash/<名稱>-<時間戳>-<4 碼隨機>/`;confirm 必須為 True,不覆蓋既有項目。
+
+    搬移以 rename(src_dir_fd=projects/, dst_dir_fd=.trash/)對單一名稱操作,不經任何路徑。"""
     if confirm is not True:
         raise ProjectError("刪除專案需要確認(confirm: true)")
     name = check_name(name)
     try:
-        root = _projects_root(create=False)
+        rfd = _root_fd(create=False)
     except FileNotFoundError:
         raise ProjectNotFound("找不到這個專案") from None
-    pdir = _project_dir(root, name, create=False)
-    tdir = _safe_child(root, TRASH_NAME, TRASH_NAME, create=True)
-    with _project_lock(pdir):
-        for _ in range(LINK_TRIES):
-            dest = tdir / f"{name}-{_stamp(now)}-{_rand4()}"
-            if not dest.exists() and not dest.is_symlink():
-                os.rename(pdir, dest)
-                return dest.name
+    with safe_fs.closing(rfd):
+        with safe_fs.closing(_project_fd(rfd, name, create=False)) as pfd, \
+                safe_fs.closing(_child(rfd, TRASH_NAME, TRASH_NAME, create=True)) as tfd, _project_lock(pfd):
+            for _ in range(LINK_TRIES):
+                dest = f"{name}-{_stamp(now)}-{_rand4()}"
+                if safe_fs.lstat(tfd, dest) is None:
+                    safe_fs.rename(rfd, name, tfd, dest)
+                    return dest
     raise ProjectError("無法建立不重複的回收名稱")  # pragma: no cover
 
 
@@ -976,61 +990,53 @@ def _now_ts(now) -> float:
     raise TypeError("now 必須是 datetime 或 epoch 秒數")
 
 
-def _remove_entry(path: str, is_dir: bool) -> None:
-    """刪除一個項目;目錄以 shutil.rmtree(內部符號連結只刪連結本身,不跟隨),其他(含符號連結)unlink。"""
-    if is_dir:
-        shutil.rmtree(path)
-    else:
-        os.unlink(path)
-
-
-def _clean_trash(root: Path, now_ts: float, result: dict) -> None:
+def _clean_trash(rfd: int, now_ts: float, result: dict) -> None:
     try:
-        tdir = _safe_child(root, TRASH_NAME, TRASH_NAME, create=False)
+        tfd = _child(rfd, TRASH_NAME, TRASH_NAME, create=False)
     except FileNotFoundError:
         return
     except UnsafePath as e:
         _warn(result["warnings"], f"回收區不安全,拒絕清除:{e.errors[0]}")
         return
     limit = TRASH_DAYS * 86400
-    with os.scandir(tdir) as it:
-        entries = list(it)
-    for entry in entries:
-        if entry.is_symlink():
-            _warn(result["warnings"], f"回收區項目「{entry.name}」是符號連結,不跟隨、不刪除")
-            continue
-        m = TRASH_RE.fullmatch(entry.name)
-        ts = _parse_stamp(m.group(2)) if m else None
-        if ts is None:
-            _warn(result["warnings"], f"回收區項目「{entry.name}」名稱不含時間戳,略過")
-            continue
-        if now_ts - ts >= limit:
-            _remove_entry(entry.path, entry.is_dir(follow_symlinks=False))
-            result["trash_removed"].append(entry.name)
+    with safe_fs.closing(tfd):
+        for name, st in safe_fs.entries(tfd):
+            if stat.S_ISLNK(st.st_mode):
+                _warn(result["warnings"], f"回收區項目「{name}」是符號連結,不跟隨、不刪除")
+                continue
+            m = TRASH_RE.fullmatch(name)
+            ts = _parse_stamp(m.group(2)) if m else None
+            if ts is None:
+                _warn(result["warnings"], f"回收區項目「{name}」名稱不含時間戳,略過")
+                continue
+            if now_ts - ts >= limit:
+                safe_fs.rmtree(tfd, name, missing_ok=True)   # 以 fd 遞迴;內部符號連結只刪連結本身
+                result["trash_removed"].append(name)
 
 
-def _clean_project(root: Path, name: str, result: dict) -> None:
+def _clean_project(rfd: int, name: str, result: dict) -> None:
     warnings = result["warnings"]
     try:
-        pdir = _safe_child(root, name, "專案", create=False)
+        pfd = _child(rfd, name, "專案", create=False)
     except (UnsafePath, FileNotFoundError):
         _warn(warnings, f"專案目錄「{name}」是符號連結或不在預期位置,拒絕處理")
         return
-    for sub in ("history", "audio", "assets"):
-        if (pdir / sub).is_symlink():
-            _warn(warnings, f"專案「{name}」的 {sub} 目錄是符號連結,拒絕處理")
-    try:
-        tmp = _safe_child(pdir, "tmp", "tmp", create=False)
-    except FileNotFoundError:
-        return
-    except UnsafePath:
-        _warn(warnings, f"專案「{name}」的 tmp 目錄是符號連結或不在預期位置,拒絕清空")
-        return
-    with os.scandir(tmp) as it:
-        entries = list(it)
-    for entry in entries:
-        _remove_entry(entry.path, entry.is_dir(follow_symlinks=False))
-        result["tmp_cleared"] += 1
+    with safe_fs.closing(pfd):
+        for sub in ("history", "audio", "assets"):
+            st = safe_fs.lstat(pfd, sub)
+            if st is not None and stat.S_ISLNK(st.st_mode):
+                _warn(warnings, f"專案「{name}」的 {sub} 目錄是符號連結,拒絕處理")
+        try:
+            tfd = _child(pfd, "tmp", "tmp", create=False)
+        except FileNotFoundError:
+            return
+        except UnsafePath:
+            _warn(warnings, f"專案「{name}」的 tmp 目錄是符號連結或不在預期位置,拒絕清空")
+            return
+    with safe_fs.closing(tfd):
+        for entry, _ in safe_fs.entries(tfd):
+            safe_fs.rmtree(tfd, entry, missing_ok=True)
+            result["tmp_cleared"] += 1
 
 
 def startup_cleanup(now) -> dict:
@@ -1038,23 +1044,25 @@ def startup_cleanup(now) -> dict:
 
     now 為注入的現在時間(datetime 或 epoch 秒數;不帶時區的 datetime 視為 UTC);回收項目的年齡
     以其名稱內的時間戳(UTC)判定,不看檔案時間。只刪 `.trash/` 與 `tmp/` 之下的項目,不動
-    project.json、audio/、assets/、history/;符號連結一律不跟隨。
+    project.json、audio/、assets/、history/;符號連結一律不跟隨。DIR-5 修正 4 起各層以 dir_fd 開啟、
+    刪除以 safe_fs.rmtree(fd 遞迴)進行,檢查與刪除之間把目錄換成符號連結也不會刪到 projects/ 之外。
     """
     now_ts = _now_ts(now)
     result = {"trash_removed": [], "tmp_cleared": 0, "warnings": []}
     try:
-        root = _projects_root(create=False)
+        rfd = _root_fd(create=False)
     except FileNotFoundError:
         return result
     except UnsafePath as e:
         _warn(result["warnings"], f"projects 目錄不安全,拒絕清理:{e.errors[0]}")
         return result
-    _clean_trash(root, now_ts, result)
-    with os.scandir(root) as it:
-        entries = sorted(e.name for e in it if not e.name.startswith("."))
-    for name in entries:
-        if names.normalize_name(name) is None:
-            _warn(result["warnings"], "projects 目錄內有名稱不合規則的項目,略過")
-            continue
-        _clean_project(root, name, result)
+    with safe_fs.closing(rfd):
+        _clean_trash(rfd, now_ts, result)
+        for name, _ in safe_fs.entries(rfd):
+            if name.startswith("."):
+                continue
+            if names.normalize_name(name) is None:
+                _warn(result["warnings"], "projects 目錄內有名稱不合規則的項目,略過")
+                continue
+            _clean_project(rfd, name, result)
     return result

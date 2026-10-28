@@ -267,11 +267,47 @@ def test_ffmpeg失敗時移除佔位檔且訊息不含路徑(env, monkeypatch):
 
 # ---------- DIR-5 統整 M-3:解碼只取需要的長度 ----------
 
-def test_解碼以t截止_只取片段需要的長度(tmp_path):
-    src = tmp_path / "long.wav"
+def test_解碼以t截止_只取片段需要的長度(tmp_path, monkeypatch):
+    # DIR-5 修正 4:_decode_pcm 只開專案內的音檔(自 repo 根逐層 O_NOFOLLOW),測試檔放在專案 audio/ 之下
+    monkeypatch.setattr(pj, "ROOT", tmp_path.resolve())
+    adir = tmp_path.resolve() / "projects" / "解碼" / "audio"
+    adir.mkdir(parents=True)
+    src = adir / "long.wav"
     _sine(src, seconds=5.0)
     assert media._decode_argv(1.0)[-3:] == ["-t", "1.000", "pipe:1"]
     pcm = media._decode_pcm(src, 1.0)
     assert len(pcm) <= 1 * media.RENDER_RATE * 2 + 2           # ≤ 1 秒 × 48000 × 2 位元組(+1 個樣本)
     assert len(pcm) >= int(0.95 * media.RENDER_RATE * 2)
     assert len(media._decode_pcm(src)) >= int(4.9 * media.RENDER_RATE * 2)   # 不帶秒數時照舊解全檔
+
+
+# ---------- DIR-5 修正 4:檢查後、開檔前換成符號連結 ----------
+
+def test_素材檔在檢查後被換成連結時拒絕(env, monkeypatch):
+    outside = env.tmp / "outside.png"
+    Image.new("RGB", (64, 64), (0, 255, 0)).save(outside)
+    real = media._contained_file
+
+    def swapping(base, path):
+        got = real(base, path)   # 檢查通過之後、_letterbox 開檔之前換成連結
+        if not path.is_symlink():
+            path.unlink()
+            path.symlink_to(outside)
+        return got
+    monkeypatch.setattr(media, "_contained_file", swapping)
+    _reject(env)
+    assert outside.exists()
+
+
+def test_音檔目錄在檢查後被換成連結時拒絕(env, monkeypatch):
+    real_dir = env.tmp / "elsewhere-audio"
+    real = media._contained_file
+
+    def swapping(base, path):
+        got = real(base, path)
+        if base.name == "audio" and not base.is_symlink():
+            base.rename(real_dir)
+            base.symlink_to(real_dir, target_is_directory=True)
+        return got
+    monkeypatch.setattr(media, "_contained_file", swapping)
+    _reject(env)

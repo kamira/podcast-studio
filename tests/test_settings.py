@@ -1126,3 +1126,25 @@ def test_voice_speed_error_message_says_0_5_to_2_0(env):
     c["voice_defaults"] = {**c["voice_defaults"], "speed": 2.5}
     errs = settings.validate(c, None)
     assert any("0.5–2.0 倍" in e for e in errs), errs
+
+
+# ---- DIR-5 修正 4:路徑檢查後、讀取前換成符號連結 ----
+
+def test_匯入來源在檢查後被換成連結_不讀外部內容(env, tmp_path, monkeypatch):
+    write_json(env, changed())
+    secret = tmp_path / "secret.json"
+    secret.write_text(json.dumps(changed(reason="外部:不該被讀到"), ensure_ascii=False), encoding="utf-8")
+    real = settings._config_path_error
+
+    def swapping():
+        msg = real()
+        src = env / "config" / "models.json"
+        if msg is None and not src.is_symlink():
+            src.unlink()
+            src.symlink_to(secret)
+        return msg
+    monkeypatch.setattr(settings, "_config_path_error", swapping)
+    got = settings.load()
+    assert "外部:不該被讀到" not in json.dumps(got, ensure_ascii=False)
+    assert got.get("_warnings")
+    assert not db(env).exists()

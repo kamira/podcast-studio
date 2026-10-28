@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import math
 import os
-import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +32,7 @@ from typing import Any, Callable
 import media
 import names
 import project as pj
+import safe_fs
 import taiwan_ai as tai
 
 PORT_TYPES = frozenset({"text", "image", "audio", "video"})
@@ -168,17 +168,58 @@ def _text_input(inputs, params):
     return {"text": params["text"]}
 
 
+def _output_parts(value, outside_msg: str) -> list[str]:
+    """outputs/ 之下的路徑 → 相對 outputs/ 的路徑元件(DIR-5 修正 4:不 resolve,交給 safe_fs 逐層開啟)。
+
+    相對路徑直接切元件;絕對路徑須以 outputs/(原樣或解析後的真實路徑)開頭。含 `..`、空路徑一律拒絕。"""
+    p = Path(value)
+    rel = None
+    if p.is_absolute():
+        for base in (tai.OUT, tai.OUT.resolve()):
+            try:
+                rel = p.relative_to(base)
+                break
+            except ValueError:
+                continue
+        if rel is None:
+            raise ValueError(outside_msg)
+    else:
+        rel = p
+    parts = list(rel.parts)
+    if not parts or any(x in (".", "..") for x in parts):
+        raise ValueError(outside_msg)
+    return parts
+
+
+def _open_output_file(value, outside_msg: str, missing_msg: str, link_msg: str) -> tuple[int, list[str]]:
+    """自 outputs/ 以 dir_fd 逐層 O_NOFOLLOW 開啟一般檔,回傳 (fd, 路徑元件);任一層是符號連結丟 ValueError(link_msg)。"""
+    parts = _output_parts(value, outside_msg)
+    try:
+        return safe_fs.open_path(tai.OUT, parts), parts
+    except safe_fs.UnsafePathError:
+        raise ValueError(link_msg) from None
+    except (OSError, ValueError):
+        raise ValueError(missing_msg) from None
+
+
 def _resolve_output_file(rel):
-    """把相對於 outputs/ 的路徑解析成真實路徑;絕對路徑、跳出 outputs/、符號連結指向外部一律拒絕。"""
-    if not isinstance(rel, str) or not rel or Path(rel).is_absolute():
+    """相對於 outputs/ 的路徑 → outputs/ 之下的一般檔案路徑;絕對路徑、跳出 outputs/、任一層是符號連結一律拒絕。
+
+    (DIR-5 修正 4)以 safe_fs 逐層開啟確認後關閉;回傳的路徑供下游節點(外部程式)使用。"""
+    if not isinstance(rel, str) or not rel or "\x00" in rel or Path(rel).is_absolute():
         raise ValueError("檔案路徑必須是 outputs/ 之下的相對路徑")
-    base = tai.OUT.resolve()
-    path = (base / rel).resolve()
-    if not path.is_relative_to(base):
-        raise ValueError("檔案路徑不在 outputs/ 之下")
-    if not path.is_file():
-        raise ValueError("找不到檔案")
-    return path
+    fd, parts = _open_output_file(rel, "檔案路徑不在 outputs/ 之下", "找不到檔案",
+                                  "檔案路徑中有符號連結,不接受")
+    os.close(fd)
+    return tai.OUT.resolve().joinpath(*parts)
+
+
+def _read_output_text(rel) -> str:
+    """file-input 文字檔:同樣逐層開啟後直接讀這個 fd(不以路徑重開)。"""
+    fd, _ = _open_output_file(rel, "檔案路徑不在 outputs/ 之下", "找不到檔案", "檔案路徑中有符號連結,不接受")
+    with os.fdopen(fd, "rb") as f:
+        raw = f.read(MAX_TEXT * 4 + 4)
+    return raw.decode("utf-8-sig")
 
 
 def _file_input(inputs, params):
@@ -189,7 +230,7 @@ def _file_input(inputs, params):
     if kind != "text":
         return {kind: str(path)}
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        text = _read_output_text(params["file"])
     except UnicodeDecodeError as e:
         raise ValueError("文字檔必須是 UTF-8 編碼") from e
     if len(text) > MAX_TEXT:
@@ -289,8 +330,8 @@ def _make_video(inputs, params):
 # assets),供精靈與完整模式的素材庫使用。安全:
 #   - 專案名稱以 names.py 的中英日白名單檢查;專案必須已存在(不建立專案)。
 #   - 圖片與音訊只接受 outputs/ 之下的一般檔案:檔案本身與其在 outputs/ 之下的每一層目錄都不得是
-#     符號連結(解析前逐層 lstat,DIR-5 統整 M-4;指向 outputs/ 內的連結也拒絕),解析後必須在 outputs/ 內,
-#     以 O_NOFOLLOW 開啟,副檔名在專案素材白名單(project.ASSET_EXTS)內,單檔不超過 LIBRARY_MAX_BYTES,
+#     符號連結(DIR-5 統整 M-4;指向 outputs/ 內的連結也拒絕)。DIR-5 修正 4 起不 resolve:自 outputs/
+#     以 dir_fd 逐層 O_NOFOLLOW 開啟(safe_fs),之後的檢查與複製都讀同一個 fd,副檔名在專案素材白名單(project.ASSET_EXTS)內,單檔不超過 LIBRARY_MAX_BYTES,
 #     檔頭須與副檔名相符(media.sniff_binary,與 /api/upload 同一套嗅探規則,DIR-5 統整 M-5)。
 #   - 複製到 assets/ 一律排他建立新檔(不覆寫),專案只記素材 id、不記路徑;
 #     登記經 project.update() 在專案鎖內完成,驗證(素材數量與總量上限)失敗時刪除本次複製的檔案。
@@ -300,72 +341,38 @@ LIBRARY_TEXT_LABEL = "文字(由流程送入)"
 COPY_CHUNK = 1 << 20
 
 
-def _reject_links_under(cand: Path, base: Path) -> None:
-    """解析前逐層檢查:cand 本身與它在 base(outputs/)之下的每一層目錄都不得是符號連結。
-
-    由 cand 往上走到「解析後等於 base 且本身不是符號連結」的那一層為止;走到根目錄都沒遇到 base
-    表示不在 outputs/ 之下。base 以上的路徑(例 macOS 的 /var → /private/var)不檢查。"""
-    cur = cand
-    while True:
-        try:
-            st = os.lstat(cur)
-        except OSError:
-            raise ValueError("找不到要送到素材庫的檔案") from None
-        if stat.S_ISLNK(st.st_mode):
-            raise ValueError("只能送出 outputs/ 之下的一般檔案(不接受符號連結)")
-        if cur != cand:
-            try:
-                if cur.resolve(strict=True) == base:
-                    return
-            except (OSError, RuntimeError):
-                raise ValueError("找不到要送到素材庫的檔案") from None
-        if cur.parent == cur:
-            raise ValueError("只能把 outputs/ 之下的檔案送到素材庫")
-        cur = cur.parent
-
-
 def _library_source(value, kind: str) -> tuple[int, str, str]:
-    """把節點輸入的檔案路徑解析成 outputs/ 之下的一般檔案;回傳 (已開啟的 fd, 副檔名, 顯示名稱)。"""
+    """把節點輸入的檔案路徑解析成 outputs/ 之下的一般檔案;回傳 (已開啟的 fd, 副檔名, 顯示名稱)。
+
+    (DIR-5 修正 4)不再 resolve() 後以路徑開檔:自 outputs/ 以 dir_fd 逐層 O_NOFOLLOW 開啟,任一層(含指向
+    outputs/ 內者)是符號連結即拒絕;之後的檢查與複製都讀這個 fd。"""
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError("輸入的檔案路徑不正確")
-    base = tai.OUT.resolve()
-    p = Path(value)
-    cand = p if p.is_absolute() else base / p
-    _reject_links_under(cand, base)
-    try:
-        real = cand.resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise ValueError("找不到要送到素材庫的檔案") from None
-    if not real.is_relative_to(base) or real == base:
-        raise ValueError("只能把 outputs/ 之下的檔案送到素材庫")
-    ext = real.suffix.lower().lstrip(".")
+    outside = "只能把 outputs/ 之下的檔案送到素材庫"
+    parts = _output_parts(value, outside)
+    ext = Path(parts[-1]).suffix.lower().lstrip(".")
     if ext not in pj.ASSET_EXTS[kind]:
         raise ValueError(f"副檔名 .{ext} 不能當成{'圖片' if kind == 'image' else '音訊'}素材")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        fd = os.open(real, flags)
-    except OSError:
-        raise ValueError("無法讀取要送到素材庫的檔案") from None
+    fd, _ = _open_output_file(value, outside, "找不到要送到素材庫的檔案",
+                              "只能送出 outputs/ 之下的一般檔案(不接受符號連結)")
     st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_size > LIBRARY_MAX_BYTES:
+    if st.st_size > LIBRARY_MAX_BYTES:
         os.close(fd)
         raise ValueError(f"只能送出 {LIBRARY_MAX_BYTES // 1024 ** 2} MB 以內的一般檔案")
     if not media.sniff_binary(f".{ext}", os.pread(fd, media.SNIFF_BYTES, 0)):
         os.close(fd)
         raise ValueError(f"檔案內容與副檔名 .{ext} 不符")
-    label = "".join(c for c in real.name if ord(c) >= 32 and ord(c) != 127)[:pj.MAX_LABEL] or None
+    label = "".join(c for c in parts[-1] if ord(c) >= 32 and ord(c) != 127)[:pj.MAX_LABEL] or None
     return fd, ext, label
 
 
-def _copy_into(assets: Path, ext: str, write) -> tuple[str, Path, int]:
-    """在 assets/ 排他建立 `<新 id>.<ext>` 並以 write(f) 寫入;回傳 (id, 路徑, 位元組數)。"""
-    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-             | getattr(os, "O_CLOEXEC", 0))
+def _copy_into(assets: int, ext: str, write) -> tuple[str, str, int]:
+    """在 assets/(目錄 fd)內排他建立 `<新 id>.<ext>` 並以 write(f) 寫入;回傳 (id, 檔名, 位元組數)。"""
     for _ in range(8):
         aid = pj.new_id()
-        dest = assets / f"{aid}.{ext}"
+        fn = f"{aid}.{ext}"
         try:
-            fd = os.open(dest, flags, 0o644)
+            fd = safe_fs.create_excl(assets, fn, 0o644)
             break
         except FileExistsError:
             continue
@@ -376,9 +383,9 @@ def _copy_into(assets: Path, ext: str, write) -> tuple[str, Path, int]:
             write(f)
             size = f.tell()
     except BaseException:
-        dest.unlink(missing_ok=True)
+        safe_fs.unlink(assets, fn, missing_ok=True)
         raise
-    return aid, dest, size
+    return aid, fn, size
 
 
 def _send_to_library(inputs, params):
@@ -399,37 +406,37 @@ def _send_to_library(inputs, params):
     try:
         for kind, value in files:
             opened.append((kind, *_library_source(value, kind)))
-        created: list[Path] = []
+        created: list[str] = []   # assets/ 內本次建立的檔名;失敗時相對目錄 fd 刪除
 
         payload = text.encode("utf-8") if text is not None else b""
 
         def change(proj):
             # 專案鎖內、複製前檢查素材與自錄音檔的共同磁碟配額(DIR-5 修正 3);超過丟 QuotaExceeded,不留新檔
             pj.check_quota(name, sum(os.fstat(fd).st_size for _, fd, _, _ in opened) + len(payload))
-            assets = pj.subdir(name, "assets", create=True)
             added = []
-            for kind, fd, ext, label in opened:
-                def write(f, fd=fd):
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    while chunk := os.read(fd, COPY_CHUNK):
-                        f.write(chunk)
-                aid, dest, size = _copy_into(assets, ext, write)
-                created.append(dest)
-                added.append({"id": aid, "kind": kind, "ext": ext, "bytes": size,
-                              **({"label": label} if label else {})})
-            if text is not None:
-                aid, dest, size = _copy_into(assets, "txt", lambda f: f.write(payload))
-                created.append(dest)
-                added.append({"id": aid, "kind": "text", "ext": "txt", "bytes": size,
-                              "label": LIBRARY_TEXT_LABEL})
+            with safe_fs.closing(pj.open_subdir(name, "assets", create=True)) as assets:
+                for kind, fd, ext, label in opened:
+                    def write(f, fd=fd):
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        while chunk := os.read(fd, COPY_CHUNK):
+                            f.write(chunk)
+                    aid, fn, size = _copy_into(assets, ext, write)
+                    created.append(fn)
+                    added.append({"id": aid, "kind": kind, "ext": ext, "bytes": size,
+                                  **({"label": label} if label else {})})
+                if text is not None:
+                    aid, fn, size = _copy_into(assets, "txt", lambda f: f.write(payload))
+                    created.append(fn)
+                    added.append({"id": aid, "kind": "text", "ext": "txt", "bytes": size,
+                                  "label": LIBRARY_TEXT_LABEL})
             proj.assets = [*proj.assets, *added]
             return added
 
         try:
             _, _, added = pj.update(name, change)
         except BaseException:
-            for p in created:
-                p.unlink(missing_ok=True)
+            for fn in created:
+                pj.unlink_in(name, "assets", fn)
             raise
     finally:
         for _, fd, _, _ in opened:

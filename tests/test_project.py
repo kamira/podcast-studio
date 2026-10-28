@@ -577,7 +577,11 @@ def test_history_rotation_refuses_symlinked_dirs(projects, outside, caplog, whic
     # 輪替本身也拒絕處理符號連結的 history/
     if which == "history":
         warnings = []
-        assert pj._rotate(projects / "夜市的味道", warnings) == []
+        pfd = os.open(projects / "夜市的味道", os.O_RDONLY)   # DIR-5 修正 4:_rotate 改收專案目錄 fd
+        try:
+            assert pj._rotate(pfd, "夜市的味道", warnings) == []
+        finally:
+            os.close(pfd)
         assert warnings and snapshot(outside) == before
 
 
@@ -678,3 +682,81 @@ def test_兩個執行緒同時update不會互相覆蓋(repo):
         t.join(30)
     assert errors == []
     assert sorted(a["bytes"] for a in pj.load("夜市的味道").assets) == list(range(n))
+
+
+# ---------- DIR-5 修正 4:檢查後、操作前換成符號連結的競態 ----------
+
+def _swap_to_link(path: Path, target: Path) -> None:
+    """把 path(目錄或檔案)搬到旁邊,原位置改成指向 target 的符號連結。"""
+    path.rename(path.with_name(path.name + "-moved"))
+    path.symlink_to(target, target_is_directory=target.is_dir())
+
+
+def _child_hook(monkeypatch, label, action):
+    """包住 pj._child:開到 label 目錄的 fd 之後執行 action()(模擬檢查完成、操作之前的替換)。"""
+    real = pj._child
+
+    def wrapped(dirfd, part, lbl, create):
+        fd = real(dirfd, part, lbl, create)
+        if lbl == label:
+            action()
+        return fd
+    monkeypatch.setattr(pj, "_child", wrapped)
+
+
+def test_race_tmp_dir_swapped_after_open_cleanup_stays_inside(projects, outside, monkeypatch):
+    pj.save(proj())
+    tmp = projects / "夜市的味道" / "tmp"
+    tmp.mkdir()
+    (tmp / "殘留.json").write_text("x", encoding="utf-8")
+    before = snapshot(outside)
+    _child_hook(monkeypatch, "tmp", lambda: _swap_to_link(tmp, outside))
+    r = pj.startup_cleanup(BASE)
+    assert snapshot(outside) == before                     # 連結目標內容不變
+    assert r["tmp_cleared"] == 1 and list((projects / "夜市的味道" / "tmp-moved").iterdir()) == []
+
+
+def test_race_trash_entry_swapped_after_listing_not_followed(projects, outside, monkeypatch):
+    expired = make_trash_entry(projects, "過期", BASE - timedelta(days=31))
+    before = snapshot(outside)
+    real = pj.safe_fs.entries
+
+    def stale(dirfd):   # 列舉(含 lstat)之後、刪除之前把過期項目換成指向外部的連結
+        got = real(dirfd)
+        if expired.is_dir() and not expired.is_symlink():
+            _swap_to_link(expired, outside)
+        return got
+    monkeypatch.setattr(pj.safe_fs, "entries", stale)
+    pj.startup_cleanup(BASE)
+    assert snapshot(outside) == before
+    assert not os.path.lexists(expired)                    # 只刪連結本身
+
+
+def test_race_history_swapped_after_open_rotation_stays_inside(projects, outside, monkeypatch):
+    for i in range(12):
+        (outside / f"20260101-0000{i:02d}-000-abcd.json").write_text("{}", encoding="utf-8")
+    p = proj()
+    for _ in range(12):
+        pj.save(p)
+    before = snapshot(outside)
+    hdir = projects / "夜市的味道" / "history"
+    done = []
+
+    def swap():   # 第 1 次是移入 history,第 2 次是輪替開啟 history/ 之後、刪除之前
+        done.append(1)
+        if len(done) == 2:
+            _swap_to_link(hdir, outside)
+    _child_hook(monkeypatch, "history", swap)
+    pj.save(p)
+    assert snapshot(outside) == before
+    assert len(list((projects / "夜市的味道" / "history-moved").iterdir())) == pj.HISTORY_KEEP
+
+
+def test_race_trash_dir_swapped_before_move_project_not_moved_outside(projects, outside, monkeypatch):
+    pj.save(proj())
+    (projects / ".trash").mkdir()
+    before = snapshot(outside)
+    _child_hook(monkeypatch, pj.TRASH_NAME, lambda: _swap_to_link(projects / ".trash", outside))
+    moved = pj.trash("夜市的味道", confirm=True)
+    assert snapshot(outside) == before                     # 沒有搬進連結目標
+    assert (projects / ".trash-moved" / moved / "project.json").is_file()

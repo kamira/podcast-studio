@@ -371,3 +371,24 @@ def test_list_models的image列回報設定中的生圖模型(mcp_mod, cfg, monk
     assert second["roles"]["image"] == {**first["roles"]["image"], "model": "test/model"}
     assert list(second["roles"]) == ["reason", "taiwan", "reason_heavy", "image", "speech"]
     assert list(second) == ["roles", "loaded_now", "outputs"]
+
+
+# ---------- DIR-5 修正 4:outputs/ 開啟後被換成符號連結 ----------
+
+def test_outputs開啟後被換成連結_鎖檔不建在外部(lock_path, tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    out = lock_path.parent
+    real = hl._outputs_fd
+
+    def swapping(path):
+        fd = real(path)
+        if not out.is_symlink():
+            out.rename(out.with_name("outputs-moved"))
+            out.symlink_to(outside, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(hl, "_outputs_fd", swapping)
+    with hl.heavy_lock(timeout=1):
+        pass
+    assert list(outside.iterdir()) == []
+    assert (out.with_name("outputs-moved") / ".heavy.lock").is_file()

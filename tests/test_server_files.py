@@ -295,9 +295,10 @@ def test_files_unknown_type_is_attachment_octet_stream(client, served):
     assert r.headers["content-disposition"].startswith("attachment")
 
 
-def test_files_symlink_inside_outputs_to_inside_is_ok(client, served):
+def test_files_symlink_inside_outputs_to_inside_is_404(client, served):
+    """DIR-5 修正 4(使用者 2026-10-28「every level」):outputs/ 內的符號連結一律不跟隨,指向內部也 404。"""
     r = client.get("/files/outputs/link-in.png")
-    assert r.status_code == 200 and r.content == PNG
+    assert r.status_code == 404 and PNG not in r.content
 
 
 @pytest.mark.parametrize("path", [
@@ -535,9 +536,9 @@ def test_workflow_temp_file_name_has_no_name(client, root, monkeypatch):
     seen = []
     real = ss._open_excl
 
-    def spy(path, mode):
-        seen.append(Path(path).name)
-        return real(path, mode)
+    def spy(dirfd, name, mode=0o600):   # DIR-5 修正 4:相對目錄 fd 排他建立
+        seen.append(name)
+        return real(dirfd, name, mode)
 
     monkeypatch.setattr(ss, "_open_excl", spy)
     name = "夜" * 64
@@ -622,3 +623,83 @@ def test_workflow_corrupt_file_get_is_error_without_paths(client, root):
     r = client.get("/api/workflows/broken")
     assert r.status_code == 422
     assert str(root) not in r.text
+
+
+# ---------- DIR-5 修正 4:檢查後、操作前換成符號連結的競態 ----------
+
+def _swap_dir(path: Path, target: Path) -> None:
+    path.rename(path.with_name(path.name + "-moved"))
+    path.symlink_to(target, target_is_directory=True)
+
+
+@pytest.fixture
+def elsewhere(tmp_path):
+    e = tmp_path / "elsewhere"
+    e.mkdir()
+    (e / "a.png").write_bytes(b"SECRET" + PNG)
+    (e / "x.json").write_text('{"nodes": [], "edges": [], "secret": 1}', encoding="utf-8")
+    return e
+
+
+def _after_rel_parts(monkeypatch, action):
+    real = ss._rel_parts
+
+    def wrapped(rel):
+        parts = real(rel)
+        action()
+        return parts
+    monkeypatch.setattr(ss, "_rel_parts", wrapped)
+
+
+def test_race_files_dir_swapped_after_check_is_404(client, root, elsewhere, monkeypatch):
+    sub = root / "outputs" / "sub"
+    sub.mkdir(parents=True)
+    (sub / "a.png").write_bytes(PNG)
+    assert client.get("/files/outputs/sub/a.png").status_code == 200
+    _after_rel_parts(monkeypatch, lambda: sub.is_symlink() or _swap_dir(sub, elsewhere))
+    r = client.get("/files/outputs/sub/a.png")
+    assert r.status_code == 404 and b"SECRET" not in r.content
+
+
+def test_race_static_dir_swapped_after_check_is_404(root, elsewhere, monkeypatch):
+    static = root / "static"
+    (static / "css").mkdir(parents=True)
+    (static / "css" / "a.png").write_bytes(PNG)
+    app = ss.create_app(runner=lambda g, e, c=None: None, token=TOKEN, static_dir=static, root=root)
+    c = TestClient(app, base_url=BASE)
+    assert c.get("/static/css/a.png").content == PNG
+    _after_rel_parts(monkeypatch, lambda: (static / "css").is_symlink() or _swap_dir(static / "css", elsewhere))
+    r = c.get("/static/css/a.png")
+    assert r.status_code == 404 and b"SECRET" not in r.content
+
+
+def test_race_upload_dir_swapped_after_open_writes_stay_inside(client, root, elsewhere, monkeypatch):
+    before = sorted(p.name for p in elsewhere.iterdir())
+    updir = root / "outputs" / "uploads"
+    real = ss._open_dir
+
+    def wrapped(r, *parts, create):
+        fd = real(r, *parts, create=create)
+        if parts == ("outputs", "uploads") and not updir.is_symlink():
+            _swap_dir(updir, elsewhere)
+        return fd
+    monkeypatch.setattr(ss, "_open_dir", wrapped)
+    r = upload(client, "封面.png", PNG)
+    assert r.status_code == 200, r.text
+    assert sorted(p.name for p in elsewhere.iterdir()) == before          # 沒寫進連結目標
+    assert files_in(root / "outputs" / "uploads-moved") == [r.json()["file_id"].split("/")[1]]
+
+
+def test_race_workflow_file_swapped_after_dir_open_is_404(client, root, elsewhere, monkeypatch):
+    assert put_wf(client, quote("夜市", safe="")).status_code == 200
+    wf = root / "workflows" / "夜市.json"
+    real = ss.safe_fs.open_file
+
+    def wrapped(dirfd, name, flags=os.O_RDONLY):
+        if name == "夜市.json" and not wf.is_symlink():
+            wf.unlink()
+            wf.symlink_to(elsewhere / "x.json")
+        return real(dirfd, name, flags)
+    monkeypatch.setattr(ss.safe_fs, "open_file", wrapped)
+    r = client.get("/api/workflows/" + quote("夜市", safe=""))
+    assert r.status_code == 404 and "secret" not in r.text

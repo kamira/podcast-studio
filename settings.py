@@ -84,6 +84,8 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
+import safe_fs
+
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "models.json"  # 只作一次性匯入來源(T3 起移出 git)
 DB_PATH = Path("config") / "studio.db"  # 相對於 ROOT
@@ -504,9 +506,9 @@ def _create_db_file(db: Path) -> tuple[int, int] | None:
 
     回傳新檔的身分 `(st_dev, st_ino)`,供 `_discard()` 確認要刪的仍是這一個檔;已存在回 None。
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(db, flags, 0o600)
+    try:   # (DIR-5 修正 4)相對 config/ 的目錄 fd 排他建立
+        with safe_fs.closing(_config_fd()) as cfd:
+            fd = safe_fs.create_excl(cfd, db.name, 0o600)
     except FileExistsError:
         return None
     try:
@@ -517,13 +519,18 @@ def _create_db_file(db: Path) -> tuple[int, int] | None:
     return st.st_dev, st.st_ino
 
 
-def _same_file(db: Path, ident: tuple[int, int]) -> bool:
-    """db 目前是一般檔案(不是符號連結),且身分等於 ident。"""
+def _same_file(db: Path, ident: tuple[int, int], dirfd: int | None = None) -> bool:
+    """db 目前是一般檔案(不是符號連結),且身分等於 ident;給 dirfd 時相對該目錄 fd 判斷(DIR-5 修正 4)。"""
     try:
-        st = os.lstat(db)
+        st = os.lstat(db) if dirfd is None else safe_fs.lstat(dirfd, db.name)
     except OSError:
         return False
-    return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == ident
+    return st is not None and stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == ident
+
+
+def _config_fd() -> int:
+    """repo 內 `config/` 的目錄 fd(自 repo 根以 dir_fd O_NOFOLLOW 開啟;呼叫端關閉)。"""
+    return safe_fs.open_dir(ROOT.resolve(), ["config"])
 
 
 def _discard(db: Path, ident: tuple[int, int]) -> None:
@@ -537,7 +544,16 @@ def _discard(db: Path, ident: tuple[int, int]) -> None:
     `BEGIN IMMEDIATE` 內確認仍沒有任何資料表(沒有 meta、沒有匯入的資料)才刪;
     無法確認時一律保留(依 PR #36 審議修正)。
     """
-    if not _same_file(db, ident):
+    try:
+        cfd = _config_fd()   # (DIR-5 修正 4)核對與刪除一律相對 config/ 的目錄 fd
+    except OSError:
+        return
+    with safe_fs.closing(cfd):
+        _discard_at(cfd, db, ident)
+
+
+def _discard_at(cfd: int, db: Path, ident: tuple[int, int]) -> None:
+    if not _same_file(db, ident, cfd):
         return
     removed = False
     try:
@@ -547,8 +563,8 @@ def _discard(db: Path, ident: tuple[int, int]) -> None:
     try:
         con.execute("BEGIN IMMEDIATE")
         try:
-            if _same_file(db, ident) and _schema_state(con) == _NEW:
-                db.unlink()
+            if _same_file(db, ident, cfd) and _schema_state(con) == _NEW:
+                safe_fs.unlink(cfd, db.name)
                 removed = True
         finally:
             if con.in_transaction:
@@ -560,10 +576,7 @@ def _discard(db: Path, ident: tuple[int, int]) -> None:
     if not removed:
         return
     for p in _sidecars(db):
-        try:
-            p.unlink()
-        except FileNotFoundError:
-            pass
+        safe_fs.unlink(cfd, p.name, missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -578,9 +591,9 @@ def _init_lock():
     msg = _db_path_error()
     if msg:
         raise _DbError(WARN_UNSAFE_PATH)
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        fd = os.open(_lock_file(_db_file()), flags, 0o600)
+    try:   # (DIR-5 修正 4)鎖檔相對 config/ 的目錄 fd 開啟
+        with safe_fs.closing(_config_fd()) as cfd:
+            fd = safe_fs.open_or_create(cfd, _lock_file(_db_file()).name, os.O_RDWR, 0o600)
     except OSError:
         raise _DbError(WARN_UNSAFE_PATH if _db_path_error() else WARN_DB_UNREADABLE) from None
     try:
@@ -772,8 +785,9 @@ def _import_source() -> tuple[dict | None, str | None]:
     """讀一次性匯入來源 config/models.json;回傳 (合法設定或 None, 警告或 None)。"""
     if _config_path_error():
         return None, WARN_UNSAFE_PATH
-    try:
-        raw = CONFIG_PATH.read_text(encoding="utf-8")
+    try:   # (DIR-5 修正 4)自 repo 根以 dir_fd 逐層 O_NOFOLLOW 開啟後讀同一個 fd
+        with os.fdopen(safe_fs.open_path(ROOT.resolve(), ["config", "models.json"]), "rb") as f:
+            raw = f.read().decode("utf-8")
     except FileNotFoundError:
         return None, None
     except (OSError, UnicodeDecodeError):
