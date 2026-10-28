@@ -4,6 +4,7 @@
 > 本文件描述**現況**,不代表現況正確;已知缺陷見 Guideline §9(ADP-n)。
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:網頁改為 `studio_server.py`(FastAPI + 原生 JS 節點畫布),移除 Gradio 版與 CLI;架構圖與流程 A 改寫,新增檔案拖放流程與設定讀寫流程(以 T1~T13 合併後的 main 為準;端到端驗收結果以 `docs/acceptance/` 為準)。
 > 2026-10-26 依 CHG-20261026-01 結構文件更新:媒體層改經 `taiwan_ai.role_config()` 讀生圖設定(不再讀 `FLUX`),語音改讀聲線設定;耦合點補上 `roles.image`、`roles.voice` 的讀取端(以 T1~T5 合併後的 main 為準)。
+> 2026-10-28 依 CHG-20261028-01 結構文件更新:CI/CD 流程的本機審議步驟補記 Codex 席讀取完整程式的方式。
 
 ## 分層 / 模組
 
@@ -242,7 +243,7 @@ flowchart LR
 ### 一個 PR 的流程
 
 1. **開 PR**:每個步驟開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號(只改 `docs/knowledge/` 者除外),push 後開 PR(DIR-2 第 1 條)。
-2. **本機審議**:CHG 風險為中 / 高,或 PR 改到程式路徑時,主 agent 從 main 的工作副本執行 `scripts/local_review.py`,六席兩階段審議後以 `gh pr comment` 貼出判決,留言帶 `<!-- local-review CHG-… sha=<head sha> -->` 標記。只處理本 repo 分支且作者為擁有者的 PR。
+2. **本機審議**:CHG 風險為中 / 高,或 PR 改到程式路徑時,主 agent 從 main 的工作副本執行 `scripts/local_review.py`,六席兩階段審議後以 `gh pr comment` 貼出判決,留言帶 `<!-- local-review CHG-… sha=<head sha> -->` 標記。只處理本 repo 分支且作者為擁有者的 PR。Codex 席不套 Ollama 的 `num_ctx` 截短:diff 經過濾後 ≤ 30000 字時完整內嵌,超過時以 head sha 在 `.review/` 建 PR head 的 `--no-checkout` detached worktree(不寫出追蹤檔),Codex 以 `-C` 指向它,以 `git show`、`git diff --no-textconv --no-ext-diff` 自行讀完整 diff 與檔案,審完移除(CHG-20261028-01)。
 3. **CI 四項**:`document`(doc_integrity_check、全 repo 與 commit 範圍秘密掃描、vendored 完整性)、`chg`(commit 引用 CHG 編號、PR 改到的 CHG 做 plan-check)、`program`(`py_compile`、`ruff check --select E9,F`、`python3 -m unittest discover -s tests/ci`)、`review`(只採信擁有者留言;標記 sha 須為目前 head;否決席無 fail、每席都有回答;改到治理基礎設施路徑另需 `<!-- infra-approved sha=<head> -->`)。
 4. **使用者核准**:CI 全綠後,只改 `docs/`、`features/` 的 PR 可自動 merge;改到任何程式路徑的 PR 不論分級,一律停下等使用者核准(DIR-2 第 3 條)。審議留言只是完整性檢查,授權只有使用者核准(CHG-20261022-03 安全影響 (n))。
 5. **squash merge**:main 只接受 squash merge,標題帶 CHG 編號。
