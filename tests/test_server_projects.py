@@ -149,7 +149,13 @@ def env(tmp_path, monkeypatch):
 def client(env):
     app = ss.create_app(runner=lambda g, emit, c=None: None, token=TOKEN, static_dir=env.repo / "no-static",
                         root=env.repo, render=env.render, annotate=env.annotate)
-    return TestClient(app, base_url=BASE)
+    yield TestClient(app, base_url=BASE)
+    # 等本測試啟動的背景合成 / 匯出執行緒結束:它們在測試結束後才寫回專案時,會寫進下一個測試的 project.ROOT,
+    # 造成下一個測試「已有同名的專案」的偶發失敗
+    for t in threading.enumerate():
+        if t.name.startswith(("synth-", "render-", "run-")):
+            t.join(timeout=30)
+            assert not t.is_alive(), f"背景執行緒 {t.name} 30 秒內沒有結束"
 
 
 def auth(**extra):
