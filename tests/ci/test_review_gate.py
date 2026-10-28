@@ -886,6 +886,106 @@ class LocalReviewTest(unittest.TestCase):
                               .format(CHG))[0], "mixed")
 
 
+    # --- CHG-20261028-02 T1:意見化與非 think 席 CHG 截短
+    @staticmethod
+    def system_prompts(env):
+        prompts = [b["messages"][0]["content"] for b, _ in env.ollama_calls]
+        prompts += [stdin.split("\n\n# 本席參考資料", 1)[0].split("\n\n# 你的判決", 1)[0]
+                    for _, stdin, _, _ in env.codex_calls]
+        return prompts
+
+    def test_system_prompts_are_advisory(self):
+        for argv in (["--codex-seats", "none"], []):
+            with self.subTest(argv=argv):
+                env = FakeEnv()
+                code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"] + argv)
+                self.assertEqual(code, 0)
+                prompts = self.system_prompts(env)
+                self.assertEqual(len(prompts), 12)  # 六席 × 兩階段
+                seats = {s for p in prompts for s in review_gate.SEATS if "審議會的 {} 席".format(s) in p}
+                self.assertEqual(seats, set(review_gate.SEATS))
+                for p in prompts:
+                    self.assertIn("不具否決效力", p)
+                    self.assertNotIn("否決", p.replace("不具否決效力", ""))
+                    self.assertNotIn("fail 即否決", p)
+
+    def test_advisory_comment_marker_and_verdict_lines_unchanged(self):
+        env = FakeEnv()
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("## 審議意見(DIR-1 / DIR-6)— CHG-20261022-03", out)
+        self.assertIn("各席為意見,不具否決效力;是否合併由統整席判定(DIR-6)", out)
+        self.assertNotIn("否決席 pass", out)
+        parsed = review_gate.parse_local_review(out)
+        self.assertEqual(set(parsed["seats"]), set(review_gate.SEATS))
+        self.assertEqual(parsed["sha"], HEAD)
+        vlines = [l for l in out.splitlines() if l.startswith("[verdict] ")]
+        self.assertEqual(len(vlines), 6)
+        for line in vlines:
+            cols = line[len("[verdict] "):].split(" | ")
+            self.assertGreaterEqual(len(cols), 5, line)
+            self.assertIn(cols[0], review_gate.SEATS)
+            self.assertIn(cols[2], review_gate.VERDICTS)
+        self.assertNotIn("CHG 截斷", out)
+
+    def test_big_chg_clipped_only_for_non_think_ollama_seats(self):
+        big = "長" * 90000
+        env = FakeEnv(chg_text=CHG_TEXT + big)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        plain = [b for b, _ in env.ollama_calls if not b.get("think")]
+        think = [b for b, _ in env.ollama_calls if b.get("think")]
+        self.assertEqual({b["model"] for b in plain}, {"glm4:latest"})
+        self.assertEqual(len(plain), 4)  # impact、consistency × 兩階段
+        for body in plain:
+            self.assertLessEqual(math.ceil(prompt_chars(body) / 1.5) + body["options"]["num_predict"], 40960)
+            self.assertNotIn(big, body["messages"][1]["content"])
+            self.assertIn("截斷於", body["messages"][1]["content"])
+        self.assertRegex(out, r"CHG 由 \d+ 字截短為 \d+ 字\(放進 num_ctx 40960\)")
+        self.assertIn("CHG 截斷:impact、consistency", out)
+        # think 席(risk、drift)維持「思考預算不足」路徑,CHG 不截
+        self.assertTrue(think)
+        for body in think:
+            self.assertIn(big, body["messages"][1]["content"])
+        self.assertIn("思考預算不足", out)
+        # Codex 席收到 CHG 全文
+        self.assertTrue(env.codex_calls)
+        for _, stdin, _, _ in env.codex_calls:
+            self.assertIn(big, stdin)
+        self.assertEqual(set(review_gate.parse_local_review(out)["seats"]), set(review_gate.SEATS))
+
+    def test_small_chg_prompt_unchanged_and_no_chg_limit(self):
+        calls, asked = [], []
+
+        def make_block(diff_text, chg_limit=None):
+            calls.append(chg_limit)
+            return "# 待審資料\n## CHG\n短 CHG\n## diff\n" + diff_text
+
+        def fake_ask(cfg, system, user, schema, check):
+            asked.append((cfg["model"], system, user))
+            if "cross" in schema["properties"]:
+                return {"ok": False, "error": "略"}
+            return {"ok": True, "out": {"verdict": "pass", "evidence": "e", "reason": "r", "findings": []},
+                    "secs": 1, "attempt": 1}
+
+        seats = local_review.seat_config("中", set())
+        diff = "diff --git a/scripts/x.py b/scripts/x.py\n+print('hi')\n"
+        orig = (local_review.ask, local_review.log)
+        local_review.ask, local_review.log = fake_ask, (lambda m: None)
+        try:
+            result = local_review.run_panel(seats, make_block, diff)
+        finally:
+            local_review.ask, local_review.log = orig
+        self.assertEqual(set(calls), {None})
+        phase1 = asked[:6]
+        for (model, system, user), (name, cfg) in zip(phase1, seats.items()):
+            expect = "# 本席參考資料(main 工作副本)\n{}\n\n".format(
+                local_review.clip(cfg["ref"], local_review.REF_CHAR_LIMIT)) + make_block(diff)
+            self.assertEqual(user, expect, name)
+        for r in result.values():
+            self.assertEqual(r["diff_notes"], [])
+
+
     # --- 27B 超過 30 分鐘改派 Codex(使用者 2026-10-23 規則)
     def heavy_timeout_env(self, phases=("verdict", "cross")):
         """27B 在指定階段逾時;其餘照常回答。"""
