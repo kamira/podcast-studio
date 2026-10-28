@@ -5,8 +5,10 @@
   場景: 大 diff 時 Codex 席以 PR head 唯讀檢視讀程式
     假設 擁有者的 PR 經過濾後的 diff 超過 30000 字
     當 從 main 的工作副本執行 scripts/local_review.py
-    那麼 Codex 席以 -C 指向 .review/pr-<編號>-<sha12> 的 detached worktree
-    而且 Codex 席的 prompt 含 base 與 head 的 sha、變更檔案清單、diffstat 與 git diff 的讀法
+    那麼 Codex 席以 -C 指向 .review/pr-<編號>-<sha12> 的 --no-checkout detached worktree
+    而且 該目錄除 .git 指標檔外沒有任何追蹤檔
+    而且 Codex 席的 prompt 含 base 與 head 的 sha、變更檔案清單、diffstat,以及 git show 與 git diff --no-textconv --no-ext-diff 的讀法
+    而且 Codex 席的 prompt 指示不得以 git show 或 git diff 讀 CHG 檔
     而且 Codex 席的 prompt 不含截短後的 diff
 
   場景: 小 diff 時 Codex 席收到完整 diff
@@ -29,6 +31,11 @@
     假設 唯讀檢視的 HEAD 不等於 GitHub 回報的 head sha
     當 執行本機審議
     那麼 腳本以退出碼 2 中止,不呼叫任何審議席,也不留下檢視
+
+  場景: 不刪除不屬於本腳本的同名目錄
+    假設 .review/pr-<編號>-<sha12> 已存在,但不是 git worktree list 登記的 worktree
+    當 執行本機審議
+    那麼 腳本以退出碼 2 拒絕,該目錄與其中檔案原封不動
 
   場景: fork 與非擁有者 PR 不取用內容
     假設 PR 來自 fork 或作者不是 repo 擁有者

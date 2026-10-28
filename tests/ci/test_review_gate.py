@@ -406,13 +406,15 @@ class FakeEnv:
         self.codex_mode = "ok"     # ok / bad(輸出不是 JSON)/ fail(非零退出)
         self.codex_version_ok = True
         self.diff_text = "diff --git a/scripts/x.py b/scripts/x.py\n+print('hi')\n"
-        self.git_fail = None       # fetch / add(worktree add 失敗)
+        self.git_fail = None       # fetch / add(worktree add 失敗)/ extra(add 後目錄多出追蹤檔)
         self.view_head = HEAD      # 唯讀檢視 rev-parse HEAD 的回傳值
+        self.registered = []       # git worktree list --porcelain 登記的路徑
         self.codex_dir_exists = []  # 每次 codex exec 當下 -C 目錄是否存在(CHG-20261028-01)
+        self.codex_dir_listing = []  # 每次 codex exec 當下 -C 目錄的內容
 
     def git(self, argv):
-        """假的 git:分支查詢、以 sha fetch、rev-parse 驗證、worktree add / remove / prune、diff --stat。
-        worktree add 真的建立目錄(以驗證審完被清掉),remove 真的刪除。"""
+        """假的 git:分支查詢、以 sha fetch、rev-parse 驗證、worktree add / list / remove / prune、diff --stat。
+        worktree add(--no-checkout)真的建立只含 `.git` 指標檔的目錄(以驗證審完被清掉),remove 真的刪除。"""
         if "rev-parse" in argv and "--abbrev-ref" in argv:
             return self.branch + "\n"
         if "fetch" in argv:
@@ -430,10 +432,16 @@ class FakeEnv:
                     raise local_review.CmdError("git worktree add 失敗")
                 path = Path(argv[-2])
                 path.mkdir(parents=True)
-                (path / "x.py").write_text("print('hi')\n", encoding="utf-8")
+                (path / ".git").write_text("gitdir: /dev/null\n", encoding="utf-8")
+                if self.git_fail == "extra" or "--no-checkout" not in argv:
+                    (path / "x.py").write_text("print('hi')\n", encoding="utf-8")
+                self.registered.append(str(path))
                 return ""
+            if sub == "list":
+                return "".join("worktree {}\nHEAD {}\ndetached\n\n".format(p, HEAD) for p in self.registered)
             if sub == "remove":
                 shutil.rmtree(argv[-1])
+                self.registered = [p for p in self.registered if p != argv[-1]]
                 return ""
             if sub == "prune":
                 return ""
@@ -452,7 +460,10 @@ class FakeEnv:
         self.codex_files += [schema_path, out_path]
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         self.codex_calls.append((list(argv), input_text, timeout, schema))
-        self.codex_dir_exists.append(Path(argv[argv.index("-C") + 1]).is_dir())
+        cdir = Path(argv[argv.index("-C") + 1])
+        self.codex_dir_exists.append(cdir.is_dir())
+        if cdir != local_review.REPO_ROOT:
+            self.codex_dir_listing.append(sorted(p.name for p in cdir.iterdir()))
         if self.codex_mode == "fail":
             raise local_review.CmdError("codex exec 失敗")
         if self.codex_mode == "bad":
@@ -1037,13 +1048,16 @@ class CodexViewTest(unittest.TestCase):
             self.assertEqual(argv[argv.index("-s") + 1], "read-only")
             self.assertIn("base sha:" + OLD, stdin)
             self.assertIn("head sha:" + HEAD, stdin)
-            self.assertIn("git diff {}...{} -- <路徑>".format(OLD, HEAD), stdin)
+            self.assertIn("git diff --no-textconv --no-ext-diff {}...{} -- <路徑>".format(OLD, HEAD), stdin)
+            self.assertIn("git show {}:<路徑>".format(HEAD), stdin)
+            self.assertIn("不得以 git show 或 git diff 讀 docs/changes/CHG-*.md", stdin)
             self.assertIn("## 變更檔案\nscripts/x.py\n" + CHG, stdin)
             self.assertIn("### diffstat\n scripts/x.py | 1 +", stdin)
             self.assertNotIn("截斷於", stdin)
             self.assertNotIn("y\ny\ny\n", stdin)  # 不放截短後的 diff
             self.assertNotIn("## diff\n<<<待審資料結束>>>", stdin)  # diff 區不是空的
         self.assertEqual(env.codex_dir_exists, [True] * 4)  # 審議期間檢視存在
+        self.assertEqual(env.codex_dir_listing, [[".git"]] * 4)  # 不落地:除 .git 指標檔外沒有任何追蹤檔
         self.assertIn("Codex 席以 PR head 唯讀檢視", out)
         ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out)], HEAD, {CHG: "中"})
         self.assertTrue(ok, msgs)
@@ -1085,7 +1099,7 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(len(self.git_calls(env, "remove")), 1)
 
     def test_view_failures_exit_2_without_leftover(self):
-        for mode in ("fetch", "add", "head"):
+        for mode in ("fetch", "add", "head", "extra"):
             with self.subTest(mode=mode):
                 env = self.big_env()
                 if mode == "head":
@@ -1147,17 +1161,37 @@ class CodexViewTest(unittest.TestCase):
         self.assertIn("core.hooksPath=/dev/null", add[0])
         self.assertEqual(add[0][add[0].index("-c") - 2:add[0].index("-c")], ["-C", str(local_review.REPO_ROOT)])
         self.assertIn("--detach", add[0])
+        self.assertIn("--no-checkout", add[0])
+        stat = [a for a in self.git_calls(env, "diff") if "--stat=200" in a]
+        self.assertEqual(len(stat), 1)
+        self.assertIn("--no-textconv", stat[0])
+        self.assertIn("--no-ext-diff", stat[0])
         self.assertNotIn("-b", add[0])
         self.assertEqual(add[0][-2:], [str(self.VIEW), HEAD])
 
-    def test_leftover_view_is_cleared_first(self):
+    def test_registered_leftover_view_is_removed_first(self):
         env = self.big_env()
         self.VIEW.mkdir(parents=True)
-        (self.VIEW / "舊檔.txt").write_text("x", encoding="utf-8")
+        (self.VIEW / ".git").write_text("gitdir: /dev/null\n", encoding="utf-8")
+        env.registered = [str(self.VIEW)]  # 上次中斷留下、仍登記的 worktree
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
         self.assertEqual(len(self.git_calls(env, "remove")), 2)  # 先清舊的,審完再清這次的
         self.assertFalse(self.VIEW.exists())
+
+    def test_unregistered_leftover_dir_is_refused_untouched(self):
+        env = self.big_env()
+        self.VIEW.mkdir(parents=True)
+        keep = self.VIEW / "使用者的檔.txt"
+        keep.write_text("不能刪", encoding="utf-8")
+        code, _, err = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 2)
+        self.assertIn("不是登記的 worktree", err)
+        self.assertEqual(keep.read_text(encoding="utf-8"), "不能刪")
+        self.assertEqual(sorted(p.name for p in self.VIEW.iterdir()), ["使用者的檔.txt"])
+        self.assertEqual(self.git_calls(env, "remove"), [])
+        self.assertEqual(self.git_calls(env, "fetch"), [])
+        self.assertEqual(env.codex_calls, [])
 
 
 if __name__ == "__main__":
