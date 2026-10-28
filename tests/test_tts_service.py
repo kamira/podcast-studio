@@ -523,3 +523,33 @@ def test_合成產物移入時audio目錄已被換成連結_不寫到外部(env,
     assert list(outside.iterdir()) == []
     moved = pj._top() / "projects" / "夜市的味道" / "audio-moved"
     assert [x.name for x in moved.iterdir()] == [f"{p.segments[0]['audio']['id']}.wav"]
+
+
+# ---------- DIR-5 修正 5:tmp/ 自受信根逐層開啟 ----------
+
+def test_worker暫存目錄開啟後被換成連結_不從外部讀取也不寫外部(env, tmp_path, monkeypatch):
+    p = make_project(("今天天氣真好。",))
+    pj.subdir("夜市的味道", "tmp", create=True)
+    outside = tmp_path / "outside-tmp"
+    outside.mkdir()
+    real = pj.open_subdir
+
+    def swapping(name, sub, **kw):
+        fd = real(name, sub, **kw)
+        d = pj._top() / "projects" / name / "tmp"
+        if sub == "tmp" and not d.is_symlink():
+            d.rename(d.with_name("tmp-moved"))
+            d.symlink_to(outside, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(pj, "open_subdir", swapping)
+    with pytest.raises(tts.SynthError):   # worker 依路徑寫入的輸出目錄不存在於連結目標,合成失敗
+        tts.synth(p, env.emit)
+    assert list(outside.iterdir()) == []
+    assert list((pj._top() / "projects" / "夜市的味道" / "tmp-moved").iterdir()) == []   # 輸出目錄以 fd 清除
+    assert p.segments[0]["audio"] is None
+
+
+def test_run_worker的tmp不以可替換路徑當起點():
+    import inspect
+    src = inspect.getsource(tts._run_worker)
+    assert "pj.open_subdir(project_name, \"tmp\"" in src and "tmp_dir.parent" not in src

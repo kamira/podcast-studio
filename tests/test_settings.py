@@ -1148,3 +1148,22 @@ def test_匯入來源在檢查後被換成連結_不讀外部內容(env, tmp_pat
     assert "外部:不該被讀到" not in json.dumps(got, ensure_ascii=False)
     assert got.get("_warnings")
     assert not db(env).exists()
+
+
+def test_save時config目錄在檢查後被換成連結_不建立也不寫外部(env, tmp_path, monkeypatch):
+    """DIR-5 修正 5:config/ 以 mkdir(dir_fd) + O_NOFOLLOW 開啟,第一次路徑檢查之後換成連結也拒絕。"""
+    outside = tmp_path / "outside-config"
+    outside.mkdir()
+    real = settings._db_path_error
+    calls = []
+
+    def swapping():
+        calls.append(1)
+        msg = real()
+        if len(calls) == 1 and not (env / "config").exists():
+            (env / "config").symlink_to(outside, target_is_directory=True)
+        return msg
+    monkeypatch.setattr(settings, "_db_path_error", swapping)
+    with pytest.raises(ValueError):
+        settings.save(changed())
+    assert list(outside.iterdir()) == []

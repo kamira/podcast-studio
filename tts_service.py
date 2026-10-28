@@ -250,7 +250,7 @@ def _write_jobs(tmp_fd: int, voice: Voice, jobs: list[dict]) -> int:
     return fd
 
 
-def _run_worker(voice: Voice, jobs: list[dict], tmp_dir: Path, on_done) -> None:
+def _run_worker(voice: Voice, jobs: list[dict], project_name: str, on_done) -> None:
     """啟動 worker 並逐行處理進度;on_done(job_id, out_fd) 在每句完成時呼叫(out_fd 為本次輸出目錄的 fd)。
 
     (DIR-5 修正 4)tmp/ 以 `project` 的目錄 fd 開啟:工作清單為匿名 fd(`--jobs /dev/fd/<n>`,pass_fds);
@@ -260,7 +260,10 @@ def _run_worker(voice: Voice, jobs: list[dict], tmp_dir: Path, on_done) -> None:
     lines: queue.Queue = queue.Queue()
     stderr_tail: collections.deque = collections.deque(maxlen=STDERR_KEEP)
     proc = jobs_fd = out_fd = out_name = None
-    tmp_fd = safe_fs.open_dir(tmp_dir.parent, [tmp_dir.name])
+    # (DIR-5 修正 5)tmp/ 自受信根(repo 根 → projects/ → 專案 → tmp)逐層 O_NOFOLLOW 開啟,不以可替換的路徑當起點;
+    # tmp_dir 路徑只交給外部 worker(`--out`,殘餘風險)
+    tmp_fd = pj.open_subdir(project_name, "tmp", create=True)
+    tmp_dir = pj._top() / pj.PROJECTS_NAME / project_name / "tmp"
     try:
         jobs_fd = _write_jobs(tmp_fd, voice, jobs)
         out_name = f"out-{secrets.token_hex(8)}"
@@ -373,8 +376,7 @@ def _synth_into(project, emit, voice, by_key, assign, adir: int, result: dict) -
         assign(keys[jid], _seconds_in(adir, name), cached=False)
 
     with heavy_lock.heavy_lock(on_wait=lambda: emit({"type": "waiting"})):
-        tmp_dir = pj.subdir(project.name, "tmp", create=True)
-        _run_worker(voice, jobs, tmp_dir, on_done)
+        _run_worker(voice, jobs, project.name, on_done)
     return result
 
 
