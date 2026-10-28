@@ -33,8 +33,9 @@
     當 CI 執行 review job
     那麼 review job 失敗並提示執行 scripts/local_review.py
 
-  場景: 否決席判 fail
-    假設 local-review 留言中 security 席判 fail
+  場景: 統整席判定需修正(CHG-20261028-02 / DIR-6:意見席判 fail 不再單獨擋下)
+    假設 local-review 意見留言中 security 席判 fail
+    而且 其後擁有者對目前 head 的 review-decision 判定為 fix
     當 CI 執行 review job
     那麼 review job 失敗
 

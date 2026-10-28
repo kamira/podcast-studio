@@ -2,7 +2,7 @@
 """
 review_gate.py — CI 審議閘 / review gate
 
-規則(CHG-20261022-03 T4、T10、T11;安全影響 (b)(c)(i)(n)):
+規則(CHG-20261022-03 T4、T10、T11;安全影響 (b)(c)(i)(n);第 3 條由 CHG-20261028-02 改寫):
 1. 只採信 `author_association == OWNER` 的留言;其他人貼的標記一律忽略。
 2. 需要審議 = PR 改到程式路徑(`*.py`、`*.sh`、`static/`、`.github/`、`scripts/`、`.ai-sdlc/`;
    `docs/`、`features/` 以外的位置,以及其中的 `*.py`、`*.sh`,一律從嚴視為程式路徑)
@@ -12,16 +12,21 @@ review_gate.py — CI 審議閘 / review gate
    或解析後不在 `docs/changes/` 底下,都視為讀不到。同一 CHG 既被改到又被
    commit 引用時取較嚴者(讀不到 > 高 > 中 > 低)。commit 引用但 `docs/changes/` 不存在的 CHG 不列入分級判定
    (該情況由 `plan_check_changed.py` 擋下)。訊息逐項寫出觸發原因;免審議時也如實寫出依據。
-3. 需要審議時,必須有擁有者留言含 `<!-- local-review CHG-YYYYMMDD-NN sha=<head> seats=<json> -->`,
-   且 sha 等於目前 head;標記中的 CHG 必須是該 PR 改到的 CHG 之一(PR 沒改到任何 CHG 時,
-   必須是 PR 內 commit 訊息引用的 CHG 之一);多則符合時取最後一則。同一則留言含兩個以上 local-review 標記視為可疑、忽略。
-   判決須含 DIR-1 六席;否決席(risk、security、compliance)任一 `fail`,或任何席位 `no-answer`
-   → 失敗。缺少審議留言時,訊息提示執行 `scripts/local_review.py` 的方式(T11)。
+3. 需要審議時(DIR-6:各席為意見,單一統整席判定):
+   (a) 意見留言:擁有者留言含 `<!-- local-review CHG-YYYYMMDD-NN sha=<head> seats=<json> -->`,sha 等於目前 head,
+       標記中的 CHG 必須是該 PR 改到的 CHG 之一(PR 沒改到任何 CHG 時,必須是 PR 內 commit 訊息引用的 CHG 之一),
+       且標記含 DIR-1 六席(值可為任何 VERDICTS,`fail`、`no-answer` 都不再單獨判不通過);多則符合時取最後一則。
+       同一則留言含兩個以上 local-review 標記視為可疑、忽略。缺少時提示執行 `scripts/local_review.py`(T11)。
+   (b) 判定留言:排在採用的意見留言之後、擁有者貼出、恰含一個
+       `<!-- review-decision CHG-… sha=<head> decision=merge|fix model=… effort=… -->`、sha 等於目前 head、
+       CHG 與採用的意見留言相同者;多則取最後一則。缺少 → 不通過並提示 `scripts/review_decision.py`;
+       `decision=fix` → 不通過;`decision=merge` → 通過。沒有回答的席位列為說明訊息。
 4. PR 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、
-   `scripts/local_review.py`、`scripts/deploy_local.sh`)時,另需擁有者留言
+   `scripts/local_review.py`、`scripts/review_decision.py`、`scripts/deploy_local.sh`)時,另需擁有者留言
    `<!-- infra-approved sha=<head> -->`(sha 必須是目前 head)。
 
-本閘只是「審議有做、否決席沒有 fail」的完整性檢查,不是授權;授權只有使用者核准 merge(安全影響 (n))。
+本閘只是「意見已跑、統整席對目前 head 判定 merge」的完整性檢查,不是授權;授權仍依 DIR-4 與使用者確認閘
+(安全影響 (n))。
 
 結構:純函式 `evaluate()`(測試全打這層,不碰網路)+ CLI 層(`urllib` 呼叫 GitHub REST)。
 CLI 的 token 取自環境變數 `GITHUB_TOKEN`;CHG 分級從 `--repo`(PR 資料的 checkout,只當資料)
@@ -50,6 +55,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 SEATS = ("risk", "impact", "drift", "compliance", "security", "consistency")
+# 原否決席;DIR-6(CHG-20261028-02)後已無否決效力,只供 local_review.seat_config() 檢查 glm4 不擔任這三席
 VETO_SEATS = ("risk", "security", "compliance")
 VERDICTS = ("pass", "fail", "concern", "no-answer")
 
@@ -57,7 +63,7 @@ EXEMPT_PREFIXES = ("docs/", "features/")
 PROGRAM_PREFIXES = ("static/", ".github/", "scripts/", ".ai-sdlc/")
 PROGRAM_SUFFIXES = (".py", ".sh")
 INFRA_PREFIXES = (".github/", "scripts/ci/", "tests/ci/", ".ai-sdlc/")
-INFRA_FILES = ("scripts/local_review.py", "scripts/deploy_local.sh")
+INFRA_FILES = ("scripts/local_review.py", "scripts/review_decision.py", "scripts/deploy_local.sh")
 
 CHG_FILE_RE = re.compile(r"^docs/changes/CHG-\d{8}-\d{2}\.md$")
 CHG_ID_RE = re.compile(r"CHG-\d{8}-\d{2}")
@@ -66,6 +72,10 @@ LOCAL_REVIEW_RE = re.compile(
     r"<!--\s*local-review\s+(CHG-\d{8}-\d{2})\s+sha=([0-9a-f]{40})\s+seats=(\{.*?\})\s*-->",
     re.S)
 LOCAL_REVIEW_ANY_RE = re.compile(r"<!--\s*local-review\b")
+DECISION_RE = re.compile(
+    r"<!--\s*review-decision\s+(CHG-\d{8}-\d{2})\s+sha=([0-9a-f]{40})\s+decision=(merge|fix)"
+    r"\s+model=([A-Za-z0-9._:-]{1,64})\s+effort=(low|medium|high|xhigh|max)\s*-->")
+DECISION_ANY_RE = re.compile(r"<!--\s*review-decision\b")
 INFRA_RE = re.compile(r"<!--\s*infra-approved\s+sha=([0-9a-f]{40})\s*-->")
 
 
@@ -118,6 +128,17 @@ def parse_local_review(body: str) -> Optional[dict]:
         if not isinstance(info, dict) or info.get("verdict") not in VERDICTS:
             return None
     return {"chg": m.group(1), "sha": m.group(2), "seats": seats}
+
+
+def parse_decision(body: str) -> Optional[dict]:
+    """解析單則留言的 review-decision 標記(DIR-6);沒有、超過一個或格式不合回傳 None。"""
+    if len(DECISION_ANY_RE.findall(body or "")) != 1:
+        return None
+    m = DECISION_RE.search(body)
+    if not m:
+        return None
+    return {"chg": m.group(1), "sha": m.group(2), "decision": m.group(3), "model": m.group(4),
+            "effort": m.group(5)}
 
 
 def has_infra_approval(comments: Iterable[dict], head_sha: str) -> Tuple[bool, List[str]]:
@@ -181,10 +202,17 @@ def read_chg_risk(repo: Path, rel: str) -> Tuple[bool, Optional[str]]:
 
 
 def review_command(pr: Optional[int] = None) -> str:
-    """缺審議留言時提示的執行方式(T11)。"""
-    return ("請執行 `python3 scripts/local_review.py --pr {}`"
-            "(暫停 27B 期間加 `--codex-seats risk,security,compliance`)").format(
-                pr if pr is not None else "<編號>")
+    """缺審議留言時提示的執行方式(T11;CHG-20261028-02 補統整步驟)。"""
+    return ("請執行 `python3 scripts/local_review.py --pr {0}`"
+            "(暫停 27B 期間加 `--codex-seats risk,security,compliance`),"
+            "再派統整席並以 `python3 scripts/review_decision.py --pr {0} --decision-file <JSON> "
+            "--model <實際模型> --effort medium` 貼出判定(DIR-6)").format(pr if pr is not None else "<編號>")
+
+
+def decision_command(pr: Optional[int] = None) -> str:
+    """缺判定留言時提示的執行方式(DIR-6)。"""
+    return ("請派統整席(獨立 Claude subagent)寫判定 JSON,再執行 `python3 scripts/review_decision.py --pr {} "
+            "--decision-file <JSON> --model <實際模型> --effort medium`").format(pr if pr is not None else "<編號>")
 
 
 def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
@@ -263,10 +291,10 @@ def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
     for r in reasons:
         msgs.append("需要審議:" + r)
 
-    # 3. 找對應目前 head、CHG 相符的擁有者 local-review 留言(取最後一則)
+    # 3a. 意見留言:擁有者、sha = head、CHG 允許、六席都在的最後一則(DIR-6)
     allowed = allowed_chgs(files, commit_chgs)
-    chosen = None
-    for c in comments:
+    chosen, chosen_at = None, -1
+    for i, c in enumerate(comments):
         body = c.get("body") or ""
         if not LOCAL_REVIEW_ANY_RE.search(body):
             continue
@@ -284,28 +312,56 @@ def evaluate(files: Iterable[str], comments: Iterable[dict], head_sha: str,
             msgs.append("忽略 local-review 留言:{} 不是本 PR 改到或 commit 引用的 CHG({})".format(
                 parsed["chg"], "、".join(allowed) or "無"))
             continue
-        chosen = parsed
+        missing = [s for s in SEATS if s not in parsed["seats"]]
+        if missing:
+            msgs.append("忽略 local-review 留言:意見標記缺少席位 {}".format(", ".join(missing)))
+            continue
+        chosen, chosen_at = parsed, i
     if chosen is None:
-        msgs.append("缺少擁有者對應目前 head({})的 local-review 審議留言;{}".format(
+        msgs.append("缺少擁有者對應目前 head({})、含六席的 local-review 意見留言;{}".format(
             head_sha[:12], review_command(pr)))
         return False, msgs
 
     seats = chosen["seats"]
-    msgs.append("採用 {} 的審議留言(sha {})".format(chosen["chg"], head_sha[:12]))
-    missing = [s for s in SEATS if s not in seats]
-    if missing:
-        ok = False
-        msgs.append("審議缺少席位:{}".format(", ".join(missing)))
-    for name in sorted(seats):
-        verdict = seats[name]["verdict"]
-        if verdict == "no-answer":
-            ok = False
-            msgs.append("{} 席沒有回答".format(name))
-        elif verdict == "fail" and name in VETO_SEATS:
-            ok = False
-            msgs.append("否決席 {} 判 fail".format(name))
+    msgs.append("採用 {} 的意見留言(sha {});各席為意見,不具否決效力(DIR-6)".format(chosen["chg"], head_sha[:12]))
+    unanswered = [s for s in SEATS if seats[s]["verdict"] == "no-answer"]
+    if unanswered:
+        msgs.append("未回答的意見席:{}(由統整席補看)".format(", ".join(unanswered)))
+
+    # 3b. 判定留言:排在採用的意見留言之後、擁有者、sha = head、CHG 相同的最後一則
+    decided = None
+    for i, c in enumerate(comments):
+        body = c.get("body") or ""
+        if not DECISION_ANY_RE.search(body):
+            continue
+        if i <= chosen_at:
+            msgs.append("忽略 review-decision 留言:排在採用的意見留言之前")
+            continue
+        if not _is_owner(c):
+            msgs.append("忽略非擁有者({})的 review-decision 留言".format(c.get("author_association")))
+            continue
+        parsed = parse_decision(body)
+        if parsed is None:
+            msgs.append("忽略格式不合格的 review-decision 留言")
+            continue
+        if parsed["sha"] != head_sha:
+            msgs.append("忽略 review-decision 留言:sha {} 不是目前 head".format(parsed["sha"][:12]))
+            continue
+        if parsed["chg"] != chosen["chg"]:
+            msgs.append("忽略 review-decision 留言:{} 與採用的意見留言 {} 不同".format(parsed["chg"], chosen["chg"]))
+            continue
+        decided = parsed
+    if decided is None:
+        msgs.append("缺少擁有者在意見留言之後、對應目前 head({})的統整判定留言;{}".format(
+            head_sha[:12], decision_command(pr)))
+        return False, msgs
+    msgs.append("採用統整判定:decision={}(統整席 {},effort {})".format(
+        decided["decision"], decided["model"], decided["effort"]))
+    if decided["decision"] != "merge":
+        msgs.append("統整席判定為需修正(fix):依判定留言的修法清單修正後,重跑意見與統整(DIR-6 第 7 條)")
+        return False, msgs
     if ok:
-        msgs.append("審議閘通過(提醒:這只是完整性檢查,merge 仍需使用者核准)")
+        msgs.append("審議閘通過(統整判定 merge;提醒:這只是完整性檢查,merge 條件依 DIR-4)")
     return ok, msgs
 
 
@@ -372,7 +428,7 @@ def collect(api: str, slug: str, pr: int, token: str, repo: Path):
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="CI 審議閘:驗證 PR 的本機審議留言與 infra 核准")
+    ap = argparse.ArgumentParser(description="CI 審議閘:驗證 PR 的意見留言、統整判定與 infra 核准")
     ap.add_argument("--repo", required=True, type=Path, help="PR head 的 checkout(只當資料讀 CHG 分級)")
     ap.add_argument("--pr", required=True, type=int, help="PR 編號")
     ap.add_argument("--github-repo", default=os.environ.get("GITHUB_REPOSITORY", ""),

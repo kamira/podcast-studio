@@ -39,6 +39,17 @@ def owner(body):
     return {"author_association": "OWNER", "body": body}
 
 
+def dec(kind="merge", sha=HEAD, chg="CHG-20261022-03", model="claude-opus-5-5", effort="medium"):
+    """統整席判定留言(DIR-6,CHG-20261028-02)。"""
+    return "統整判定\n<!-- review-decision {} sha={} decision={} model={} effort={} -->".format(
+        chg, sha, kind, model, effort)
+
+
+def reviewed(seats=None, chg="CHG-20261022-03", kind="merge"):
+    """擁有者的六席意見留言 + 其後的統整判定。"""
+    return [owner(marker(seats, chg=chg)), owner(dec(kind, chg=chg))]
+
+
 def other(body, assoc="NONE"):
     return {"author_association": assoc, "body": body}
 
@@ -60,7 +71,7 @@ class EvaluateTest(unittest.TestCase):
         self.assertTrue(any("需使用者核准" in m for m in msgs))
 
     def test_infra_path_with_owner_head_approval_passes(self):
-        self.check(["scripts/ci/review_gate.py"], [owner(marker()), owner(infra())])
+        self.check(["scripts/ci/review_gate.py"], reviewed() + [owner(infra())])
 
     def test_infra_approval_with_old_sha_is_invalid(self):
         self.check(["scripts/ci/review_gate.py"], [owner(marker()), owner(infra(OLD))], expect=False)
@@ -96,7 +107,7 @@ class EvaluateTest(unittest.TestCase):
         self.check([CHG], [], {CHG: None}, expect=False)
 
     def test_medium_risk_with_owner_comment_passes(self):
-        self.check([CHG], [owner(marker())], {CHG: "中"})
+        self.check([CHG], reviewed(), {CHG: "中"})
 
     def test_non_owner_valid_marker_is_ignored(self):
         msgs = self.check(["podcast_studio.py"], [other(marker(), "CONTRIBUTOR")], expect=False)
@@ -106,53 +117,102 @@ class EvaluateTest(unittest.TestCase):
         self.check(["podcast_studio.py"], [owner(marker(sha=OLD))], expect=False)
 
     def test_multiple_comments_use_the_one_matching_head(self):
-        bad_old = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        bad_old["security"]["verdict"] = "fail"
-        # 舊 sha 的 fail 留言不影響;對應 head 的 pass 留言被採用
-        self.check(["podcast_studio.py"], [owner(marker(bad_old, sha=OLD)), owner(marker())])
-        # 反過來:對應 head 的是 fail → 失敗(即使有舊 sha 的 pass)
-        self.check(["podcast_studio.py"], [owner(marker()), owner(marker(bad_old, sha=OLD)),
-                                           owner(marker(bad_old))], expect=False)
+        # 舊 sha 的意見留言不被採用;對應 head 的意見留言 + 其後判定被採用
+        self.check(["podcast_studio.py"], [owner(marker(sha=OLD)), owner(marker()), owner(dec())])
+        # 只有舊 sha 的意見留言 → 不通過(即使有判定)
+        self.check(["podcast_studio.py"], [owner(marker(sha=OLD)), owner(dec())], expect=False)
 
-    def test_security_fail_fails(self):
+    # --- CHG-20261028-02 T3:意見留言 + 統整判定(DIR-6)
+    @staticmethod
+    def seats_with(**verdicts):
         seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        seats["security"]["verdict"] = "fail"
-        msgs = self.check(["podcast_studio.py"], [owner(marker(seats))], expect=False)
-        self.assertTrue(any("security" in m for m in msgs))
+        for k, v in verdicts.items():
+            seats[k]["verdict"] = v
+        return seats
+
+    def test_security_fail_with_merge_decision_passes(self):
+        msgs = self.check(["podcast_studio.py"], reviewed(self.seats_with(security="fail")))
+        self.assertTrue(any("decision=merge" in m for m in msgs), msgs)
+        self.assertFalse(any("否決席" in m for m in msgs), msgs)
 
     def test_non_veto_fail_and_concern_pass(self):
-        seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        seats["impact"]["verdict"] = "fail"
-        seats["risk"]["verdict"] = "concern"
-        self.check(["podcast_studio.py"], [owner(marker(seats))])
+        self.check(["podcast_studio.py"], reviewed(self.seats_with(impact="fail", risk="concern")))
 
-    def test_no_answer_fails(self):
-        seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS}
-        seats["consistency"]["verdict"] = "no-answer"
-        self.check(["podcast_studio.py"], [owner(marker(seats))], expect=False)
+    def test_no_answer_with_merge_passes_and_lists_unanswered(self):
+        msgs = self.check(["podcast_studio.py"],
+                          reviewed(self.seats_with(consistency="no-answer", risk="no-answer")))
+        self.assertTrue(any("未回答" in m and "risk" in m and "consistency" in m for m in msgs), msgs)
 
     def test_missing_seat_fails(self):
         seats = {s: {"model": "m", "verdict": "pass"} for s in review_gate.SEATS if s != "compliance"}
-        self.check(["podcast_studio.py"], [owner(marker(seats))], expect=False)
+        msgs = self.check(["podcast_studio.py"], reviewed(seats), expect=False)
+        self.assertTrue(any("缺少席位" in m and "compliance" in m for m in msgs), msgs)
+
+    def test_opinion_without_decision_fails_with_hint(self):
+        msgs = self.check(["podcast_studio.py"], [owner(marker())], expect=False)
+        hint = [m for m in msgs if "統整判定留言" in m]
+        self.assertEqual(len(hint), 1, msgs)
+        self.assertIn("scripts/review_decision.py", hint[0])
+
+    def test_fix_decision_fails(self):
+        msgs = self.check(["podcast_studio.py"], reviewed(kind="fix"), expect=False)
+        self.assertTrue(any("需修正" in m for m in msgs), msgs)
+
+    def test_ignored_decisions(self):
+        cases = {
+            "sha 不是 head": ([owner(marker()), owner(dec(sha=OLD))], "不是目前 head"),
+            "非擁有者": ([owner(marker()), other(dec(), "COLLABORATOR")], "非擁有者"),
+            "一則兩個標記": ([owner(marker()), owner(dec() + "\n" + dec())], "格式不合格"),
+            "CHG 與意見不同": ([owner(marker()), owner(dec(chg="CHG-20261022-01"))], "不同"),
+            "排在意見之前": ([owner(dec()), owner(marker())], "之前"),
+            "model 含非法字元": ([owner(marker()), owner(dec(model="a b"))], "格式不合格"),
+            "effort 不在白名單": ([owner(marker()), owner(dec(effort="extreme"))], "格式不合格"),
+        }
+        for name, (comments, word) in cases.items():
+            with self.subTest(name=name):
+                msgs = self.check(["podcast_studio.py"], comments, expect=False)
+                self.assertTrue(any("統整判定留言" in m for m in msgs), msgs)
+                self.assertTrue(any("review-decision" in m and word in m for m in msgs), msgs)
+
+    def test_last_decision_wins(self):
+        self.check(["podcast_studio.py"], [owner(marker()), owner(dec("fix")), owner(dec("merge"))])
+        self.check(["podcast_studio.py"], [owner(marker()), owner(dec("merge")), owner(dec("fix"))], expect=False)
+
+    def test_decision_must_follow_adopted_opinion(self):
+        # 判定之後又貼了新的意見留言(同 head):採用新的意見留言,舊判定排在其前 → 不通過
+        self.check(["podcast_studio.py"], [owner(marker()), owner(dec()), owner(marker())], expect=False)
 
     def test_comment_with_two_markers_is_ignored(self):
-        self.check(["podcast_studio.py"], [owner(marker() + "\n" + marker())], expect=False)
+        self.check(["podcast_studio.py"], [owner(marker() + "\n" + marker()), owner(dec())], expect=False)
+
+    def test_review_decision_script_is_infra(self):
+        msgs = self.check(["scripts/review_decision.py"], reviewed(), expect=False)
+        self.assertTrue(any("需使用者核准" in m and "scripts/review_decision.py" in m for m in msgs), msgs)
+        self.check(["scripts/review_decision.py"], reviewed() + [owner(infra())])
+
+    def test_parse_decision(self):
+        self.assertEqual(review_gate.parse_decision(dec()),
+                         {"chg": "CHG-20261022-03", "sha": HEAD, "decision": "merge",
+                          "model": "claude-opus-5-5", "effort": "medium"})
+        self.assertIsNone(review_gate.parse_decision("沒有標記"))
+        self.assertIsNone(review_gate.parse_decision(dec() + dec()))
+        self.assertIsNone(review_gate.parse_decision(dec(kind="maybe")))
 
     # --- 標記的 CHG 編號比對
     def test_marker_chg_must_be_changed_chg(self):
         other_chg = "docs/changes/CHG-20261022-01.md"
         # PR 改到 CHG-01,標記寫 CHG-03(即使 commit 引用 CHG-03)→ 失敗
-        msgs = self.check(["podcast_studio.py", other_chg], [owner(marker())], {other_chg: "中"},
+        msgs = self.check(["podcast_studio.py", other_chg], reviewed(), {other_chg: "中"},
                           expect=False)
         self.assertTrue(any("不是本 PR 改到" in m for m in msgs))
         # 標記寫 CHG-01 → 通過
-        self.check(["podcast_studio.py", other_chg], [owner(marker(chg="CHG-20261022-01"))],
+        self.check(["podcast_studio.py", other_chg], reviewed(chg="CHG-20261022-01"),
                    {other_chg: "中"})
 
     def test_marker_chg_must_be_cited_when_no_chg_changed(self):
-        self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=["CHG-20261022-01"], expect=False)
-        self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=[], expect=False)
-        self.check(["podcast_studio.py"], [owner(marker())], commit_chgs=["CHG-20261022-01", "CHG-20261022-03"])
+        self.check(["podcast_studio.py"], reviewed(), commit_chgs=["CHG-20261022-01"], expect=False)
+        self.check(["podcast_studio.py"], reviewed(), commit_chgs=[], expect=False)
+        self.check(["podcast_studio.py"], reviewed(), commit_chgs=["CHG-20261022-01", "CHG-20261022-03"])
 
     # --- T10:依 commit 引用的 CHG 判分級
     def check2(self, files, comments, commit_chgs, commit_risks, expect, risks=None):
@@ -167,7 +227,7 @@ class EvaluateTest(unittest.TestCase):
         self.assertFalse(any("分級為低" in m for m in msgs), msgs)
 
     def test_docs_only_citing_medium_risk_chg_with_owner_comment_passes(self):
-        self.check2(["docs/acceptance/ACC-20261023-01.md"], [owner(marker())], ["CHG-20261022-03"],
+        self.check2(["docs/acceptance/ACC-20261023-01.md"], reviewed(), ["CHG-20261022-03"],
                     {"CHG-20261022-03": "中"}, expect=True)
 
     def test_docs_only_citing_missing_chg_does_not_trigger(self):
@@ -574,10 +634,13 @@ class LocalReviewTest(unittest.TestCase):
         # 只有一個 HTML 註解(標記本身);模型輸出與 PR 標題中的 <!-- --> 被去除
         self.assertEqual(out.count("<!--"), 1)
         self.assertEqual(out.count("-->"), 1)
-        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out)], HEAD, {CHG: "中"})
+        self.assertIsNotNone(review_gate.parse_local_review(out))
+        self.assertIsNone(review_gate.parse_decision(out))  # 意見留言不含判定標記
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
         self.assertTrue(ok, msgs)
         # infra-approved 字樣不能被模型注入成有效核准
-        ok, _ = review_gate.evaluate(["scripts/ci/x.py"], [owner(out)], HEAD, {}, ["CHG-20261022-03"])
+        ok, _ = review_gate.evaluate(["scripts/ci/x.py"], [owner(out), owner(dec())], HEAD, {},
+                                     ["CHG-20261022-03"])
         self.assertFalse(ok)
         # 單席細節 ≤ 4000 字
         for block in out.split("#### ")[1:]:
@@ -742,7 +805,7 @@ class LocalReviewTest(unittest.TestCase):
             self.assertEqual(parsed["seats"][s]["verdict"], "concern")
         self.assertIn("[verdict] security | codex-cli 0.163.0 | concern", out)
         self.assertIn("security / compliance 由 Codex(雲端,read-only sandbox)擔任,使用者 2026-10-23 決定", out)
-        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out)], HEAD, {CHG: "中"})
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
         self.assertTrue(ok, msgs)
 
     def test_codex_seats_none_uses_ollama_only(self):
@@ -1159,7 +1222,7 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(env.codex_dir_exists, [True] * 4)  # 審議期間檢視存在
         self.assertEqual(env.codex_dir_listing, [[".git"]] * 4)  # 不落地:除 .git 指標檔外沒有任何追蹤檔
         self.assertIn("Codex 席以 PR head 唯讀檢視", out)
-        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out)], HEAD, {CHG: "中"})
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
         self.assertTrue(ok, msgs)
 
     def test_ollama_seats_still_truncated(self):
