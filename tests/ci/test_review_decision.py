@@ -85,11 +85,20 @@ class FakeEnv:
 class ReviewDecisionTest(unittest.TestCase):
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # RS-17:判定 JSON 必須在 outputs/.tmp/review_decision/ 之下;測試在其下開暫存子目錄,結束時只刪自己建立的
+        base = ROOT / review_decision.DECISION_DIR
+        self.made = [d for d in (ROOT / "outputs", ROOT / "outputs/.tmp", base) if not d.exists()]
+        base.mkdir(parents=True, exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(dir=str(base))
         self.dir = Path(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()
+        for d in reversed(self.made):
+            try:
+                d.rmdir()  # 非遞迴:只刪本測試建立且已空的目錄
+            except OSError:
+                pass
 
     def write(self, obj):
         p = self.dir / "pr-9-{}.json".format(HEAD[:12])
@@ -264,6 +273,29 @@ class ReviewDecisionTest(unittest.TestCase):
         code, _, _ = self.run_main(env, path=self.dir / "不存在.json")
         self.assertEqual(code, 2)
         self.assertEqual(env.posted, [])
+
+    # RS-17:--decision-file 限定在 outputs/.tmp/review_decision/ 之下
+    def test_decision_file_outside_dir_exit_2(self):
+        with tempfile.TemporaryDirectory() as other:
+            outside = Path(other) / "pr-9.json"
+            outside.write_text(json.dumps(decision()), encoding="utf-8")
+            env = FakeEnv()
+            code, _, err = self.run_main(env, path=outside)
+            self.assertEqual(code, 2)
+            self.assertIn("outputs/.tmp/review_decision", err)
+            self.assertEqual(env.calls, [])
+            # 目錄內的符號連結指向目錄外 → 解析後不在目錄內,同樣拒絕
+            link = self.dir / "link.json"
+            link.symlink_to(outside)
+            env = FakeEnv()
+            code, _, _ = self.run_main(env, path=link)
+            self.assertEqual(code, 2)
+            self.assertEqual(env.calls, [])
+        # 以 .. 跳出目錄也拒絕
+        env = FakeEnv()
+        code, _, _ = self.run_main(env, path=self.dir / ".." / ".." / "x.json")
+        self.assertEqual(code, 2)
+        self.assertEqual(env.calls, [])
 
     # (7) fork、非擁有者、不在 main
     def test_refuse_fork_non_owner_not_main(self):

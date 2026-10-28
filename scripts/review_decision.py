@@ -11,6 +11,8 @@ CHG-20261028-02:審議席(DIR-1 六席)只提供意見;由派發者派一個獨�
 
 安全約束(CHG-20261028-02 安全影響 (b)(c)(d)(e)):
 - 不呼叫任何模型;只讀判定 JSON,不寫、不刪任何檔案(JSON 由派發者於 merge 後自行清理)。
+- `--decision-file` 解析(resolve,含符號連結)後必須在 `outputs/.tmp/review_decision/` 之下,否則 exit 2
+  (CHG-20261028-02 DIR-5 統整報告 RS-17)。
 - 標記的 `model`、`effort` 只取自參數(派發者填入實際模型名,DIR-1 第 4 條),不取自 JSON;以白名單字元驗證。
 - 只處理本 repo 分支、且作者為 repo 擁有者的 PR;fork 或非擁有者 PR、不在 main 執行,一律 exit 1。
 - 貼出前確認:目前 head 有擁有者的六席意見留言(`local-review` 標記)、JSON 的 `head_sha` 等於目前 head、
@@ -294,6 +296,10 @@ def main(argv=None) -> int:
         return 2
     if args.effort not in EFFORTS:
         print("錯誤:--effort 必須是 {}".format("、".join(EFFORTS)), file=sys.stderr)
+        return 2
+    allowed = (REPO_ROOT / DECISION_DIR).resolve()
+    if allowed not in Path(args.decision_file).resolve().parents:
+        print("錯誤:--decision-file 必須在 {}/ 之下(解析符號連結後)".format(DECISION_DIR), file=sys.stderr)
         return 2
 
     try:
