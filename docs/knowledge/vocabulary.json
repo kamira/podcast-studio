@@ -98,5 +98,14 @@
     "merge",
     "push",
     "commit"
+  ],
+  "security": [
+    "安全",
+    "資安",
+    "威脅模型",
+    "threat model",
+    "符號連結",
+    "symlink",
+    "toctou"
   ]
 }
