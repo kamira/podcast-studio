@@ -89,11 +89,20 @@
       if (r.ok && r.data && r.data.project) this.set(r.data);
     },
 
-    // 修改類請求:成功時以回傳的 view 更新畫面;回傳 Studio.api 的結果
+    // 修改類請求:成功時以回傳的 view 更新畫面;回傳 Studio.api 的結果。
+    // (DIR-6 修正 2)送出前記下專案名稱;回應回來時已切換到別的專案就丟棄、不 set,
+    // 回傳 ok=false、stale=true 的結果(附說明),呼叫端因此不會顯示「已存檔」等成功訊息。
     async mutate(method, sub, body) {
+      const name = this.name;
       const r = await S.api(method, this.url(sub), body);
+      if (this.name !== name) return this.staleResult(name);
       if (r.ok && r.data && r.data.project) this.set(r.data);
       return r;
+    },
+
+    staleResult(name) {
+      return { ok: false, stale: true, status: 0,
+               data: { error: "專案已切換;原專案「" + name + "」的修改已送出,回應不套用到目前畫面" } };
     },
 
     patchSegment(id, body) {
@@ -442,10 +451,16 @@
 
     async generate() {
       const topic = $("script-topic").value.trim();
+      const name = Store.name;   // (DIR-6 修正 2)按下時的專案;完成時已切換就不填入
       setText("script-status", "AI 寫稿中…");
       $("script-ai").disabled = true;
       const r = await Flows.runStep("script", topic, "text", function (t) { setText("script-status", t); });
       $("script-ai").disabled = false;
+      if (Store.name !== name) {
+        setText("script-status", "文稿已產生,但專案已切換,未填入");
+        S.toast("AI 文稿已產生,但專案已切換,未填入目前專案", true);
+        return;
+      }
       if (r.error) {
         const msg = r.error === "seed" ? "請先填寫主題" : r.error;
         setText("script-status", msg);
@@ -525,10 +540,18 @@
 
     async generate() {
       const title = $("cover-title").value.trim();
+      const name = Store.name;   // (DIR-6 修正 2)按下時的專案;完成時已切換就不匯入
+      const switched = function () {
+        if (Store.name === name) return false;
+        setText("cover-status", "封面已產生,但專案已切換,未加入");
+        S.toast("封面已產生,但專案已切換,未加入", true);
+        return true;
+      };
       setText("cover-status", "AI 產生封面中…");
       $("cover-ai").disabled = true;
       try {
         const r = await Flows.runStep("cover", title, "image", function (t) { setText("cover-status", t); });
+        if (switched()) return;
         if (r.error) {
           const msg = r.error === "seed" ? "請先填寫標題" : r.error;
           setText("cover-status", msg);
@@ -536,11 +559,13 @@
           return;
         }
         const up = await importOutput(r.value, "封面.png");
+        if (switched()) return;
         if (!up) {
           setText("cover-status", "封面已產生,但無法加入專案");
           return;
         }
-        const ok = await addImage({ file_id: up.file_id, label: "封面:" + (title || "未命名") });
+        const ok = await addImage({ file_id: up.file_id, label: "封面:" + (title || "未命名") }, name);
+        if (switched()) return;
         setText("cover-status", ok ? "封面已加入畫面軌" : "封面無法加入畫面軌");
       } finally {
         $("cover-ai").disabled = false;
@@ -548,9 +573,10 @@
     },
   };
 
-  // 把圖片放上畫面軌:body 為 {asset} 或 {file_id, label},可帶 start
-  async function addImage(body) {
-    if (!Store.name) return false;
+  // 把圖片放上畫面軌:body 為 {asset} 或 {file_id, label},可帶 start;
+  // expect:只允許加到這個專案(DIR-6 修正 2,AI 封面完成時用;目前專案不同就不送出)
+  async function addImage(body, expect) {
+    if (!Store.name || (expect !== undefined && Store.name !== expect)) return false;
     const r = await Store.mutate("POST", "/images", body);
     if (!r.ok) {
       S.toast("無法加入畫面軌:" + S.errorText(r), true);
@@ -813,6 +839,7 @@
   S.Picker = Picker;
   S.Flows = Flows;
   S.ScriptPanel = ScriptPanel;
+  S.CoverPanel = CoverPanel;
   S.Voice = Voice;
   S.Exporter = Exporter;
   S.addImage = addImage;

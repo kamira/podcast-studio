@@ -525,6 +525,57 @@ JS_FIND_TITLE_NODE = """() => {
 }"""
 
 
+# DIR-6 修正 2:延遲回應期間切換專案(mutate、AI 封面、AI 寫稿)。在頁面內以替身延遲 / 取代
+# Studio.api 與 Studio.Flows.runStep,回傳各情境的觀察結果。
+JS_STALE_SWITCH = """
+async ([a, b]) => {
+  const S = window.Studio, Store = S.Store, out = {};
+  const realApi = S.api, realRun = S.Flows.runStep;
+  const made = await realApi("POST", "/api/projects", { name: b, script: "切換測試的第一句。" });
+  out.created = made.ok;
+  try {
+    // (1) mutate:A 的 PATCH 回應延遲到切換成 B 之後才回來
+    await Store.open(a);
+    const sid = Store.view.project.segments[0].id;
+    let release;
+    const gate = new Promise(function (r) { release = r; });
+    S.api = async function (method, url, body) {
+      if (method === "PATCH") await gate;
+      return realApi(method, url, body);
+    };
+    const pending = Store.patchSegment(sid, { pause_after: 2.0 });
+    await Store.open(b);
+    release();
+    const r = await pending;
+    S.api = realApi;
+    out.mutate = { stale: r.stale === true, ok: r.ok, name: Store.name,
+                   viewName: Store.view && Store.view.project.name };
+    // (2) AI 封面:產生期間切換專案,完成時不匯入
+    await Store.open(a);
+    const imagesA = Store.view.project.images.length;
+    S.Flows.runStep = async function () { await Store.open(b); return { value: "outputs/不存在.png" }; };
+    await S.CoverPanel.generate();
+    out.cover = { status: document.getElementById("cover-status").textContent, name: Store.name,
+                  imagesB: Store.view.project.images.length };
+    await Store.open(a);
+    out.cover.imagesA = Store.view.project.images.length;
+    out.cover.imagesABefore = imagesA;
+    // (3) AI 寫稿:產生期間切換專案,完成時不填入
+    const before = document.getElementById("script-text").value;
+    S.Flows.runStep = async function () { await Store.open(b); return { value: "不該填入的文稿" }; };
+    await S.ScriptPanel.generate();
+    out.script = { status: document.getElementById("script-status").textContent,
+                   filled: document.getElementById("script-text").value === "不該填入的文稿",
+                   unchanged: document.getElementById("script-text").value === before };
+  } finally {
+    S.api = realApi;
+    S.Flows.runStep = realRun;
+  }
+  return out;
+}
+"""
+
+
 def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems: list) -> None:
     from playwright.sync_api import expect
 
@@ -950,6 +1001,20 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         check(not any("封面" in s for s in got), f"精靈步驟不應含「封面」:{got}")
         check(any("剪輯" in s for s in got), f"精靈步驟應仍含「剪輯」:{got}")
         expect(page.locator("#wizard-error")).to_be_hidden()
+
+        begin("延遲回應期間切換專案:mutate、AI 封面、AI 寫稿的結果不套到新專案(DIR-6 修正 2)")
+        got = page.evaluate(JS_STALE_SWITCH, [PROJECT_NAME, "切換測試"])
+        check(got.get("created") is True, f"應能建立第二個專案:{got}")
+        m = got["mutate"]
+        check(m["stale"] and not m["ok"], f"切換後晚到的修改回應應標為 stale、不算成功:{m}")
+        check(m["name"] == "切換測試" and m["viewName"] == "切換測試", f"畫面應仍是新專案:{m}")
+        cov = got["cover"]
+        check(cov["status"] == "封面已產生,但專案已切換,未加入", f"封面狀態文字不符:{cov}")
+        check(cov["imagesB"] == 0 and cov["imagesA"] == cov["imagesABefore"], f"封面不應加入任何專案:{cov}")
+        sc = got["script"]
+        check(sc["status"] == "文稿已產生,但專案已切換,未填入" and not sc["filled"], f"文稿不應填入:{sc}")
+        b_disk = json.loads((root / "projects" / "切換測試" / "project.json").read_text(encoding="utf-8"))
+        check(b_disk["images"] == [] and b_disk["script"] == "切換測試的第一句。", "新專案的磁碟內容不應被改動")
     except StepFailed as e:
         raise StepFailed(f"步驟「{step['name']}」:{e}") from None
     except AssertionError as e:
