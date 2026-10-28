@@ -4,6 +4,7 @@
 > 2026-10-23 依 CHG-20261022-03 補入 CI/CD 相關目錄(以 repo 追蹤檔為準)。
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:新增網頁伺服器、節點引擎、設定模組、`static/`、`config/`、`workflows/`、`tests/`;移除 Gradio 版 `podcast_studio.py`(以 T1~T13 合併後的 main 為準)。
 > 2026-10-26 依 CHG-20261026-01 結構文件更新:`workflows/` 只追蹤 `default.json`,使用者另存的檔案被 `.gitignore` 忽略。
+> 2026-10-28 依 CHG-20261028-01 結構文件更新:新增 `.review/`(本機審議 Codex 席的 PR head 唯讀檢視,ignored);`scripts/local_review.py` 限制改記。
 
 ## 樹狀
 
@@ -79,6 +80,7 @@ podcast-studio/
 │   └── worktrees/             # agent worktree(ignored,CHG-20261022-03 T9)
 ├── .gitignore
 ├── outputs/                   # 產出物(ignored);uploads/ 為上傳檔,.heavy.lock 為重型鎖,ui_check/ 為 UI 檢查截圖
+├── .review/                   # 本機審議 Codex 席的 PR head 唯讀檢視(ignored,審完即移除;CHG-20261028-01)
 └── tools/BreezyVoice/         # 第三方 repo + .venv(ignored,由腳本重建)
 ```
 
@@ -97,9 +99,10 @@ podcast-studio/
 | `tools/` | 第三方工具與 venv(約 1.9 GB) | `.gitignore`;無 `.git` | 〔觀察〕 |
 | `.claude/` | Claude 桌面 app 設定(追蹤檔只有 `launch.json`) | `launch.json` 用 `uv` 絕對路徑,參數 `run --script studio_server.py`(不帶設定檔路徑);`.claude/worktrees/` 是 Claude 桌面 app 為派發施工建立的 agent worktree,列入 `.gitignore`,避免主工作副本被判為不乾淨而讓 `scripts/deploy_local.sh` 中止(CHG-20261022-03 T9) | 〔觀察〕 |
 | `docs/knowledge/` | 使用者教過的規則:`INDEX.md`、`directives.md`(DIR-n)、`patterns.md`、`vocabulary.json` | 只改本目錄的 commit 免引用 CHG 編號(CHG-20261022-03) | 〔觀察〕 |
-| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04,對應功能不在 main 上 | 〔觀察〕 |
+| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03;`local_review_codex.feature` 屬 CHG-20261028-01;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04,對應功能不在 main 上 | 〔觀察〕 |
 | `scripts/ci/` | CI 治理檢查:`commit_check.py`、`plan_check_changed.py`、`review_gate.py`、`secret_scan.py`、`secret_allowlist.txt` | 只用 Python 標準函式庫;CI 一律從 base 分支的 trusted/ 副本(CI 執行期目錄,不在 repo 內)執行 | 〔觀察〕 |
-| `scripts/local_review.py` | 本機審議會(DIR-1 六席兩階段),以 `gh pr comment` 貼出判決 | 只讀 PR 資料、不 checkout;拒絕 fork 與非擁有者 PR | 〔觀察〕 |
+| `scripts/local_review.py` | 本機審議會(DIR-1 六席兩階段),以 `gh pr comment` 貼出判決 | 只讀 PR 資料、主工作副本不 checkout;拒絕 fork 與非擁有者 PR;diff 經過濾後超過 30000 字時,以 head sha 在 `.review/pr-<編號>-<sha12>/` 建 detached worktree(停用 hook)供 Codex 席唯讀讀取完整程式,審完(含例外)移除;Ollama 席仍依 `num_ctx` 截短(CHG-20261028-01) | 〔觀察〕 |
+| `.review/` | 本機審議 Codex 席的 PR head 唯讀檢視 | `.gitignore`;只由 `scripts/local_review.py` 建立與移除,平時不存在(CHG-20261028-01) | 〔觀察〕 |
 | `scripts/check.sh` | 產品測試載具(CHG-20261022-01 T1):以 uv 暫時環境帶 pytest、fastapi 等依賴執行 `pytest -q tests/` | 可帶測試路徑或 pytest 參數;CI `program` job 與 `scripts/deploy_local.sh` 都會執行 | 〔觀察〕 |
 | `scripts/deploy_local.sh` | 本機部署:在乾淨的 main 上 `pull --ff-only`,重啟 7860 網頁伺服器(`uv run --script studio_server.py`),驗證只綁本機 | 只寫入 `outputs/` 下的 pidfile 與 log | 〔觀察〕 |
 | `tests/`(根層) | 產品程式的 pytest:設定、節點、執行器、重型鎖、伺服器核心 / 檔案 / 設定 API、前端靜態檢查、預設範本 | 以 `./scripts/check.sh` 執行;模型呼叫一律以替身取代;ADP-6 的結案以 ACC 為準 | 〔觀察〕 |
