@@ -2,7 +2,7 @@
 """
 local_review.py — 本機模型審議會(DIR-1)/ local review panel
 
-對一個 PR 跑 DIR-1 審議會(六席、兩階段:獨立判決 → 互讀),把各席意見以 `gh pr comment` 貼回 PR,
+對一個 PR 跑 DIR-1 審議會(六席、各席獨立作答一次),把各席意見以 `gh pr comment` 貼回 PR,
 留言附機器可讀標記供 CI 的 `scripts/ci/review_gate.py` 驗證:
 
   <!-- local-review CHG-YYYYMMDD-NN sha=<head 40 hex> seats={"<席位>": {"model": "...", "verdict": "pass|fail|concern|no-answer"}} -->
@@ -25,9 +25,13 @@ local_review.py — 本機模型審議會(DIR-1)/ local review panel
 
 意見席(CHG-20261028-02 / DIR-6):各席的 `pass / concern / fail` 是建議等級,不具否決效力;
 是否合併由統整席判定(`scripts/review_decision.py` 貼出判定留言)。標記與 `[verdict]` 行格式不變。
+交叉審議階段已移除(CHG-20261028-02 DIR-5 修正 M-1;使用者 2026-10-28 原話:「目前不需要交叉審議 因為有統一的最後審議席
+所以只要最後進行統整裁決即可」)。
+compliance 席的參考資料去除 directive 的「歷史」區塊,上限 COMPLIANCE_REF_LIMIT 字,確保 DIR-6 與 Guideline §8
+完整送達(CHG-20261028-02 DIR-5 修正 M-2);其他席位維持 REF_CHAR_LIMIT。
 
 DIR-1:席位一次只跑一席(序列)、`keep_alive: 0`、格式不合格 = 沒有回答 → 重派一次;
-逾時 27B 30 分鐘、其餘 15 分鐘;27B 超過 30 分鐘沒有回答時該席該階段改派 Codex
+逾時 27B 30 分鐘、其餘 15 分鐘;27B 超過 30 分鐘沒有回答時該席改派 Codex
 (不再用 27B 重派,使用者 2026-10-23 規則);高風險 CHG 的 risk 席(以及改回 Ollama 時的 security 席)改用 27B;
 glm4 不擔任 risk / security / compliance 席。
 security、compliance 席預設由 Codex(`codex exec -s read-only`,雲端)擔任(使用者 2026-10-23 決定),
@@ -92,11 +96,12 @@ DIFF_CHAR_LIMIT = 30000
 CODEX_INLINE_LIMIT = DIFF_CHAR_LIMIT  # Codex 席:filtered diff 超過此字數改用 PR head 唯讀檢視(CHG-20261028-01)
 DIFFSTAT_CHAR_LIMIT = 20000
 REF_CHAR_LIMIT = 12000
+COMPLIANCE_REF_LIMIT = 20000  # compliance 席:directive 現行條文 + Guideline §8 須完整送達(M-2)
 PR_BODY_LIMIT = 4000
 
 HEAVY = "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M"
 RISK_9B = "hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M"
-HEAVY_CODEX_FALLBACK_AFTER = 1800  # 27B 30 分鐘沒有回答 → 該席該階段改派 Codex(使用者 2026-10-23 規則)
+HEAVY_CODEX_FALLBACK_AFTER = 1800  # 27B 30 分鐘沒有回答 → 該席改派 Codex(使用者 2026-10-23 規則)
 TIMEOUT_HEAVY = HEAVY_CODEX_FALLBACK_AFTER
 TIMEOUT_DEFAULT = 900       # 其餘 15 分鐘
 TIMEOUT_CODEX = 900         # Codex 15 分鐘
@@ -225,6 +230,20 @@ def strip_review_section(text: str) -> str:
                   "(「## 審議」節已移除:獨立階段不看前輪判決)\n\n", text)
 
 
+def strip_history(text: str) -> str:
+    """去除 directive 各條的「- 歷史:」區塊(到下一個頂層 `- ` 項目、`## ` 標題或檔尾);歷史不是現行規則。"""
+    out, skip = [], False
+    for line in text.split("\n"):
+        if line.startswith("- 歷史"):
+            skip = True
+            continue
+        if skip and (line.startswith("## ") or line.startswith("- ")):
+            skip = False
+        if not skip:
+            out.append(line)
+    return "\n".join(out)
+
+
 def read_doc(rel: str) -> str:
     p = REPO_ROOT / rel
     return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
@@ -344,7 +363,8 @@ def seat_config(risk: Optional[str], codex_seats=None, codex_model: str = "codex
         "compliance": {
             "model": "huihui_ai/qwen3-abliterated:8b", "think": True,
             "q": "判決問題:這筆變更違反任何 directive(knowledge)或 Guideline §8 AI 開發約定嗎?",
-            "ref": read_doc("docs/knowledge/directives.md") + section(g, "## 8. AI 開發約定", "## 9."),
+            "ref": strip_history(read_doc("docs/knowledge/directives.md")) + section(g, "## 8. AI 開發約定", "## 9."),
+            "ref_limit": COMPLIANCE_REF_LIMIT,
         },
         "security": {
             "model": HEAVY if high else "qwen3:8b", "think": True,
@@ -377,10 +397,6 @@ VERDICT_SCHEMA = {"type": "object", "required": ["verdict", "evidence", "reason"
             "item": {"type": "string"}, "evidence": {"type": "string"},
             "impact": {"type": "string", "enum": ["高", "中", "低"]},
             "certainty": {"type": "string", "enum": ["高", "中", "低"]}}}}}}
-CROSS_SCHEMA = {"type": "object", "required": ["cross"], "properties": {"cross": {
-    "type": "array", "maxItems": len(review_gate.SEATS), "items": {
-        "type": "object", "required": ["seat", "agree", "reason"], "properties": {
-            "seat": {"type": "string"}, "agree": {"type": "boolean"}, "reason": {"type": "string"}}}}}}
 
 
 def strict_schema(schema):
@@ -448,8 +464,7 @@ def ask(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
     """格式不合格或逾時 = 沒有回答 → 重派一次;兩次都失敗回傳 ok=False。Codex 席轉給 ask_codex()。
 
     27B(HEAVY)席:逾時,或累計超過 HEAVY_CODEX_FALLBACK_AFTER 秒仍沒有回答,不再用 27B 重派,
-    改由 Codex 擔任本席本階段(ask_codex() 內含重派一次);回傳值帶 `fallback` 與 Codex 版本。
-    每席每階段各自判定:第一階段改派不影響互讀階段,互讀仍先試 27B。"""
+    改由 Codex 擔任本席(ask_codex() 內含重派一次);回傳值帶 `fallback` 與 Codex 版本。"""
     if cfg.get("engine") == "codex":
         if cfg.get("codex_version_error"):  # 不以未知版本作答
             return {"ok": False, "error": "{}({})".format(CODEX_NO_VERSION_ERROR, cfg["codex_version_error"])}
@@ -467,7 +482,7 @@ def ask(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
     start = time.time()
     for attempt in (1, 2):
         t = time.time()
-        if heavy and attempt == 2:  # 30 分鐘是本席本階段的累計上限,重派只用剩餘時間
+        if heavy and attempt == 2:  # 30 分鐘是本席的累計上限,重派只用剩餘時間
             timeout = max(1, int(HEAVY_CODEX_FALLBACK_AFTER - (t - start)))
         timed_out = False
         try:
@@ -495,10 +510,10 @@ def ask(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
 
 
 def heavy_fallback(cfg: dict, system: str, user: str, schema: dict, check, err: str) -> dict:
-    """27B 超過 30 分鐘沒有回答 → 本席本階段改由 Codex 作答(使用者 2026-10-23 規則)。"""
+    """27B 超過 30 分鐘沒有回答 → 本席改由 Codex 作答(使用者 2026-10-23 規則)。"""
     try:
         version = codex_version()
-    except (CmdError, OSError, IndexError) as e:  # 讀不到實際版本 → 不呼叫 Codex,本席本階段記沒有回答
+    except (CmdError, OSError, IndexError) as e:  # 讀不到實際版本 → 不呼叫 Codex,本席記沒有回答
         log("讀不到 codex 版本:{}".format(e))
         return {"ok": False, "error": "27B {};{}({})".format(err, CODEX_NO_VERSION_ERROR, e),
                 "fallback": {"model": "{}({})".format(CODEX_NO_VERSION_MODEL, HEAVY_FALLBACK_TAG),
@@ -560,48 +575,26 @@ def run_panel(seats: Dict[str, dict], make_block: Callable[..., str], diff: str,
         return block
 
     for name, cfg in seats.items():  # 序列,一次一席
-        log("第一階段 {} ← {}".format(name, cfg["model"]))
+        log("{} ← {}".format(name, cfg["model"]))
         system = ("你是 AI-SDLC 審議會的 {} 席(意見席)。只審你這一席的領域。{}\n"
                   "列出本領域的發現(最多 {} 項),附證據指向(章節、task 編號或 diff 檔名)、影響、確定度。"
                   "證據必須來自下方資料,不得杜撰。{}{}{}").format(
             name, cfg["q"], MAX_FINDINGS, ADVISORY, DATA_WARNING, TW)
-        prefix = "# 本席參考資料(main 工作副本)\n{}\n\n".format(clip(cfg["ref"], REF_CHAR_LIMIT))
+        prefix = "# 本席參考資料(main 工作副本)\n{}\n\n".format(clip(cfg["ref"], cfg.get("ref_limit", REF_CHAR_LIMIT)))
         user = prefix + block_for(name, cfg, system, prefix)
         p1 = ask(cfg, system, user, VERDICT_SCHEMA, _phase1_ok)
         result[name] = {"model": cfg["model"], "engine": cfg.get("engine", "ollama"), "phase1": p1}
         if p1.get("fallback"):
             result[name]["model"] = p1["fallback"]["model"]
 
-    answered = {n: r["phase1"]["out"] for n, r in result.items() if r["phase1"]["ok"]}
-    for name, cfg in seats.items():
-        others = {n: {"verdict": o["verdict"], "reason": o["reason"]} for n, o in answered.items() if n != name}
-        if name not in answered or not others:
-            result[name]["phase2"] = {"ok": None}
-            continue
-        log("第二階段(互讀){} ← {}".format(name, cfg["model"]))
-        system = ("你是 AI-SDLC 審議會的 {} 席,進入互讀階段。對下列每一個他席判決各標一列:同意或不同意,附一句理由。"
-                  "他席共 {} 個:{}。少一列不算同意。{}{}{}").format(
-            name, len(others), ", ".join(others), ADVISORY, DATA_WARNING, TW)
-        prefix = "# 你的判決\n{}\n\n# 他席判決\n{}\n\n".format(
-            json.dumps(answered[name], ensure_ascii=False), json.dumps(others, ensure_ascii=False))
-        user = prefix + block_for(name, cfg, system, prefix)
-        need = set(others)
-        result[name]["phase2"] = ask(cfg, system, user, CROSS_SCHEMA,
-                                     lambda o, need=need: isinstance(o.get("cross"), list) and
-                                     {c.get("seat") for c in o["cross"] if isinstance(c, dict)} >= need)
-        fb = result[name]["phase2"].get("fallback")
-        if fb and not result[name]["phase1"].get("fallback"):  # 只有互讀改派:model 欄同時記兩者
-            result[name]["model"] = "{};互讀 {}".format(result[name]["model"], fb["model"])
     for name in result:
         result[name]["diff_notes"] = notes.get(name, [])
     return result
 
 
 def final_verdict(r: dict) -> str:
-    """第一階段沒回答,或互讀階段沒回答(格式不合格 = 沒有回答),都記為 no-answer。"""
+    """沒回答(格式不合格 = 沒有回答)記為 no-answer。"""
     if not r["phase1"]["ok"]:
-        return "no-answer"
-    if r["phase2"].get("ok") is False:
         return "no-answer"
     return r["phase1"]["out"]["verdict"]
 
@@ -622,15 +615,6 @@ def seat_detail(name: str, r: dict) -> str:
                                                            f.get("item", ""), f.get("evidence", "")))
     else:
         lines.append("判決:沒有回答({})".format(p1.get("error", "")))
-    p2 = r["phase2"]
-    if p2.get("ok"):
-        lines.append("互讀:")
-        for c in p2["out"]["cross"]:
-            if isinstance(c, dict):
-                lines.append("  {} {}:{}".format("同意" if c.get("agree") else "不同意",
-                                                c.get("seat", ""), c.get("reason", "")))
-    elif p2.get("ok") is False:
-        lines.append("互讀:沒有回答({})".format(p2.get("error", "")))
     return clip(sanitize("\n".join(lines)), SEAT_CHAR_LIMIT)
 
 
@@ -648,7 +632,7 @@ def build_comment(chg_id: str, risk: Optional[str], pr_no: int, head_sha: str, t
         "",
         "- PR:#{},head `{}`".format(pr_no, head_sha),
         "- CHG 風險分級:{}".format(risk or "讀不到(從嚴視為高)"),
-        "- 由 `scripts/local_review.py` 序列執行(兩階段;本機 Ollama 席 `keep_alive: 0`)。",
+        "- 由 `scripts/local_review.py` 序列執行(各席獨立作答一次;本機 Ollama 席 `keep_alive: 0`)。",
         "- 各席為意見,不具否決效力;是否合併由統整席判定(DIR-6)。意見席的建議與統整席的判定都不能取代使用者在確認閘的判斷。",
         "- 限制:本機席只有 Qwen、GLM 兩個模型家族,席位間會共享盲點;各席模型都可能被 PR 內容 prompt injection。",
     ]
@@ -660,11 +644,9 @@ def build_comment(chg_id: str, risk: Optional[str], pr_no: int, head_sha: str, t
         if codex_view_chars is not None:
             parts.append("- Codex 席以 PR head 唯讀檢視(detached worktree,審完即移除)讀完整程式:diff 經過濾後 {} 字,"
                          "超過內嵌門檻 {} 字(CHG-20261028-01)。".format(codex_view_chars, CODEX_INLINE_LIMIT))
-    moved = ["{}({})".format(n, "、".join(label for key, label in (("phase1", "第一階段"), ("phase2", "互讀"))
-                                         if r[key].get("fallback")))
-             for n, r in result.items() if r["phase1"].get("fallback") or r["phase2"].get("fallback")]
+    moved = [n for n, r in result.items() if r["phase1"].get("fallback")]
     if moved:
-        parts.append("- 27B 改派 Codex:{} 席 27B 超過 30 分鐘沒有回答,該階段改由 Codex(雲端,read-only sandbox)"
+        parts.append("- 27B 改派 Codex:{} 席 27B 超過 30 分鐘沒有回答,改由 Codex(雲端,read-only sandbox)"
                      "作答(使用者 2026-10-23 規則)。".format("、".join(moved)))
     cut = [n for n, r in result.items() if any(x.startswith("diff ") for x in r.get("diff_notes") or [])]
     short = [n for n, r in result.items() if any("思考預算不足" in x for x in r.get("diff_notes") or [])]
@@ -847,7 +829,7 @@ def main(argv=None) -> int:
     global _codex_version
     _codex_version = None  # 每次執行重讀 codex 版本
     ap = argparse.ArgumentParser(
-        description="本機模型審議會(DIR-1 / DIR-6):對本 repo 擁有者的 PR 跑六席兩階段審議,以 gh pr comment 貼出各席意見。"
+        description="本機模型審議會(DIR-1 / DIR-6):對本 repo 擁有者的 PR 跑六席審議(各席獨立作答一次),以 gh pr comment 貼出各席意見。"
                     "只讀 PR 資料、主工作副本不 checkout(大 diff 時 Codex 席另以 .review/ 下的唯讀檢視讀完整程式);"
                     "fork 或非擁有者 PR 一律拒絕。")
     ap.add_argument("--pr", required=True, type=int, help="PR 編號")

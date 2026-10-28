@@ -19,15 +19,15 @@
      | risk(原否決席,現為意見席;glm4 不得擔任,見第 6 條) | 中 / 低風險:`hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M`,`think:true`;**高風險:Codex(codex-cli,read-only sandbox,雲端)** | 2026-10-23 使用者指示「目前先暫不使用27B模型審議」(第 10 條);27B 暫停期間 |
      | security(原否決席,現為意見席;glm4 不得擔任,見第 6 條) | Codex(codex-cli,read-only sandbox,雲端) | 2026-10-23 使用者決定(第 9 條);以 `--codex-seats none` 改回 Ollama 時沿用舊配置:`qwen3:8b`,高風險 CHG 用 27B |
      | compliance(原否決席,現為意見席;glm4 不得擔任,見第 6 條) | Codex(codex-cli,read-only sandbox,雲端) | 2026-10-23 使用者決定(第 9 條);改回 Ollama 時用 `huihui_ai/qwen3-abliterated:8b`,`think:true` |
-     | impact | `glm4:latest` | 非否決席 |
+     | impact | `glm4:latest` | glm4 不擔任 risk / security / compliance(第 6 條) |
      | drift | `qwen3:8b`,`think:true` | |
-     | consistency | `glm4:latest` | 非否決席 |
+     | consistency | `glm4:latest` | glm4 不擔任 risk / security / compliance(第 6 條) |
 
   6. **glm4 不得擔任 risk / security / compliance 席**。
   7. 不用作席位:`Llama-Breeze2-8B`(台灣用語潤飾,不是邏輯模型)、`qwen2.5-coder:7b`(CLI 專用,隨 CLI 棄用)。
   8. 限制要寫進每次審議記錄:目前只有 Qwen、GLM 兩個模型家族,席位間會共享盲點;本機 8–9B 模型的判斷力低於雲端大模型——**意見席的建議與統整席的判定都不能取代使用者在確認閘的判斷**。
   9. **Codex 席位(2026-10-23 使用者指示「使用 codex 協助」)**:
-     - security、compliance 兩個否決席由 Codex(`codex exec`)擔任;`scripts/local_review.py` 以 `--codex-seats <逗號清單>` 覆寫,`--codex-seats none` 表示全部用 Ollama。
+     - security、compliance 兩席由 Codex(`codex exec`)擔任;`scripts/local_review.py` 以 `--codex-seats <逗號清單>` 覆寫,`--codex-seats none` 表示全部用 Ollama。
      - Codex 是雲端模型,送審資料(PR、CHG、diff、參考文件)會送出本機;這是第 1 條「本機模型」原則與「不送資料出本機」的**使用者明示例外**,前提是 repo 已公開。例外只限審議席位,不擴及其他用途。
      - Codex 一律只用 `-s read-only`;不得使用 `workspace-write`、`danger-full-access`、`--dangerously-bypass-approvals-and-sandbox`。prompt 由 stdin 傳入,判決以 `--output-schema`(與 Ollama 席同一份 JSON schema)強制;格式不合格、失敗或逾時(15 分鐘)= 沒有回答 → 重派一次,仍失敗記 `no-answer`。
      - 判決行與留言的 `<model>` 欄記 `codex-cli <版本>`(取自 `codex --version`),留言註明哪些席位由 Codex 擔任。
@@ -43,13 +43,19 @@
   - `Qwen3.5-9B Aggressive`(think)→ fail,理由正確;`<model>` 欄填錯
   - `glm4:latest`(同一份 NFR 脈絡)→ **concern**,而且判決行格式壞掉(把模板佔位字原樣輸出);沒給 NFR 脈絡時 → **pass**
 - 每席逾時:27B 30 分鐘;逾時改派 Codex(使用者 2026-10-23 規則,原話:「如果本地高階模型審議需要花超過30分鐘轉為codex」);其餘 15 分鐘、重派一次。審議一律**序列**執行,不並行(使用者指示 2026-10-22)。
-  - 27B 席某一階段逾時,或累計超過 30 分鐘仍沒有回答,不再用 27B 重派,該席該階段直接由 Codex(`-s read-only`、prompt 由 stdin)作答;Codex 也沒有回答時依第 9 條重派 Codex 一次,仍失敗記 `no-answer`。改派每席每階段各自判定:第一階段改派,互讀階段仍先試 27B。
-  - 改派後判決行與留言的 `<model>` 欄記 `codex-cli <版本>(27B 逾時 30 分鐘改派)`,留言說明欄列出改派的席位與階段。改派會把該席送審資料送往雲端,適用第 9 條的使用者明示例外。
+  - 27B 席逾時,或累計超過 30 分鐘仍沒有回答,不再用 27B 重派,該席直接由 Codex(`-s read-only`、prompt 由 stdin)作答;Codex 也沒有回答時依第 9 條重派 Codex 一次,仍失敗記 `no-answer`。
+  - 改派後判決行與留言的 `<model>` 欄記 `codex-cli <版本>(27B 逾時 30 分鐘改派)`,留言說明欄列出改派的席位。改派會把該席送審資料送往雲端,適用第 9 條的使用者明示例外。
 - 證據補充(2026-10-22 CHG-20261022-01 / -03 實審):`qwen3:8b` 在約 3 萬字的 CHG 上擔任 security 席,兩筆共 9 點發現全部與送審原文矛盾(例:稱未檢查 GET 的 Host,原文第 255 行明文規定);`Qwen3.8-27B` 擔任 risk 席的判決與原文相符、證據具體。使用者因此決定高風險 security 席改用 27B。
 - 證據補充(2026-10-23 PR #12 本機審議):security 席(27B,think)兩次都輸出截斷、沒有回答;compliance 席(8B)把送審 CHG 內的前輪審議紀錄當成本輪事實而判 fail。派發者以 `codex exec -s read-only --output-schema … -o …` 手動試跑:security 44 秒回 concern,證據指到 `.github/workflows/ci.yml` 的具體行號;compliance 回 pass。使用者因此指示「使用 codex 協助」,並決定 security、compliance 改由 Codex 擔任、送審 CHG 去除審議紀錄。
 - 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻;高風險 security 席 27B、第 9 條 Codex 席位為使用者決定)
 - 狀態:生效
 - 歷史:
+  - 2026-10-28 依 CHG-20261028-02 DIR-5 統整報告修訂:M-1 移除互讀階段(使用者原話:「目前不需要交叉審議 因為有統一的最後審議席所以只要最後進行統整裁決即可」);M-3 現行條文去除「否決席」用語(統整報告 RS-7)。原敘述:
+    - 每席逾時第 1 點:27B 席某一階段逾時,或累計超過 30 分鐘仍沒有回答,不再用 27B 重派,該席該階段直接由 Codex(`-s read-only`、prompt 由 stdin)作答;Codex 也沒有回答時依第 9 條重派 Codex 一次,仍失敗記 `no-answer`。改派每席每階段各自判定:第一階段改派,互讀階段仍先試 27B。
+    - 每席逾時第 2 點:改派後判決行與留言的 `<model>` 欄記 `codex-cli <版本>(27B 逾時 30 分鐘改派)`,留言說明欄列出改派的席位與階段。改派會把該席送審資料送往雲端,適用第 9 條的使用者明示例外。
+    - 第 5 條席位表 impact 列:| impact | `glm4:latest` | 非否決席 |
+    - 第 5 條席位表 consistency 列:| consistency | `glm4:latest` | 非否決席 |
+    - 第 9 條第 1 點:security、compliance 兩個否決席由 Codex(`codex exec`)擔任;`scripts/local_review.py` 以 `--codex-seats <逗號清單>` 覆寫,`--codex-seats none` 表示全部用 Ollama。
   - 2026-10-28 依 CHG-20261028-02(使用者原話:「改為審議席提供意見 最後統整為單一獨立審議席全部審議再決議如何修」)修訂。原敘述:
     - 情境:任何需要審議會(review-panel)的時候——CHG 決策審議、A1 代問企劃審議、逐 task review、末端審查。
     - 第 1 條:審議席位由本機 Ollama 上的邏輯模型擔任(Qwen、GLM 等),**不派 Claude subagent 當席位**;例外見第 9 條(security、compliance 由 Codex 擔任)。派發者(主 agent)負責組派發包、呼叫模型、收判決、裁決;**核准權仍在使用者**(確認閘不轉包)。
@@ -117,11 +123,13 @@
   3. **功能需要修正**(已 merge 的功能事後發現要改):另開分支與 PR,不回頭改已 merge 的分支。
   4. 每次依本條 merge,在 PR 留言與 CHG「## 派發記錄」註明「依 DIR-4 預授權 merge」;使用次數計入治理健康度。
   5. **自動失效**:依本條 merge 的變更若事後被迴歸、驗收或使用者發現弄壞東西,本條立即失效,直到使用者重新授權。
-- 取捨(派發者註記):CHG-20261022-03 安全影響 (j)(q) 以「程式變更一律使用者核准 merge」作為殘留風險的補償控制;本條移除這一層,補償控制改為「獨立統整席判定 merge(核對完整程式)+ CI 全綠 + 第 5 條自動失效」。原「否決席無 fail」的補償控制已由 DIR-6 取代(CHG-20261028-02)。
+- 取捨(派發者註記):CHG-20261022-03 安全影響 (j)(q) 以「程式變更一律使用者核准 merge」作為殘留風險的補償控制;本條移除這一層,補償控制改為「獨立統整席判定 merge(核對完整程式)+ CI 全綠 + 第 5 條自動失效」。原以 risk、security、compliance 三席無 fail 為條件的補償控制已由 DIR-6 取代(CHG-20261028-02)。
 - 原因:使用者指示(2026-10-25,原話):「往後就直接該CHG沒問題就等CICD後直接merge,功能需要修正則另開branch」。
 - 信度:使用者確認(適用條件與不適用清單為 agent 依預授權「必須寫窄」的規範補上,使用者可推翻)
 - 狀態:生效
 - 歷史:
+  - 2026-10-28 依 CHG-20261028-02 DIR-5 統整報告 M-3(RS-7,現行條文去除「否決席」用語)修訂。原敘述:
+    - 取捨(派發者註記)末句:原「否決席無 fail」的補償控制已由 DIR-6 取代(CHG-20261028-02)。
   - 2026-10-28 依 CHG-20261028-02(使用者原話:「改為審議席提供意見 最後統整為單一獨立審議席全部審議再決議如何修」)修訂。原敘述:
     - 標題:DIR-4 — 預授權:已過確認閘的 CHG,審議無否決、CI 全綠即由派發者 merge
     - 第 1 條第 2 點:本機審議(DIR-1)全部席位都有回答,否決席(risk、security、compliance)沒有 fail、沒有 no-answer;
@@ -163,7 +171,7 @@
 - 規則:
   1. **意見席**:DIR-1 席位表的六席(risk、impact、drift、compliance、security、consistency)只提供意見。各席輸出的 `pass / concern / fail` 是建議等級,**不具否決效力**;沒有回答(`no-answer`)也不擋 merge。席位分配、序列執行、逾時、Codex 限制、送審 CHG 去除「## 審議」節等規定照 DIR-1。
   2. **統整席**:同一 head 的意見留言貼出後,派發者派**一個**獨立 Claude subagent 擔任統整席(預設 Opus、effort medium;使用者可改指定)。統整席不得是該 PR 的施工者,也不得是同一 PR 前一輪的統整席子代理(每輪新派)。
-  3. 統整席讀取:該 head 的意見留言全文、CHG 全文(含「## 審議」節與派發記錄)、完整程式(`gh pr diff`;過大時 `git fetch origin <head sha>` 後以 `git show <head>:<路徑>` 讀取)。統整席只讀,不改檔、不開 PR、不貼留言;唯一寫出物是判定 JSON(`outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,格式見 `scripts/review_decision.py --schema`)。
+  3. 統整席讀取:該 head 的意見留言全文、CHG 全文(含「## 審議」節與派發記錄)、完整程式(`gh pr diff`;過大時 `git fetch origin <head sha>` 後以 `git show <head>:<路徑>` 讀取)。統整席只讀,不改檔、不另開 PR、不貼留言;唯一寫出物是判定 JSON(`outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,格式見 `scripts/review_decision.py --schema`)。
   4. 統整席判定 `merge`(可合併)或 `fix`(需修正):逐席列出建議等級、是否採納與理由;每項發現核對程式後判斷是否成立;`no-answer` 的席位逐一列出,並由統整席以該席的判決問題自行檢視、寫出結果;`fix` 必須列出修法(位置、改法、理由);需使用者決定的事項列入 `needs_user`,有任何一項即不得判 `merge`。
   5. 派發者以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定留言(標記 `<!-- review-decision CHG-… sha=<head> decision=merge|fix model=… effort=… -->`)。`model`、`effort` 由派發者填,不信任子代理自填。**派發者不得修改 JSON 內容**;格式不合格重派一次,仍不合格交使用者。
   6. CI `review` 檢查:需要擁有者對目前 head 的意見留言(標記含六席)與排在其後、CHG 相同的擁有者判定留言,且判定為 `merge`。
@@ -171,6 +179,11 @@
   8. 統整席的職責就是讀全部意見與前輪紀錄,**不受 DIR-1 第 11 條(送審 CHG 去除審議紀錄;獨立階段不得看到前輪判決)約束**;意見席的隔離不變。
   9. 統整判定 `merge` 不能取代使用者在確認閘的判斷;判定只決定 DIR-4 預授權的條件是否成立。
   10. **統整席的資料外送例外**:統整席是 Claude subagent(雲端,Anthropic),讀取的待審資料會送出本機。這是 DIR-1 第 9 條(Codex 席,只限審議席位)之外、另一項**使用者明示**的資料外送例外(使用者 2026-10-28 選擇統整席為「Opus medium(獨立子代理)」,確認閘原話「全部照草案核准」)。範圍只限:本 repo(已公開)PR 的意見留言、CHG 全文、PR diff 與 head 的檔案內容;不含 `config/studio.db`、`outputs/` 產出物、使用者聲線檔或其他 repo 外的資料,也不擴及審議以外的用途。施工者本來就是 Claude subagent(DIR-3),統整席不是新的資料去處。
-- 原因:使用者指示(2026-10-28,原話):「改為審議席提供意見 最後統整為單一獨立審議席全部審議再決議如何修」;追問後選擇:合併由統整席決定、統整席 Opus medium、CI 閘改看統整判定、PR #76 重審暫停待新流程生效。與 DIR-2 第 3 條「merge 的停點只准加嚴」的關係:本條移除否決席的單席否決,是**使用者明示指示的規則變更**(2026-10-28 原話如上;確認閘 2026-10-28 原話「全部照草案核准」),不是 agent 自行放寬;DIR-2 第 3 條的停點本身(程式變更須使用者核准或依 DIR-4 預授權、治理基礎設施需 `infra-approved`)不變。
+- 原因:使用者指示(2026-10-28,原話):「改為審議席提供意見 最後統整為單一獨立審議席全部審議再決議如何修」;追問後選擇:合併由統整席決定、統整席 Opus medium、CI 閘改看統整判定、PR #76 重審暫停待新流程生效。與 DIR-2 第 3 條「merge 的停點只准加嚴」的關係:本條移除 risk、security、compliance 三席的單席否決,是**使用者明示指示的規則變更**(2026-10-28 原話如上;確認閘 2026-10-28 原話「全部照草案核准」),不是 agent 自行放寬;DIR-2 第 3 條的停點本身(程式變更須使用者核准或依 DIR-4 預授權、治理基礎設施需 `infra-approved`)不變。
 - 信度:使用者確認(第 2 條模型、第 6 條閘、第 10 條統整席為雲端 Claude 為使用者選擇;呼叫方式、標記格式、JSON 欄位、連續兩輪停下、隔離不適用為 agent 補上的執行細節,見 CHG-20261028-02 代決事項,使用者可推翻)
 - 狀態:生效(CHG-20261028-02 合進 main 時)
+- 歷史:
+  - 2026-10-28 依 CHG-20261028-02 DIR-5 統整報告 M-3(RS-7,現行條文去除「否決席」用語)修訂。原敘述:
+    - 原因(停點關係句):本條移除否決席的單席否決,是**使用者明示指示的規則變更**,……
+  - 2026-10-28 依 CHG-20261028-02 DIR-5 統整報告 M-4(CHG 記錄補正時一併調整用語,意思不變)修訂。原敘述:
+    - 第 3 條(片段):統整席只讀,不改檔、不開 PR、不貼留言;
