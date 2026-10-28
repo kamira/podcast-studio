@@ -37,11 +37,10 @@
      - 執行方式:`python3 scripts/local_review.py --pr <N> --codex-seats risk,security,compliance`;`scripts/local_review.py` 的預設值仍含 27B,**暫停期間不得省略此參數**。
      - 恢復須使用者明示;恢復時把本條移入「歷史」。
   11. **送審 CHG 去除審議紀錄**:送給所有席位(Ollama 與 Codex)的 CHG 刪除「## 審議」節(標題到下一個 `## ` 標題或檔尾),獨立階段不得看到前輪判決。統整席(DIR-6)不受此限。
-  12. **Codex 席暫由 Opus 代答(2026-10-28 使用者指示,原話:「codex 先暫時使用opus代答直到我說可以恢復code」;寫入本條經使用者 2026-10-28 核准,原話:「都照建議」)**:
-     - Codex 擔任的席位(risk、security、compliance)暫由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,留言模型標記註明代答(例:`claude-opus-medium(代 Codex,使用者 2026-10-28 指示至另行通知)`)。
-     - 代答期間,意見席把待審資料交給雲端 Claude 屬資料外送例外,範圍同 DIR-6 第 10 條(本 repo PR 的待審資料)。
-     - 本條是第 1 條「不派 Claude subagent 當意見席」與第 9 條(Codex 擔任)的暫行例外;代答的席位仍是意見席(DIR-6),統整席另派(DIR-6 第 2 條)。
-     - 恢復須使用者明示恢復 Codex;恢復時把本條移入「歷史」。
+  12. **Codex 額度用盡時由 Opus 代答(2026-10-28 使用者指示,原話:「codex 先暫時使用opus代答直到我說可以恢復code」;同日恢復 Codex,原話:「繼續處理 codex額度已恢復 若再次用完額度則採用opus」)**:
+     - Codex 擔任的席位(risk、security、compliance)預設仍由 Codex 擔任(第 9 條)。Codex 因用量額度用盡而無法作答時,該次審議改由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,留言模型標記註明代答(例:`claude-opus-medium(代 Codex,額度用盡)`)。
+     - 代答時,意見席把待審資料交給雲端 Claude 屬資料外送例外,範圍同 DIR-6 第 10 條(本 repo PR 的待審資料)。
+     - 本條是第 1 條「不派 Claude subagent 當意見席」與第 9 條(Codex 擔任)的條件式例外;代答的席位仍是意見席(DIR-6),統整席另派(DIR-6 第 2 條)。
 - 原因:使用者指示(2026-10-22):「審議交由 qwen, glm 等可用的本地邏輯模型」。推得的理由:與本專案「不送資料出本機」一致,並讓席位跨模型分散。
 - 證據(2026-10-22 對照題:CHG 把 Gradio `server_name` 由 `127.0.0.1` 改 `0.0.0.0`,依 Guideline §5 應判 fail):
   - `qwen3:8b`(think)→ fail,理由正確;`<model>` 欄填錯
@@ -55,6 +54,12 @@
 - 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻;高風險 security 席 27B、第 9 條 Codex 席位為使用者決定)
 - 狀態:生效
 - 歷史:
+  - 2026-10-28 使用者恢復 Codex(原話:「繼續處理 codex額度已恢復 若再次用完額度則採用opus」),第 12 條由「暫由 Opus 代答至另行通知」改為「額度用盡時由 Opus 代答」。原敘述:
+      12. **Codex 席暫由 Opus 代答(2026-10-28 使用者指示,原話:「codex 先暫時使用opus代答直到我說可以恢復code」;寫入本條經使用者 2026-10-28 核准,原話:「都照建議」)**:
+         - Codex 擔任的席位(risk、security、compliance)暫由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,留言模型標記註明代答(例:`claude-opus-medium(代 Codex,使用者 2026-10-28 指示至另行通知)`)。
+         - 代答期間,意見席把待審資料交給雲端 Claude 屬資料外送例外,範圍同 DIR-6 第 10 條(本 repo PR 的待審資料)。
+         - 本條是第 1 條「不派 Claude subagent 當意見席」與第 9 條(Codex 擔任)的暫行例外;代答的席位仍是意見席(DIR-6),統整席另派(DIR-6 第 2 條)。
+         - 恢復須使用者明示恢復 Codex;恢復時把本條移入「歷史」。
   - 2026-10-28 依 CHG-20261028-02 統整報告 U-2(使用者原話:「都照建議」;代答指示原話:「codex 先暫時使用opus代答直到我說可以恢復code」)新增第 12 條、第 1 條補引用。原敘述:
     - 第 1 條(句首):審議席位由本機 Ollama 上的邏輯模型擔任(Qwen、GLM 等),**不派 Claude subagent 當意見席**;例外見第 9 條(security、compliance 由 Codex 擔任);統整席由 Claude subagent 擔任(DIR-6)。
   - 2026-10-28 依 CHG-20261028-02 DIR-5 統整報告修訂:M-1 移除互讀階段(使用者原話:「目前不需要交叉審議 因為有統一的最後審議席所以只要最後進行統整裁決即可」);M-3 現行條文去除「否決席」用語(統整報告 RS-7)。原敘述:
