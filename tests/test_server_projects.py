@@ -547,6 +547,109 @@ def test_media_serves_segment_audio_and_rejects_symlink(client, env):
     assert client.get(f"/api/projects/{NAME}/media/{aid}").status_code == 404
 
 
+# ---- DIR-5 修正 2:媒體端點開檔競態(RS-15)與自錄音檔配額 ----
+
+def test_media_rejects_file_swapped_to_symlink_after_check(client, env, monkeypatch):
+    """路徑檢查(pj.subdir)之後、開檔之前把檔案換成符號連結:仍回 404,不送連結目標。"""
+    view = record_all(client)
+    aid = view["project"]["segments"][0]["audio"]["id"]
+    outside = env.repo / "secret.wav"
+    outside.write_bytes(b"SECRET" + pcm_wav(0.1))
+    real_subdir = pj.subdir
+
+    def swapping(name, sub, **kw):
+        base = real_subdir(name, sub, **kw)
+        target = base / f"{aid}.wav"
+        if target.exists() and not target.is_symlink():
+            target.unlink()
+            target.symlink_to(outside)
+        return base
+    monkeypatch.setattr(pj, "subdir", swapping)
+    r = client.get(f"/api/projects/{NAME}/media/{aid}")
+    assert r.status_code == 404
+    assert b"SECRET" not in r.content
+
+
+def test_media_rejects_dir_swapped_to_symlink_after_check(client, env, monkeypatch):
+    """檢查後把專案的 audio/ 目錄換成指向外部的符號連結:逐層 O_NOFOLLOW 開啟,回 404。"""
+    view = record_all(client)
+    aid = view["project"]["segments"][0]["audio"]["id"]
+    elsewhere = env.repo / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / f"{aid}.wav").write_bytes(b"SECRET" + pcm_wav(0.1))
+    real_subdir = pj.subdir
+
+    def swapping(name, sub, **kw):
+        base = real_subdir(name, sub, **kw)
+        if not base.is_symlink():
+            base.rename(base.with_name("audio-moved"))
+            base.symlink_to(elsewhere)
+        return base
+    monkeypatch.setattr(pj, "subdir", swapping)
+    r = client.get(f"/api/projects/{NAME}/media/{aid}")
+    assert r.status_code == 404
+    assert b"SECRET" not in r.content
+
+
+def test_media_regular_file_full_and_range(client, env):
+    """一般檔照常回應;單一 Range 回 206 與正確位元組,超出範圍 416。"""
+    view = record_all(client)
+    aid = view["project"]["segments"][0]["audio"]["id"]
+    data = (env.repo / "projects" / NAME / "audio" / f"{aid}.wav").read_bytes()
+    url = f"/api/projects/{NAME}/media/{aid}"
+    full = client.get(url)
+    assert full.status_code == 200 and full.content == data
+    assert full.headers["content-type"] == "audio/wav"
+    assert full.headers["accept-ranges"] == "bytes"
+    assert full.headers["cache-control"] == "no-store"
+    assert full.headers["content-length"] == str(len(data))
+    part = client.get(url, headers={"Range": "bytes=4-11"})
+    assert part.status_code == 206 and part.content == data[4:12]
+    assert part.headers["content-range"] == f"bytes 4-11/{len(data)}"
+    tail = client.get(url, headers={"Range": "bytes=-10"})
+    assert tail.status_code == 206 and tail.content == data[-10:]
+    opened = client.get(url, headers={"Range": "bytes=100-"})
+    assert opened.status_code == 206 and opened.content == data[100:]
+    over = client.get(url, headers={"Range": f"bytes={len(data)}-"})
+    assert over.status_code == 416 and over.headers["content-range"] == f"bytes */{len(data)}"
+    multi = client.get(url, headers={"Range": "bytes=0-1,4-5"})   # 多段不支援:回整檔
+    assert multi.status_code == 200 and multi.content == data
+
+
+def test_repeated_self_record_replace_over_quota_is_rejected(client, env, monkeypatch):
+    """反覆取代同一句,舊自錄檔留在磁碟並計入配額;超過上限 413、片段不變、不留新檔。"""
+    view = create(client)
+    sid = view["project"]["segments"][0]["id"]
+    wav = pcm_wav(0.3)
+    monkeypatch.setattr(pj, "MAX_ASSET_BYTES", len(wav) * 3)
+    audio_dir = env.repo / "projects" / NAME / "audio"
+    for _ in range(3):   # 合法取代:三次都在配額內
+        r = patch_segment(client, sid, {"audio_file": upload(client, "錄音.wav", wav)})
+        assert r.status_code == 200, r.text
+    kept = get(client)["project"]["segments"][0]["audio"]
+    before = sorted(p.name for p in audio_dir.iterdir())
+    assert len(before) == 3   # 舊自錄檔不刪(history 版本仍引用)
+    r = patch_segment(client, sid, {"audio_file": upload(client, "錄音.wav", wav)})
+    assert r.status_code == 413
+    assert "配額" in r.json()["error"] or "上限" in r.json()["error"]
+    assert no_abs_path(r.text, env)
+    assert get(client)["project"]["segments"][0]["audio"] == kept
+    assert sorted(p.name for p in audio_dir.iterdir()) == before
+
+
+def test_asset_add_counts_self_recorded_audio_toward_quota(client, env, monkeypatch):
+    """素材與自錄音檔共用同一配額:自錄檔佔滿後,匯入素材回 413。"""
+    view = create(client)
+    sid = view["project"]["segments"][0]["id"]
+    wav = pcm_wav(0.3)
+    monkeypatch.setattr(pj, "MAX_ASSET_BYTES", len(wav) + len(PNG) - 1)
+    assert patch_segment(client, sid, {"audio_file": upload(client, "錄音.wav", wav)}).status_code == 200
+    r = client.post(f"/api/projects/{NAME}/assets", json={"file_id": upload(client, "封面.png", PNG)},
+                    headers=auth())
+    assert r.status_code == 413
+    assert get(client)["project"]["assets"] == []
+
+
 def test_images_patch_delete_and_assets(client, env):
     create(client)
     fid = upload(client, "封面.png", PNG)
