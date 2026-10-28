@@ -311,6 +311,20 @@ class ReviewDecisionTest(unittest.TestCase):
         self.assertEqual(schema["required"], review_decision.DECISION_SCHEMA["required"])
         self.assertEqual(set(schema["properties"]["decision"]["enum"]), {"merge", "fix"})
 
+    def test_posted_comment_is_accepted_by_gate(self):
+        """T3:貼出的判定留言可被 review_gate.parse_decision() 解析,排在意見留言之後即通過閘。"""
+        files = ["scripts/x.py", "docs/changes/{}.md".format(CHG_ID)]
+        risks = {"docs/changes/{}.md".format(CHG_ID): "高"}
+        for kind, expect in (("merge", True), ("fix", False)):
+            with self.subTest(kind=kind):
+                env = FakeEnv()
+                code, _, err = self.run_main(env, decision(kind))
+                self.assertEqual(code, 0, err)
+                parsed = review_gate.parse_decision(env.posted[0])
+                self.assertEqual((parsed["decision"], parsed["sha"], parsed["model"]), (kind, HEAD, "claude-opus-5-5"))
+                ok, msgs = review_gate.evaluate(files, env.comments + [owner(env.posted[0])], HEAD, risks)
+                self.assertEqual(ok, expect, msgs)
+
     def test_build_comment_marker_fields(self):
         body = review_decision.build_decision_comment(CHG_ID, 9, HEAD, "claude-opus-5-5", "medium",
                                                       copy.deepcopy(decision()))
