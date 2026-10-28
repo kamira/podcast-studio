@@ -41,13 +41,13 @@ worker 錯誤訊息:worker stderr 混有 BreezyVoice 的輸出(含本機路徑),
 from __future__ import annotations
 
 import collections
+import contextlib
 import hashlib
 import json
 import os
 import queue
 import re
 import secrets
-import shutil
 import stat
 import subprocess
 import threading
@@ -61,6 +61,7 @@ import breezy_worker
 import heavy_lock
 import media
 import project as pj
+import safe_fs
 import taiwan_ai
 
 ROOT = Path(__file__).resolve().parent
@@ -96,8 +97,14 @@ class Voice:
 
 
 def _sha256_file(path: Path) -> str:
+    """聲線檔的 SHA-256;repo 內的路徑自 repo 根以 dir_fd 逐層 O_NOFOLLOW 開啟後讀同一個 fd(DIR-5 修正 4)。"""
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    root = Path(taiwan_ai.ROOT).resolve()
+    try:
+        parts = Path(os.path.abspath(path)).relative_to(root).parts
+    except ValueError:
+        raise OSError("聲線檔不在 repo 內") from None
+    with os.fdopen(safe_fs.open_path(root, parts), "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -128,16 +135,18 @@ def _audio_id(key: str) -> str:
     return key[:32]
 
 
-def _is_regular(path: Path) -> bool:
-    try:
-        return stat.S_ISREG(os.lstat(path).st_mode)
-    except OSError:
+def _regular_in(dirfd: int | None, name: str) -> bool:
+    """dirfd 內的 name 是一般檔(不跟隨符號連結;DIR-5 修正 4 改以目錄 fd 判斷)。"""
+    if dirfd is None:
         return False
+    st = safe_fs.lstat(dirfd, name)
+    return st is not None and stat.S_ISREG(st.st_mode)
 
 
-def _audio_dir(project, create: bool) -> Path | None:
+def _audio_fd(project, create: bool) -> int | None:
+    """專案 `audio/` 的目錄 fd(自 repo 根逐層 O_NOFOLLOW;呼叫端關閉);不存在或不安全回 None(create 時丟例外)。"""
     try:
-        return pj.subdir(project.name, "audio", create=create)
+        return pj.open_subdir(project.name, "audio", create=create)
     except FileNotFoundError:
         return None
     except pj.ProjectError:
@@ -146,21 +155,48 @@ def _audio_dir(project, create: bool) -> Path | None:
         return None
 
 
+def _audio_dir(project, create: bool) -> Path | None:
+    """專案 `audio/` 的路徑(只供回傳給呼叫端與交給外部程式;本模組的讀寫一律用 `_audio_fd()`)。"""
+    fd = _audio_fd(project, create)
+    if fd is None:
+        return None
+    os.close(fd)
+    return pj._top() / pj.PROJECTS_NAME / project.name / "audio"
+
+
+def _seconds_in(dirfd: int, name: str) -> float:
+    """以 O_NOFOLLOW 開啟 dirfd 內的 WAV 後讀這個 fd 的長度(不以路徑重開)。"""
+    try:
+        fd = safe_fs.open_file(dirfd, name)
+    except OSError:
+        raise SynthError("✗ 合成音檔無法讀取:不是一般檔案") from None
+    try:
+        return round(media.wav_seconds(fd), 3)
+    except ValueError as e:
+        raise SynthError(f"✗ 合成音檔無法讀取:{e}") from None
+    finally:
+        os.close(fd)
+
+
 def dirty_segments(project, voice: Voice | None = None) -> list[dict]:
     """回傳需要合成的片段(依片段順序);voice 省略時讀一次聲線設定。"""
     voice = voice or load_voice()
-    adir = _audio_dir(project, create=False)
+    adir = _audio_fd(project, create=False)
     out = []
-    for seg in project.segments:
-        audio = seg.get("audio")
-        if audio is None:
-            out.append(seg)
-            continue
-        if "key" not in audio:
-            continue  # 外部提供的音檔(自錄取代),不由合成服務覆蓋
-        key = cache_key(seg, voice)
-        if audio["key"] != key or adir is None or not _is_regular(adir / f"{audio['id']}.wav"):
-            out.append(seg)
+    try:
+        for seg in project.segments:
+            audio = seg.get("audio")
+            if audio is None:
+                out.append(seg)
+                continue
+            if "key" not in audio:
+                continue  # 外部提供的音檔(自錄取代),不由合成服務覆蓋
+            key = cache_key(seg, voice)
+            if audio["key"] != key or not _regular_in(adir, f"{audio['id']}.wav"):
+                out.append(seg)
+    finally:
+        if adir is not None:
+            os.close(adir)
     return out
 
 
@@ -199,27 +235,40 @@ def _pump(stream, sink):
         sink(None)
 
 
-def _write_jobs(tmp_dir: Path, voice: Voice, jobs: list[dict]) -> Path:
+def _write_jobs(tmp_fd: int, voice: Voice, jobs: list[dict]) -> int:
+    """工作清單寫進 tmp/ 內排他建立的檔案後立即刪除名稱,回傳匿名 fd(DIR-5 修正 4:worker 以 /dev/fd 讀取)。"""
     body = {"prompt_wav": str(voice.wav), "prompt_text": voice.text, "model": voice.model, "jobs": jobs}
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    path = tmp_dir / f"jobs-{secrets.token_hex(8)}.json"
-    with os.fdopen(os.open(path, flags, 0o600), "w", encoding="utf-8") as f:
-        json.dump(body, f, ensure_ascii=False)
-    return path
+    name = f"jobs-{secrets.token_hex(8)}.json"
+    fd = safe_fs.create_excl(tmp_fd, name, 0o600, flags=os.O_RDWR)
+    try:
+        safe_fs.unlink(tmp_fd, name)
+        os.write(fd, json.dumps(body, ensure_ascii=False).encode("utf-8"))
+        os.lseek(fd, 0, os.SEEK_SET)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _run_worker(voice: Voice, jobs: list[dict], tmp_dir: Path, on_done) -> None:
-    """啟動 worker 並逐行處理進度;on_done(job_id, wav_path) 在每句完成時呼叫。"""
+    """啟動 worker 並逐行處理進度;on_done(job_id, out_fd) 在每句完成時呼叫(out_fd 為本次輸出目錄的 fd)。
+
+    (DIR-5 修正 4)tmp/ 以 `project` 的目錄 fd 開啟:工作清單為匿名 fd(`--jobs /dev/fd/<n>`,pass_fds);
+    輸出目錄以 mkdir(dir_fd) 建立後保留 O_NOFOLLOW 開啟的 fd,本程式讀取產物與清理都相對這個 fd。
+    worker 是外部行程,只能以路徑 `--out` 寫入(殘餘風險記於 CHG 修訂 4 補記)。"""
     pending = {j["id"] for j in jobs}
     lines: queue.Queue = queue.Queue()
     stderr_tail: collections.deque = collections.deque(maxlen=STDERR_KEEP)
-    proc = jobs_path = out_dir = None
+    proc = jobs_fd = out_fd = out_name = None
+    tmp_fd = safe_fs.open_dir(tmp_dir.parent, [tmp_dir.name])
     try:
-        jobs_path = _write_jobs(tmp_dir, voice, jobs)
-        out_dir = tmp_dir / f"out-{secrets.token_hex(8)}"
-        out_dir.mkdir(mode=0o700)
+        jobs_fd = _write_jobs(tmp_fd, voice, jobs)
+        out_name = f"out-{secrets.token_hex(8)}"
+        os.mkdir(out_name, 0o700, dir_fd=tmp_fd)
+        out_fd = safe_fs.open_child(tmp_fd, out_name)
         try:
-            proc = subprocess.Popen(_worker_argv(jobs_path, out_dir), cwd=str(BREEZY), env=taiwan_ai.BREEZY_ENV,
+            proc = subprocess.Popen(_worker_argv(Path(f"/dev/fd/{jobs_fd}"), tmp_dir / out_name),
+                                    cwd=str(BREEZY), env=taiwan_ai.BREEZY_ENV, pass_fds=(jobs_fd,),
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, encoding="utf-8", errors="replace", bufsize=1)
         except OSError:
@@ -251,7 +300,7 @@ def _run_worker(voice: Voice, jobs: list[dict], tmp_dir: Path, on_done) -> None:
                 continue
             pending.discard(jid)
             first = False
-            on_done(jid, out_dir / f"{jid}.wav")
+            on_done(jid, out_fd)
         try:
             code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -266,10 +315,14 @@ def _run_worker(voice: Voice, jobs: list[dict], tmp_dir: Path, on_done) -> None:
         if proc is not None and proc.poll() is None:
             proc.kill()
             proc.wait()
-        if jobs_path is not None:
-            jobs_path.unlink(missing_ok=True)
-        if out_dir is not None:
-            shutil.rmtree(out_dir, ignore_errors=True)
+        if jobs_fd is not None:
+            os.close(jobs_fd)
+        if out_fd is not None:
+            os.close(out_fd)
+        if out_name is not None:
+            with contextlib.suppress(OSError):
+                safe_fs.rmtree(tmp_fd, out_name, missing_ok=True)
+        os.close(tmp_fd)
 
 
 def synth(project, emit) -> dict:
@@ -279,7 +332,6 @@ def synth(project, emit) -> dict:
     result = {"synthesized": [], "cached": []}
     if not dirty:
         return result
-    adir = _audio_dir(project, create=True)
     by_key: dict[str, list[dict]] = {}
     for seg in dirty:
         by_key.setdefault(cache_key(seg, voice), []).append(seg)
@@ -291,17 +343,20 @@ def synth(project, emit) -> dict:
             emit({"type": "segment", "id": seg["id"], "seconds": seconds, "cached": cached,
                   "audio": dict(seg["audio"])})
 
-    def seconds_of(path: Path) -> float:
-        try:
-            return round(media.wav_seconds(path), 3)
-        except ValueError as e:
-            raise SynthError(f"✗ 合成音檔無法讀取:{e}") from None
+    adir = _audio_fd(project, create=True)
+    try:
+        return _synth_into(project, emit, voice, by_key, assign, adir, result)
+    finally:
+        os.close(adir)
 
+
+def _synth_into(project, emit, voice, by_key, assign, adir: int, result: dict) -> dict:
+    """synth() 的本體:快取判斷、讀長度、產物移入一律相對 `audio/` 的目錄 fd(DIR-5 修正 4)。"""
     todo = []
     for key in by_key:
-        cached = adir / f"{_audio_id(key)}.wav"
-        if _is_regular(cached):
-            assign(key, seconds_of(cached), cached=True)
+        name = f"{_audio_id(key)}.wav"
+        if _regular_in(adir, name):
+            assign(key, _seconds_in(adir, name), cached=True)
         else:
             todo.append(key)
     if not todo:
@@ -310,12 +365,12 @@ def synth(project, emit) -> dict:
     keys = {_audio_id(k): k for k in todo}
     jobs = [{"id": _audio_id(k), "text": pj.tts_text(by_key[k][0])} for k in todo]
 
-    def on_done(jid: str, produced: Path):
-        if not _is_regular(produced):
+    def on_done(jid: str, out_fd: int):
+        name = f"{jid}.wav"
+        if not _regular_in(out_fd, name):
             raise SynthError("✗ 語音合成失敗:找不到這一句的音檔")
-        dest = adir / f"{jid}.wav"
-        os.replace(produced, dest)
-        assign(keys[jid], seconds_of(dest), cached=False)
+        safe_fs.replace(out_fd, name, adir, name)   # 相對兩個目錄 fd 搬移,不經路徑
+        assign(keys[jid], _seconds_in(adir, name), cached=False)
 
     with heavy_lock.heavy_lock(on_wait=lambda: emit({"type": "waiting"})):
         tmp_dir = pj.subdir(project.name, "tmp", create=True)
@@ -326,29 +381,46 @@ def synth(project, emit) -> dict:
 # ---------- 語速 ----------
 
 def apply_speed(segment: dict, project) -> Path:
-    """回傳變速後的音檔路徑;以「合成快取鍵(audio.id)+ 語速」快取,命中時不跑 ffmpeg。"""
+    """回傳變速後的音檔路徑;以「合成快取鍵(audio.id)+ 語速」快取,命中時不跑 ffmpeg。
+
+    (DIR-5 修正 4)來源與輸出都相對 `audio/` 的目錄 fd:來源以 O_NOFOLLOW 開啟後經 stdin(`pipe:0`)
+    交給 ffmpeg;輸出先在目錄 fd 內排他建立暫存檔,ffmpeg 寫 `/dev/fd/<n>`(pass_fds),完成後以
+    rename(dir_fd) 換成快取檔名。argv 不含任何專案路徑。"""
     audio = segment.get("audio")
     if not audio:
         raise SynthError("✗ 這一句尚未合成")
     speed = pj.effective_speed(project, segment)
-    adir = _audio_dir(project, create=False)
-    src = adir / f"{audio['id']}.wav" if adir is not None else None
-    if src is None or not _is_regular(src):
+    adir = _audio_fd(project, create=False)
+    src_name = f"{audio['id']}.wav"
+    if not _regular_in(adir, src_name):
+        if adir is not None:
+            os.close(adir)
         raise SynthError("✗ 找不到這一句的合成音檔")
-    if speed == 1.0:
-        return src
-    dest = adir / f"{audio['id']}-s{round(speed * 100):03d}.wav"
-    if _is_regular(dest):
-        return dest
-    part = adir / f".{dest.stem}-{secrets.token_hex(4)}.part.wav"
-    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-y", "-i", str(src),
-           "-filter:a", f"atempo={speed:.2f}", "-c:a", "pcm_s16le", str(part)]
-    try:
-        subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=SPEED_TIMEOUT)
-        os.replace(part, dest)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        raise SynthError("✗ 語速調整失敗") from None
-    finally:
-        part.unlink(missing_ok=True)
-    return dest
+    base = pj._top() / pj.PROJECTS_NAME / project.name / "audio"
+    with safe_fs.closing(adir):
+        if speed == 1.0:
+            return base / src_name
+        dest = f"{audio['id']}-s{round(speed * 100):03d}.wav"
+        if _regular_in(adir, dest):
+            return base / dest
+        part = f".{dest[:-len('.wav')]}-{secrets.token_hex(4)}.part.wav"
+        cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-y", "-f", "wav", "-i", "pipe:0",
+               "-filter:a", f"atempo={speed:.2f}", "-c:a", "pcm_s16le", "-f", "wav"]
+        try:
+            src = safe_fs.open_file(adir, src_name)
+        except OSError:
+            raise SynthError("✗ 找不到這一句的合成音檔") from None
+        out = None
+        try:
+            out = safe_fs.create_excl(adir, part, 0o644, flags=os.O_RDWR)
+            subprocess.run([*cmd, f"/dev/fd/{out}"], check=True, stdin=src, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=SPEED_TIMEOUT, pass_fds=(out,))
+            safe_fs.replace(adir, part, adir, dest)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            raise SynthError("✗ 語速調整失敗") from None
+        finally:
+            os.close(src)
+            if out is not None:
+                os.close(out)
+            safe_fs.unlink(adir, part, missing_ok=True)
+    return base / dest

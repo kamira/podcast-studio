@@ -433,7 +433,9 @@ def test_改某句語速_worker零次_只對該句跑一次atempo_長度約為�
     assert len(atempo) == 1                           # 只對該句跑一次
     cmd = atempo[0]
     assert isinstance(cmd, list) and "atempo=1.30" in cmd
-    assert str(pj.subdir("夜市的味道", "audio") / f"{p.segments[1]['audio']['id']}.wav") in cmd
+    # DIR-5 修正 4:來源經 stdin(pipe:0)、輸出寫 /dev/fd/<n>,argv 不含專案路徑
+    assert "pipe:0" in cmd and cmd[-1].startswith("/dev/fd/")
+    assert not any(str(pj.subdir("夜市的味道", "audio")) in str(x) for x in cmd)
     sped = media.wav_seconds(paths[1])
     assert sped == pytest.approx(2.0 / 1.3, rel=0.03)
     assert media.wav_seconds(paths[0]) == pytest.approx(2.0 / 1.15, rel=0.03)
@@ -478,3 +480,46 @@ def test_subdir_只接受三種子目錄(env):
         pj.subdir("夜市的味道", "assets")
     with pytest.raises(pj.ProjectError):
         pj.subdir("不存在的專案", "audio")
+
+
+# ---------- DIR-5 修正 4:檢查後、操作前換成符號連結 ----------
+
+def test_變速來源在檢查後被換成連結_拒絕且不讀外部(env, tmp_path, monkeypatch):
+    p = make_project(("今天天氣真好。",))
+    tts.synth(p, env.emit)
+    p.segments[0]["speed"] = 1.3
+    outside = tmp_path / "outside.wav"
+    write_sine(outside, 0.5)
+    src = pj.subdir("夜市的味道", "audio") / f"{p.segments[0]['audio']['id']}.wav"
+    real = tts._regular_in
+
+    def swapping(dirfd, name):
+        ok = real(dirfd, name)
+        if name == src.name and ok and not src.is_symlink():
+            src.unlink()
+            src.symlink_to(outside)
+        return ok
+    monkeypatch.setattr(tts, "_regular_in", swapping)
+    with pytest.raises(tts.SynthError):
+        tts.apply_speed(p.segments[0], p)
+    assert [x.name for x in src.parent.iterdir() if "-s130" in x.name] == []
+
+
+def test_合成產物移入時audio目錄已被換成連結_不寫到外部(env, tmp_path, monkeypatch):
+    p = make_project(("今天天氣真好。",))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = pj.open_subdir
+
+    def swapping(name, sub, **kw):
+        fd = real(name, sub, **kw)
+        adir = pj._top() / "projects" / name / "audio"
+        if sub == "audio" and kw.get("create") and not adir.is_symlink():
+            adir.rename(adir.with_name("audio-moved"))
+            adir.symlink_to(outside, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(pj, "open_subdir", swapping)
+    tts.synth(p, env.emit)
+    assert list(outside.iterdir()) == []
+    moved = pj._top() / "projects" / "夜市的味道" / "audio-moved"
+    assert [x.name for x in moved.iterdir()] == [f"{p.segments[0]['audio']['id']}.wav"]

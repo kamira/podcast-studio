@@ -1,8 +1,7 @@
 """封面、字幕、影片合成。podcast_studio.py 與 local_models_mcp.py 共用。"""
 import os
 import re
-import shutil
-import stat
+import contextlib
 import struct
 import subprocess
 import tempfile
@@ -11,6 +10,7 @@ from pathlib import Path
 import imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+import safe_fs
 import taiwan_ai as tai
 
 FONT = "/System/Library/Fonts/STHeiti Medium.ttc"
@@ -35,10 +35,20 @@ def generate_image(prompt, width=1024, height=1024):
                             "--steps", str(conf["steps"]),
                             "--width", str(width), "--height", str(height), "--prompt", prompt,
                             "--output", str(tmp)], check=True, stdout=subprocess.DEVNULL, env=env)
-            os.replace(tmp, path)
+            # (DIR-5 修正 4)相對兩個目錄 fd 搬移:私有暫存目錄 → outputs/ 的佔位檔名
+            with safe_fs.closing(safe_fs.open_dir(tai.OUT, [Path(tmpdir).name])) as src, \
+                    safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
+                safe_fs.replace(src, tmp.name, out, Path(path).name)
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        _rmtree_in_out(tmpdir)
     return path
+
+
+def _rmtree_in_out(path) -> None:
+    """刪除 outputs/ 正下方的暫存目錄(DIR-5 修正 4:相對 outputs/ 的目錄 fd 以 safe_fs.rmtree 遞迴,不跟隨連結)。"""
+    with contextlib.suppress(OSError, ValueError):
+        with safe_fs.closing(safe_fs.open_dir(tai.OUT)) as out:
+            safe_fs.rmtree(out, Path(path).name, missing_ok=True)
 
 
 def to_16x9(path):
@@ -96,8 +106,10 @@ _WAV_PCM, _WAV_FLOAT, _WAV_EXTENSIBLE = 1, 3, 0xFFFE
 
 
 def _wav_read_chunks(path):
-    """走訪 RIFF chunk,回傳(fmt 內容, data 位元組數);找不到的回 None。OSError 由呼叫端轉換。"""
-    with open(path, "rb") as f:
+    """走訪 RIFF chunk,回傳(fmt 內容, data 位元組數);找不到的回 None。OSError 由呼叫端轉換。
+
+    path 也可以是已開啟的 fd(DIR-5 修正 4:呼叫端以 O_NOFOLLOW 開啟後傳入;本函式不關閉它)。"""
+    with open(path, "rb", closefd=not isinstance(path, int)) as f:
         size = f.seek(0, os.SEEK_END)
         f.seek(0)
         head = f.read(12)
@@ -300,27 +312,45 @@ def _deci_of_ms(ms: int) -> int:
     return (ms + 50) // 100
 
 
-def _contained_file(base: Path, path: Path) -> Path:
-    """path 必須是 base(已檢查過的真實目錄)正下方的一般檔案,本身不得是符號連結。"""
+def _project_parts(path: Path) -> list[str] | None:
+    """`projects/<名稱>/<sub>/<檔名>` 的路徑元件(相對 repo 根);不是這個形狀回 None。"""
+    import project as pj
     try:
-        st = os.lstat(path)
-    except OSError:
-        raise RenderError("✗ 找不到素材檔") from None
-    if not (path.parent == base and path.resolve().parent == base) or not stat.S_ISREG(st.st_mode):
+        rel = Path(path).relative_to(pj._top() / pj.PROJECTS_NAME)
+    except ValueError:
+        return None
+    return [pj.PROJECTS_NAME, *rel.parts] if len(rel.parts) == 3 else None
+
+
+def _open_project_file(path: Path) -> int:
+    """(DIR-5 修正 4)自 repo 根以 dir_fd 逐層 O_NOFOLLOW 開啟專案內的一般檔;丟 safe_fs 的例外。"""
+    import project as pj
+    parts = _project_parts(path)
+    if parts is None:
+        raise safe_fs.UnsafePathError("不在專案目錄內")
+    return safe_fs.open_path(pj._top(), parts)
+
+
+def _contained_file(base: Path, path: Path) -> Path:
+    """path 必須是 base(專案子目錄)正下方的一般檔案,任一層都不得是符號連結(以 dir_fd 逐層開啟確認)。"""
+    if path.parent != base:
         raise RenderError("✗ 素材檔不是專案內的一般檔案(不接受符號連結)")
+    try:
+        os.close(_open_project_file(path))
+    except FileNotFoundError:
+        raise RenderError("✗ 找不到素材檔") from None
+    except (OSError, ValueError):
+        raise RenderError("✗ 素材檔不是專案內的一般檔案(不接受符號連結)") from None
     return path
 
 
 def _open_nofollow(path: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    """開啟專案內的素材或音檔供讀取:自 repo 根逐層 O_NOFOLLOW + fstat 確認一般檔(DIR-5 修正 4);
+    之後只讀這個 fd(經 stdin 交給 ffmpeg 或由 PIL 讀取),不以路徑重開。"""
     try:
-        fd = os.open(path, flags)
-    except OSError:
+        return _open_project_file(path)
+    except (OSError, ValueError):
         raise RenderError("✗ 素材檔無法讀取(不接受符號連結)") from None
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise RenderError("✗ 素材檔不是一般檔案")
-    return fd
 
 
 def _check_layout(project, layout) -> tuple[int, list, list]:
@@ -583,5 +613,5 @@ def render_timeline(project, layout):
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
                 raise RenderError("✗ 影片渲染失敗") from None
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            _rmtree_in_out(work)
     return path, srt

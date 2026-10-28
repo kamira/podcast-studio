@@ -617,3 +617,46 @@ def test_send_to_library不是重型節點且參數有上限():
     assert spec.heavy is False and spec.label == "送到素材庫"
     assert spec.params["project"].check("字" * 65)
     assert spec.params["project"].check("夜市的味道") is None
+
+
+# ---------- DIR-5 修正 4:送到素材庫的檢查後、操作前換成符號連結 ----------
+
+def test_send_to_library來源目錄在解析後被換成連結時拒絕(out, tmp_path, monkeypatch):
+    name = _library_project()
+    (out / "sub").mkdir()
+    Image.new("RGB", (8, 8)).save(out / "sub" / "b.png")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    Image.new("RGB", (8, 8), "blue").save(outside / "b.png")
+    real = nodes._output_parts
+
+    def swapping(value, msg):   # 路徑解析(檢查)完成後、開檔前把 outputs/sub 換成指向外部的連結
+        parts = real(value, msg)
+        if not (out / "sub").is_symlink():
+            (out / "sub").rename(out / "sub-moved")
+            (out / "sub").symlink_to(outside, target_is_directory=True)
+        return parts
+    monkeypatch.setattr(nodes, "_output_parts", swapping)
+    with pytest.raises(ValueError, match="符號連結"):
+        _run("send-to-library", {"image": "sub/b.png"}, {"project": name})
+    assert pj.load(name).assets == [] and _asset_files(name) == []
+
+
+def test_send_to_library素材目錄開啟後被換成連結_不寫到外部(out, tmp_path, monkeypatch):
+    name = _library_project()
+    Image.new("RGB", (8, 8)).save(out / "ok.png")
+    outside = tmp_path / "outside-assets"
+    outside.mkdir()
+    real = pj.open_subdir
+
+    def swapping(pname, sub, **kw):
+        fd = real(pname, sub, **kw)
+        d = _assets_dir(name)
+        if sub == "assets" and not d.is_symlink():
+            d.rename(d.with_name("assets-moved"))
+            d.symlink_to(outside, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(pj, "open_subdir", swapping)
+    _run("send-to-library", {"image": str(out / "ok.png")}, {"project": name})
+    assert list(outside.iterdir()) == []                    # 沒寫進連結目標
+    assert len(list(_assets_dir(name).with_name("assets-moved").iterdir())) == 1
