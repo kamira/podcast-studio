@@ -8,7 +8,7 @@
 - tags/scope:review, llm
 - 情境:任何需要審議會(review-panel)的時候——CHG 決策審議、A1 代問企劃審議、逐 task review、末端審查。各席提供意見,合併與否由統整席判定(DIR-6)。
 - 規則:
-  1. 審議席位由本機 Ollama 上的邏輯模型擔任(Qwen、GLM 等),**不派 Claude subagent 當意見席**;例外見第 9 條(security、compliance 由 Codex 擔任);統整席由 Claude subagent 擔任(DIR-6)。派發者(主 agent)負責組派發包、呼叫模型、收意見、派統整席(DIR-6);**核准權仍在使用者**(確認閘不轉包)。
+  1. 審議席位由本機 Ollama 上的邏輯模型擔任(Qwen、GLM 等),**不派 Claude subagent 當意見席**;例外見第 9 條(security、compliance 由 Codex 擔任)與第 12 條(Codex 擔任的席位暫由 Opus 子代理代答);統整席由 Claude subagent 擔任(DIR-6)。派發者(主 agent)負責組派發包、呼叫模型、收意見、派統整席(DIR-6);**核准權仍在使用者**(確認閘不轉包)。
   2. 呼叫方式:直接 `POST http://localhost:11434/api/chat`(`stream:false`、`keep_alive:0`、`num_ctx` ≥ 16384,派發包大時用 32768)。MCP `reason` 工具只能選到兩個模型,不夠分席,不用它。
   3. **一次只跑一席**(24 GB 記憶體):每席跑完以 `keep_alive:0` 卸載,再派下一席。
   4. 判決必須是一行合格的 `[verdict] <席位> | <model> | pass/fail/concern | <證據指向> | <理由>`;**格式不合格就等於「沒有回答」**→ 重派一次,仍不合格就交給使用者。建議以 Ollama `format`(JSON schema)強制結構,再由派發者轉成判決行;`<model>` 欄由派發者填入實際模型名,不信任模型自填。第三欄為建議等級,不具否決效力(DIR-6)。
@@ -37,6 +37,11 @@
      - 執行方式:`python3 scripts/local_review.py --pr <N> --codex-seats risk,security,compliance`;`scripts/local_review.py` 的預設值仍含 27B,**暫停期間不得省略此參數**。
      - 恢復須使用者明示;恢復時把本條移入「歷史」。
   11. **送審 CHG 去除審議紀錄**:送給所有席位(Ollama 與 Codex)的 CHG 刪除「## 審議」節(標題到下一個 `## ` 標題或檔尾),獨立階段不得看到前輪判決。統整席(DIR-6)不受此限。
+  12. **Codex 席暫由 Opus 代答(2026-10-28 使用者指示,原話:「codex 先暫時使用opus代答直到我說可以恢復code」;寫入本條經使用者 2026-10-28 核准,原話:「都照建議」)**:
+     - Codex 擔任的席位(risk、security、compliance)暫由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,留言模型標記註明代答(例:`claude-opus-medium(代 Codex,使用者 2026-10-28 指示至另行通知)`)。
+     - 代答期間,意見席把待審資料交給雲端 Claude 屬資料外送例外,範圍同 DIR-6 第 10 條(本 repo PR 的待審資料)。
+     - 本條是第 1 條「不派 Claude subagent 當意見席」與第 9 條(Codex 擔任)的暫行例外;代答的席位仍是意見席(DIR-6),統整席另派(DIR-6 第 2 條)。
+     - 恢復須使用者明示恢復 Codex;恢復時把本條移入「歷史」。
 - 原因:使用者指示(2026-10-22):「審議交由 qwen, glm 等可用的本地邏輯模型」。推得的理由:與本專案「不送資料出本機」一致,並讓席位跨模型分散。
 - 證據(2026-10-22 對照題:CHG 把 Gradio `server_name` 由 `127.0.0.1` 改 `0.0.0.0`,依 Guideline §5 應判 fail):
   - `qwen3:8b`(think)→ fail,理由正確;`<model>` 欄填錯
@@ -50,6 +55,8 @@
 - 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻;高風險 security 席 27B、第 9 條 Codex 席位為使用者決定)
 - 狀態:生效
 - 歷史:
+  - 2026-10-28 依 CHG-20261028-02 統整報告 U-2(使用者原話:「都照建議」;代答指示原話:「codex 先暫時使用opus代答直到我說可以恢復code」)新增第 12 條、第 1 條補引用。原敘述:
+    - 第 1 條(句首):審議席位由本機 Ollama 上的邏輯模型擔任(Qwen、GLM 等),**不派 Claude subagent 當意見席**;例外見第 9 條(security、compliance 由 Codex 擔任);統整席由 Claude subagent 擔任(DIR-6)。
   - 2026-10-28 依 CHG-20261028-02 DIR-5 統整報告修訂:M-1 移除互讀階段(使用者原話:「目前不需要交叉審議 因為有統一的最後審議席所以只要最後進行統整裁決即可」);M-3 現行條文去除「否決席」用語(統整報告 RS-7)。原敘述:
     - 每席逾時第 1 點:27B 席某一階段逾時,或累計超過 30 分鐘仍沒有回答,不再用 27B 重派,該席該階段直接由 Codex(`-s read-only`、prompt 由 stdin)作答;Codex 也沒有回答時依第 9 條重派 Codex 一次,仍失敗記 `no-answer`。改派每席每階段各自判定:第一階段改派,互讀階段仍先試 27B。
     - 每席逾時第 2 點:改派後判決行與留言的 `<model>` 欄記 `codex-cli <版本>(27B 逾時 30 分鐘改派)`,留言說明欄列出改派的席位與階段。改派會把該席送審資料送往雲端,適用第 9 條的使用者明示例外。
