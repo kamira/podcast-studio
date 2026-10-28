@@ -731,10 +731,11 @@ def registered_worktrees() -> List[Path]:
 def safe_remove_view(path: Path) -> bool:
     """本次建立的檢視與上次留下的舊檢視共用的安全清理,不丟例外。
     只在目錄內僅有 `.git` 一項且為一般檔案時:刪該 `.git` 指標檔 → 非遞迴 rmdir(目錄非空即失敗)→
-    `git worktree prune`;`.review/` 空了就 rmdir。目錄不存在時只做 prune 與 `.review/` 的 rmdir。
+    `git worktree prune`;`.review/` 空了就 rmdir。只有本次確實刪掉指標檔與目錄後才 prune;
+    目錄不存在或拒絕刪除時都不 prune(不碰其他 worktree 的登記)。
     不符條件或刪除失敗就不刪、留下目錄並在 stderr 印繁中警告,回傳 False。
     不使用 git 的強制移除與遞迴刪除(不帶強制旗標的 `git worktree remove` 對 --no-checkout 檢視一律失敗)。"""
-    ok = True
+    ok, removed = True, False
     if path.exists() or path.is_symlink():
         pointer = path / ".git"
         try:
@@ -743,13 +744,15 @@ def safe_remove_view(path: Path) -> bool:
                 raise OSError("目錄內除 .git 指標檔外還有其他項目")
             pointer.unlink()
             path.rmdir()  # 非遞迴
+            removed = True
         except OSError as e:
             ok = False
             print("警告:唯讀檢視 {} 未刪除({});請確認目錄內容後手動處理。".format(path, e), file=sys.stderr)
-    try:
-        repo_git("worktree", "prune")
-    except (CmdError, OSError) as e:
-        log("git worktree prune 失敗:{}".format(e))
+    if removed:
+        try:
+            repo_git("worktree", "prune")
+        except (CmdError, OSError) as e:
+            log("git worktree prune 失敗:{}".format(e))
     try:
         if not VIEW_ROOT.is_symlink():
             VIEW_ROOT.rmdir()  # 非遞迴:只刪空的 .review/

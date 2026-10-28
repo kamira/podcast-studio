@@ -1105,6 +1105,7 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual((self.VIEW / "執行期間放入.txt").read_text(encoding="utf-8"), "保留")
         self.assertTrue((self.VIEW / ".git").is_file())
         self.assertEqual(self.git_calls(env, "remove"), [])
+        self.assertEqual(self.git_calls(env, "prune"), [])  # 拒絕刪除時不 prune
 
     def test_view_removed_when_panel_raises(self):
         env = self.big_env()
@@ -1121,6 +1122,7 @@ class CodexViewTest(unittest.TestCase):
             local_review.run_panel = orig
         self.assertFalse(self.VIEW.exists())
         self.assertEqual(self.git_calls(env, "remove"), [])
+        self.assertEqual(len(self.git_calls(env, "prune")), 1)  # 確實刪掉後才 prune
 
     def test_extra_item_after_add_exit_2_and_kept(self):
         env = self.big_env()
@@ -1132,6 +1134,7 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(env.codex_calls, [])
         self.assertTrue((self.VIEW / "x.py").is_file())
         self.assertEqual(self.git_calls(env, "remove"), [])
+        self.assertEqual(self.git_calls(env, "prune"), [])  # 拒絕刪除時不 prune
 
     def test_view_failures_exit_2_without_leftover(self):
         for mode in ("fetch", "add", "head"):
@@ -1232,6 +1235,7 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(keep.read_text(encoding="utf-8"), "不能刪")
         self.assertEqual(sorted(p.name for p in self.VIEW.iterdir()), [".git", "使用者的檔.txt"])
         self.assertEqual(self.git_calls(env, "remove"), [])
+        self.assertEqual(self.git_calls(env, "prune"), [])  # 拒絕刪除時不 prune
         self.assertEqual(self.git_calls(env, "fetch"), [])
         self.assertEqual(env.codex_calls, [])
 
@@ -1246,6 +1250,7 @@ class CodexViewTest(unittest.TestCase):
         self.assertEqual(keep.read_text(encoding="utf-8"), "不能刪")
         self.assertEqual(sorted(p.name for p in self.VIEW.iterdir()), ["使用者的檔.txt"])
         self.assertEqual(self.git_calls(env, "remove"), [])
+        self.assertEqual(self.git_calls(env, "prune"), [])
         self.assertEqual(self.git_calls(env, "fetch"), [])
         self.assertEqual(env.codex_calls, [])
 
