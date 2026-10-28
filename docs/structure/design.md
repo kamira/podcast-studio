@@ -4,6 +4,7 @@
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:新增 HTTP API 契約、節點登錄表、設定模組介面、跨行程鎖;CLI 與 Gradio 版移除;設計決策表加入本筆決策(以 T1~T13 合併後的 main 為準)。
 > 2026-10-26 依 CHG-20261026-01 結構文件更新:新增 `taiwan_ai.role_config()`;生圖與聲線改讀設定、mflux 子程序加 `HF_HUB_OFFLINE=1`;移除 `FLUX` 常數;`wav_seconds()` 改為自寫 RIFF/WAVE 解析;影片合成 `-r 10`、WAV 加 `-t`;設計決策表加入本筆代決(以 T1~T5 合併後的 main 為準)。
 > 2026-10-28 依 CHG-20261028-01 結構文件更新:設計決策表新增「Codex 席以 PR head 唯讀檢視讀完整程式」。
+> 2026-10-28 依 CHG-20261028-02 結構文件更新:設計決策表新增「審議席改為意見、單一統整席判定」;「本機審議閘」列改記 gate 驗判定留言。
 
 > 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 T1~T9 與修正為準):新增專案 API 契約、`breezy_worker` 介面(jobs 格式、stdout 進度行、G2PW `num_workers = 0`、環境由 `tts_service` 傳入 `taiwan_ai.BREEZY_ENV`)、合成快取鍵、`project` / `timeline` / `tts_service` / `names` 元件、`media.render_timeline` 與 `media.sniff_binary`;設計決策表加入本筆決策(含修訂 2 合成粒度與實測依據);畫布存檔改為保留 `steps`。
 
@@ -280,12 +281,13 @@ classDiagram
 | commit 引用 CHG 編號,只改 `docs/knowledge/` 豁免 | 全部要 CHG vs knowledge 豁免 | knowledge 條目是帳本寫入,不是變更 | 〔觀察〕CHG-20261022-03 |
 | plan-check 只查 PR 改到、尚未完成驗收的 CHG | 全部 CHG vs PR 改到的 CHG | 已收尾的舊 CHG 不該因新規則變紅;狀態寫明「計畫待補」的草稿只警告 | 〔觀察〕CHG-20261022-03 |
 | lint 範圍 `ruff check --select E9,F` | ruff 全規則 vs `E9,F` | 既有程式 `E9,F` 全過;全規則會把既有風格債變成紅燈,更嚴格的規則另開 CHG | 〔觀察〕CHG-20261022-03 |
-| 本機審議閘:本機跑、CI 驗留言 | CI 內跑模型 vs 本機跑、CI 驗留言 | 代管 runner 連不到本機 Ollama;`review` job 只驗擁有者留言、目前 head sha、否決席無 fail、每席有回答 | 〔觀察〕CHG-20261022-03 |
+| 本機審議閘:本機跑、CI 驗留言 | CI 內跑模型 vs 本機跑、CI 驗留言 | 代管 runner 連不到本機 Ollama;`review` job 只驗擁有者留言、目前 head sha、六席意見留言,以及排在其後、同 CHG 的統整判定留言為 `merge`(CHG-20261028-02 起不再看否決席) | 〔觀察〕CHG-20261022-03;CHG-20261028-02 |
 | CD 定義為本機部署腳本 `scripts/deploy_local.sh` | 不做 vs 本機部署腳本 vs 發 release | 產品只在本機執行,沒有遠端環境;部署後驗證只綁本機(fail-closed) | 〔觀察〕CHG-20261022-03 |
 | main 保護以 ruleset 強制 | ruleset vs 只靠約定 | repo 已公開,ruleset 免費可用;要求四項 check 通過、禁止直接 push 與 force push、只允許 squash | 〔觀察〕CHG-20261022-03 |
 | security、compliance 審議席由 Codex 擔任 | 本機 Ollama vs Codex(雲端,`-s read-only`) | 實審中 8B / 27B 輸出截斷或誤判,Codex 回答證據具體;送審資料送出本機屬使用者明示例外,前提是 repo 已公開 | 〔觀察〕DIR-1 第 9 條(使用者 2026-10-23 指示) |
 | 暫停 27B 審議 | 27B vs Codex 擔任高風險 risk 席 | 使用者指示暫不使用 27B;`scripts/local_review.py` 預設仍含 27B,暫停期間須帶 `--codex-seats risk,security,compliance` | 〔觀察〕DIR-1 第 10 條(使用者 2026-10-23 指示) |
 | Codex 席以 PR head 唯讀檢視讀完整程式 | 整份 diff 內嵌 vs 分檔送審 vs PR head 唯讀檢視 | Codex 席沿用 Ollama 的 `num_ctx` 截短時,大 CHG 讓 diff 被截到空(PR #76);Codex 以 `-s read-only` 執行,可唯讀執行 `git show`、`git diff`。diff 經過濾後 ≤ 30000 字內嵌完整 diff,超過改用 `.review/` 下以 head sha 建立的 `--no-checkout` detached worktree(不寫出追蹤檔以免依 PR 的 `.gitattributes` 觸發本機 filter、停用 hook、比對 HEAD、審完移除;Codex 只以 `git show`、`git diff --no-textconv --no-ext-diff` 讀取);本次與舊檢視共用安全清理:只有 `.git` 才刪指標檔與空目錄並 prune,不用 git 的強制移除與遞迴刪除,否則留下並警告;同名舊目錄另須為登記的 worktree;Ollama 席不變 | 〔觀察〕CHG-20261028-01(使用者 2026-10-28 核准 C-2) |
+| 審議席改為意見、單一統整席判定 | 派發者裁決 vs 單一獨立統整席判定 vs 多數決 | 否決席常因送審內容不完整或模型誤讀判 fail / no-answer 卻仍擋 merge;使用者選擇由獨立 Opus medium 子代理讀意見、CHG 與完整程式後判定 `merge` / `fix`;`claude -p` OAuth 過期,故子代理只寫 JSON、由 `scripts/review_decision.py` 驗證後貼出(不呼叫模型,`model`、`effort` 取自參數);標記與 `[verdict]` 行格式不變;非 think 的 Ollama 席 CHG 過大時截短 CHG | 〔觀察〕CHG-20261028-02(使用者 2026-10-28 指示);DIR-6 |
 | 27B 逾時 30 分鐘改派 Codex | 重派 27B vs 改派 Codex | 27B 太慢;某階段逾時或累計超過 30 分鐘沒有回答即改派,該席判決的模型欄註明改派 | 〔觀察〕DIR-1(使用者 2026-10-23 規則) |
 | 生圖與聲線設定每次呼叫重讀 | 每次呼叫重讀 vs 行程啟動時讀一次 | 與 `taiwan_ai.model()` 一致;MCP 是長駐行程,改了設定要立刻生效 | 〔觀察〕CHG-20261026-01 代決 1 |
 | 新增 `taiwan_ai.role_config()` | 新增介面 vs 各處直接讀 `settings.load()["roles"]` | `_role()` 要求 `model` 鍵,`voice` 沒有;設定只經 `settings.load()` 存取 | 〔觀察〕CHG-20261026-01 代決 1 |
