@@ -207,7 +207,7 @@
   - 改到任何程式路徑的 PR,不論風險分級,merge 前一律等使用者核准;只改 `docs/`、`features/` 的 PR 可在 CI 綠後自動 merge。
   - 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/review_decision.py`、`scripts/deploy_local.sh`)的 PR,另需擁有者留言 `<!-- infra-approved sha=<head> -->`。
   - main 只允許 squash merge,squash 標題帶 CHG 編號。
-  - 本機審議以 `scripts/local_review.py` 執行(六席意見);DIR-1 第 10 條(暫停 27B)期間,一律帶 `--codex-seats risk,security,compliance`。意見留言貼出後,派發者派一個獨立 Claude subagent(預設 Opus、effort medium,非該 PR 施工者)擔任統整席,寫判定 JSON 至 `outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,再以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定;派發者不得修改 JSON 內容(DIR-6)。統整席是雲端 Claude,讀取待審資料屬 DIR-6 第 10 條的使用者明示資料外送例外,範圍只限本 repo(已公開)PR 的意見留言、CHG 全文、diff 與 head 檔案內容,不含 `config/studio.db`、`outputs/`、聲線檔等repo 外資料;DIR-1 第 9 條(Codex 席)的例外不因此擴大。
+  - 本機審議以 `scripts/local_review.py` 執行(六席意見);DIR-1 第 10 條(暫停 27B)期間,一律帶 `--codex-seats risk,security,compliance`。意見留言貼出後,派發者派一個獨立 Claude subagent(預設 Opus、effort medium,非該 PR 施工者)擔任統整席,寫判定 JSON 至 `outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,再以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定;派發者不得修改 JSON 內容(DIR-6)。統整席是雲端 Claude,讀取待審資料屬 DIR-6 第 10 條的使用者明示資料外送例外,範圍只限本 repo(已公開)PR 的意見留言、CHG 全文、diff 與 head 檔案內容,不含 `config/studio.db`、`outputs/`、聲線檔等repo 外資料;DIR-1 第 9 條(Codex 席)的例外不因此擴大。DIR-1 第 12 條暫行期間,Codex 擔任的席位(risk、security、compliance)由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,留言模型標記註明代答;其待審資料交給雲端 Claude 屬資料外送例外,範圍同 DIR-6 第 10 條;至使用者明示恢復 Codex 為止。
 
 ## 9. 導入盤點:具名待補項
 
