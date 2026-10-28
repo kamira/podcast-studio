@@ -4,6 +4,7 @@
 > 2026-10-23 依 CHG-20261022-03 補入 CI/CD 相關目錄(以 repo 追蹤檔為準)。
 > 2026-10-26 依 CHG-20261022-01 結構文件更新:新增網頁伺服器、節點引擎、設定模組、`static/`、`config/`、`workflows/`、`tests/`;移除 Gradio 版 `podcast_studio.py`(以 T1~T13 合併後的 main 為準)。
 > 2026-10-26 依 CHG-20261026-01 結構文件更新:`workflows/` 只追蹤 `default.json`,使用者另存的檔案被 `.gitignore` 忽略。
+> 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 `chg/CHG-20261022-04-impl` 的 T1~T9 與修正為準):新增 `breezy_worker.py`、`names.py`、`project.py`、`timeline.py`、`tts_service.py`、`projects/`(ignored)、`static/project.js`、`static/timeline.js`、`static/wizard.js`、`static/edit.js`、`tests/integration/`;`nodes.py` 為十一種節點;`docs/changes/review/` 放 DIR-5 統整報告。
 
 ## 樹狀
 
@@ -12,14 +13,23 @@ podcast-studio/
 ├── studio_server.py           # 入口:網頁伺服器(FastAPI,只綁 127.0.0.1:7860)
 ├── local_models_mcp.py        # 入口:MCP 伺服器(stdio)
 ├── executor.py                # 流程圖驗證與依拓撲順序執行
-├── nodes.py                   # 節點登錄表(十種節點)
-├── settings.py                # 模型設定讀寫(SQLite config/studio.db)
+├── nodes.py                   # 節點登錄表(十一種節點;含「送到素材庫」)
+├── settings.py                # 模型設定與語音預設讀寫(SQLite config/studio.db,schema 2)
 ├── heavy_lock.py              # 跨行程重型工作鎖(outputs/.heavy.lock)
 ├── taiwan_ai.py               # 模型層(共用函式庫;CLI 已移除)
-├── media.py                   # 媒體層
+├── media.py                   # 媒體層(含時間軸匯出 render_timeline、內容嗅探 sniff_binary)
+├── names.py                   # 名稱規則:工作流程名稱與專案名稱共用的中英日白名單(CHG-20261022-04 T2)
+├── project.py                 # 專案資料模型:分句、停頓、標註、版本、.trash(CHG-20261022-04 T2)
+├── timeline.py                # 時間軸計算 layout():片段、字幕 cue、畫面軌(CHG-20261022-04 T4)
+├── tts_service.py             # 逐句合成服務:髒片段、快取、語速後製(CHG-20261022-04 T3)
+├── breezy_worker.py           # BreezyVoice worker(在 BreezyVoice venv 執行:synth / annotate;CHG-20261022-04 T1)
 ├── static/                    # 網頁前端(原生 HTML/JS/CSS,免建置)
-│   ├── index.html             # 首頁、設定頁(含「進階流程」節點畫布)、免責說明頁
-│   ├── app.js
+│   ├── index.html             # 首頁(精靈 / 完整模式兩張卡片)、精靈、完整模式、設定頁(含「進階流程」節點畫布)、免責說明頁
+│   ├── app.js                 # 共用工具 window.Studio、路由、設定頁、節點畫布
+│   ├── project.js             # 專案狀態(Store)、文稿 / 封面 / 語音 / 匯出面板、逐句合成(CHG-20261022-04 T7)
+│   ├── timeline.js            # 時間軸三軌、預覽、屬性面板、素材庫(T7)
+│   ├── wizard.js              # 首頁、步驟精靈、完整模式(T7)
+│   ├── edit.js                # 停頓、聲調、語速、畫面軌拖拉等編輯互動(T8)
 │   ├── style.css
 │   └── vendor/                # 唯一第三方前端檔:Drawflow 0.0.60(MIT)
 │       ├── drawflow.min.js
@@ -46,6 +56,7 @@ podcast-studio/
 │   ├── ai-guideline.md
 │   ├── structure/{directory,logical,design,data}.md
 │   ├── changes/               # CHG-YYYYMMDD-NN.md(另有 .gitkeep)
+│   │   └── review/            # DIR-5 統整報告 <CHG-ID>-summary.md(不屬 CHG 檔名規則)
 │   ├── acceptance/            # ACC-YYYYMMDD-NN.md(另有 .gitkeep)
 │   └── knowledge/{INDEX.md,directives.md,patterns.md,vocabulary.json}
 ├── features/                  # 行為規格(Gherkin .feature,CHG 的 Behaviour spec)
@@ -65,6 +76,7 @@ podcast-studio/
 │   ├── conftest.py            # 把 repo 根目錄放進 sys.path
 │   ├── test_*.py              # 產品程式的 pytest(CHG-20261022-01)
 │   ├── ui_check.py            # UI 互動檢查(Playwright 無頭 Chromium;不屬 pytest,見下表)
+│   ├── integration/           # 真模型整合測試(test_breezy_worker_real.py;以 BreezyVoice venv 執行,不列入 check.sh)
 │   └── ci/                    # scripts/ 的單元測試(unittest)
 ├── .ai-sdlc/                  # vendored ai-sdlc v1.66.0(不修改內容)
 │   ├── README.md              # 版本、來源、MIT 授權、更新方式
@@ -78,7 +90,8 @@ podcast-studio/
 │   ├── launch.json            # Claude 桌面 app 啟動網頁(uv run --script studio_server.py)
 │   └── worktrees/             # agent worktree(ignored,CHG-20261022-03 T9)
 ├── .gitignore
-├── outputs/                   # 產出物(ignored);uploads/ 為上傳檔,.heavy.lock 為重型鎖,ui_check/ 為 UI 檢查截圖
+├── outputs/                   # 產出物(ignored);uploads/ 為上傳檔,.heavy.lock 為重型鎖,ui_check/ 為 UI 檢查截圖,.tmp/ 為 /api/annotate 暫存
+├── projects/                  # 專案資料(ignored,使用者資料):<名稱>/{project.json,history/,audio/,assets/,tmp/,.lock}、.trash/
 └── tools/BreezyVoice/         # 第三方 repo + .venv(ignored,由腳本重建)
 ```
 
@@ -87,7 +100,9 @@ podcast-studio/
 | 路徑 | 職責 | 備註 | 等級 |
 |------|------|------|------|
 | `/`(根目錄 `.py`) | 全部 Python 程式碼;平鋪,沒有 package | 入口檔(`studio_server.py`、`local_models_mcp.py`)以 `sys.path.insert` import 共用模組;相依方向見 `logical.md` | 〔觀察〕 |
-| `static/` | 網頁前端:`index.html`(首頁右上角 ⚙ → 設定頁;設定頁子頁含「進階流程」節點畫布)、`app.js`、`style.css` | 原生 JS,不經建置、不從 CDN 載入;由 `studio_server.py` 只解析 `static/` 之下的真實路徑送出;首頁的 `__STUDIO_TOKEN__` 換成啟動權杖 | 〔觀察〕 |
+| `static/` | 網頁前端:`index.html`(首頁「精靈」「完整模式」兩張卡片、右上角 ⚙ → 設定頁;設定頁子頁含「語音預設」與「進階流程」節點畫布;底部「免責說明與授權」連結)、`app.js`(共用工具 `window.Studio`、hash 路由、設定頁、畫布)、`project.js`(專案狀態與文稿 / 封面 / 語音 / 匯出面板)、`timeline.js`(時間軸三軌、預覽、屬性、素材庫)、`wizard.js`(首頁、精靈、完整模式)、`edit.js`(停頓、聲調、語速、畫面軌編輯)、`style.css` | 原生 JS,不經建置、不從 CDN 載入;由 `studio_server.py` 只解析 `static/` 之下的真實路徑送出;首頁的 `__STUDIO_TOKEN__` 換成啟動權杖;後四個模組依序載入,以 `Studio.hook(name, fn)` 串接(CHG-20261022-04 T7、T8) | 〔觀察〕 |
+| `projects/` | 專案資料(CHG-20261022-04):`<名稱>/project.json`(`schema_version: 1`)、`history/`(最近 10 版)、`audio/`(合成與自錄音檔)、`assets/`(素材)、`tmp/`(worker 輸入檔,用完即刪)、`.lock`(專案層級鎖);`.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案(30 天後啟動時清除) | `.gitignore`(使用者資料);只經 `project.py` 存取;不經 `/files/*` 提供,音檔與素材只經 `/api/projects/{p}/media/{id}` 送出 | 〔觀察〕 |
+| 根目錄 CHG-20261022-04 模組 | `names.py`(名稱白名單,`studio_server.py` 與 `project.py` 共用)、`project.py`(資料模型)、`timeline.py`(純函式 `layout()`)、`tts_service.py`(合成服務)、`breezy_worker.py`(以 BreezyVoice venv 執行、只用標準庫與 BreezyVoice 模組,不 import repo 內其他模組) | 相依方向見 `logical.md` | 〔觀察〕 |
 | `static/vendor/` | Drawflow 0.0.60 的 `drawflow.min.js`、`drawflow.min.css`、`LICENSE.drawflow` 與 `README.md` | 唯一第三方前端檔(CHG-20261022-01 前置 P1);`tests/test_static.py` 比對 README 記載的 SHA-256 | 〔觀察〕 |
 | `workflows/` | 工作流程 JSON(executor 流程圖格式);`default.json` 為預設範本 | 由 `GET/PUT /api/workflows/{name}` 讀寫;使用者另存的檔案(與存檔暫存檔 `.wf-*.tmp`)也落在這裡;git 只追蹤 `default.json`,其他檔案由 `.gitignore` 的 `workflows/*`、`!workflows/default.json` 忽略,存檔後工作樹仍乾淨(CHG-20261026-01 T3);日後不在此新增其他追蹤檔 | 〔觀察〕 |
 | `config/` | 使用者設定:`studio.db`(與 `-wal`、`-shm`)、`.studio.db.lock`、舊 `models.json` | 全部列入 `.gitignore`;只經 `settings.py` 存取,`/files/*` 不提供 | 〔觀察〕 |
@@ -97,13 +112,16 @@ podcast-studio/
 | `tools/` | 第三方工具與 venv(約 1.9 GB) | `.gitignore`;無 `.git` | 〔觀察〕 |
 | `.claude/` | Claude 桌面 app 設定(追蹤檔只有 `launch.json`) | `launch.json` 用 `uv` 絕對路徑,參數 `run --script studio_server.py`(不帶設定檔路徑);`.claude/worktrees/` 是 Claude 桌面 app 為派發施工建立的 agent worktree,列入 `.gitignore`,避免主工作副本被判為不乾淨而讓 `scripts/deploy_local.sh` 中止(CHG-20261022-03 T9) | 〔觀察〕 |
 | `docs/knowledge/` | 使用者教過的規則:`INDEX.md`、`directives.md`(DIR-n)、`patterns.md`、`vocabulary.json` | 只改本目錄的 commit 免引用 CHG 編號(CHG-20261022-03) | 〔觀察〕 |
-| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04,對應功能不在 main 上 | 〔觀察〕 |
+| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04(對應功能隨該筆合併 PR 進 main) | 〔觀察〕 |
 | `scripts/ci/` | CI 治理檢查:`commit_check.py`、`plan_check_changed.py`、`review_gate.py`、`secret_scan.py`、`secret_allowlist.txt` | 只用 Python 標準函式庫;CI 一律從 base 分支的 trusted/ 副本(CI 執行期目錄,不在 repo 內)執行 | 〔觀察〕 |
 | `scripts/local_review.py` | 本機審議會(DIR-1 六席兩階段),以 `gh pr comment` 貼出判決 | 只讀 PR 資料、不 checkout;拒絕 fork 與非擁有者 PR | 〔觀察〕 |
 | `scripts/check.sh` | 產品測試載具(CHG-20261022-01 T1):以 uv 暫時環境帶 pytest、fastapi 等依賴執行 `pytest -q tests/` | 可帶測試路徑或 pytest 參數;CI `program` job 與 `scripts/deploy_local.sh` 都會執行 | 〔觀察〕 |
 | `scripts/deploy_local.sh` | 本機部署:在乾淨的 main 上 `pull --ff-only`,重啟 7860 網頁伺服器(`uv run --script studio_server.py`),驗證只綁本機 | 只寫入 `outputs/` 下的 pidfile 與 log | 〔觀察〕 |
 | `tests/`(根層) | 產品程式的 pytest:設定、節點、執行器、重型鎖、伺服器核心 / 檔案 / 設定 API、前端靜態檢查、預設範本 | 以 `./scripts/check.sh` 執行;模型呼叫一律以替身取代;ADP-6 的結案以 ACC 為準 | 〔觀察〕 |
 | `tests/ui_check.py` | UI 互動檢查(CHG-20261022-01 T14):PEP 723 script(playwright 1.64.1),本行程內以替身執行器與替身 Ollama 清單啟動 `create_app()`(隨機空閒埠,設定資料庫與 `outputs/`、`workflows/` 放暫存目錄),以無頭 Chromium 操作 ⚙ → 設定 › 進階流程、拖節點、連線、拖檔、釘住、設定存檔;截圖寫 `outputs/ui_check/` | `uv run --script tests/ui_check.py`;需先安裝 Chromium(前置 P2);檔名不是 `test_*.py`,`./scripts/check.sh` 與 CI 不執行 | 〔觀察〕 |
+| `tests/ui_check.py`(CHG-20261022-04 T9 擴充) | 拆成 `canvas`(上一列)與 `editor` 兩組,各用自己的暫存目錄與伺服器;不帶參數兩組都跑,`--only editor` 只跑 editor;editor 的合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身,匯出與注音以替身取代;截圖 `home.png`、`wizard.png`、`full.png`、`editor.png`、`tone.png`、`disclaimer.png` | DIR-5 修正輪加入「合成中途試聽」與「停頓 0 秒仍可拖拉」情境 | 〔觀察〕 |
+| `tests/integration/` | 真模型整合測試(`test_breezy_worker_real.py`:兩句合成與 `annotate`) | 以 `tools/BreezyVoice/.venv/bin/python -m pytest` 在本機執行,不列入 `./scripts/check.sh` 與 CI | 〔觀察〕 |
+| `docs/changes/review/` | DIR-5 統整報告(`<CHG-ID>-summary.md`) | 檔名不符 `CHG-*.md`,不受 `doc_integrity_check` 的 CHG 欄位檢查與 `plan_check_changed.py` 檢查(使用者 2026-10-28 決定,RS-41) | 〔觀察〕 |
 | `tests/ci/` | `scripts/` 的單元測試 | `python3 -m unittest discover -s tests/ci -v`(`./scripts/check.sh` 也會一併收集) | 〔觀察〕 |
 | `.ai-sdlc/` | vendored ai-sdlc v1.66.0:`skills/ai-sdlc-autopilot/{scripts,assets}`、`SHA256SUMS`、`README.md` | 內容一律不修改;版本與來源記在 `.ai-sdlc/README.md` | 〔觀察〕 |
 | `.github/workflows/ci.yml` | GitHub Actions CI:`document`、`chg`、`program`、`review` 四個 job | main ruleset 要求四項全過 | 〔觀察〕 |
