@@ -22,6 +22,8 @@
 - `canvas`(CHG-20261022-01):節點畫布、檔案拖放、設定頁;截圖 canvas.png、dnd.png、settings.png。
 - `editor`(CHG-20261022-04 T9):首頁雙卡片、精靈 ①~⑤、完整模式、剪輯互動、免責頁、
   畫布刪除封面步驟後的精靈步驟;截圖 home.png、wizard.png、full.png、editor.png、tone.png、disclaimer.png。
+  (CHG-20261029-01 T5)屬性面板的連音、清晰度拉桿與字詞清晰度;截圖 prosody.png。後製的 shape worker
+  以本機 Python 替身代替(輸入照抄成輸出,只用標準庫)。
 不帶參數兩組都跑(先 canvas 再 editor);`--only editor` 只跑 editor。
 
 editor 的替身:語音合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身腳本
@@ -421,7 +423,7 @@ SCRIPT_EDITED = SCRIPT.replace("四十年", "五十年")
 SYNTH_SECONDS = 1.6          # 替身 worker 每句的長度
 OWN_WAV_SECONDS = 1.2        # 自錄音檔長度
 VOICE_TEXT = "這是聲線逐字稿(UI 檢查替身)。"
-EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "disclaimer.png")
+EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "disclaimer.png")
 CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png")
 STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ"}
 
@@ -457,6 +459,24 @@ for n, job in enumerate(body["jobs"]):
 """ % SYNTH_SECONDS
 
 
+# 替身 shape worker(CHG-20261029-01):參數格式同 breezy_worker.py shape;輸入照抄成輸出,
+# 呼叫紀錄寫到同目錄的 shape.log(一行一次呼叫)。
+FAKE_SHAPE = """# -*- coding: utf-8 -*-
+import json, os, shutil, sys
+HERE = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+jobs_path, out = args[args.index("--jobs") + 1], args[args.index("--out") + 1]
+with open(jobs_path, encoding="utf-8") as f:
+    body = json.load(f)
+with open(os.path.join(HERE, "shape.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"jobs": body["jobs"]}, ensure_ascii=False) + "\\n")
+for job in body["jobs"]:
+    shutil.copyfile(os.path.join(out, job["input"]), os.path.join(out, job["id"] + ".wav"))
+    sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0}) + "\\n")
+    sys.stdout.flush()
+"""
+
+
 def sine_wav(seconds: float, rate: int = 22050, freq: float = 330.0) -> bytes:
     """真正的 RIFF/WAVE(PCM 16-bit 單聲道);自錄音檔替身用。"""
     n = int(seconds * rate)
@@ -484,12 +504,22 @@ class EditorStubs:
         self.fake.mkdir(parents=True, exist_ok=True)
         self.breezy.mkdir(parents=True, exist_ok=True)
         (self.fake / "worker.py").write_text(FAKE_WORKER, encoding="utf-8")
+        (self.fake / "shape.py").write_text(FAKE_SHAPE, encoding="utf-8")
         self.render_calls: list[list[str]] = []
         self.annotate_calls: list[str] = []
         self.out: Path | None = None
 
     def worker_argv(self, jobs_path, out_dir):
         return [sys.executable, str(self.fake / "worker.py"), "synth", "--jobs", str(jobs_path), "--out", str(out_dir)]
+
+    def shape_argv(self, jobs_path, out_dir):
+        return [sys.executable, str(self.fake / "shape.py"), "shape", "--jobs", str(jobs_path), "--out", str(out_dir)]
+
+    def shape_calls(self) -> list[list[dict]]:
+        p = self.fake / "shape.log"
+        if not p.exists():
+            return []
+        return [json.loads(x)["jobs"] for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
 
     def set_delay(self, seconds: float) -> None:
         (self.fake / "delay.txt").write_text(str(seconds), encoding="utf-8")
@@ -924,6 +954,64 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         no_prev_next("#page-full")
         shot("full.png")
 
+        # CHG-20261029-01 T5:韻律拉桿與字詞清晰度
+        begin("完整模式:第 1 句連音拉桿拖動時即時顯示百分比,放開後只重做後製(不重新合成)")
+        n_calls = len(calls())
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[0]}"]').click()
+        expect(page.locator("#props-body .prop-title")).to_have_text("選取:片段 #1")
+        conn = page.locator('#props-body [data-hook="prosody"] input[aria-label="連音(百分比)"]')
+        out = conn.locator("xpath=following-sibling::output[1]")
+        expect(conn).to_have_attribute("min", "0")
+        expect(conn).to_have_attribute("max", "100")
+        expect(conn).to_have_attribute("step", "1")
+        expect(out).to_have_text("0%")
+        conn.evaluate("(e) => { e.value = '35'; e.dispatchEvent(new Event('input', {bubbles: true})); }")
+        expect(out).to_have_text("35%")
+        check(proj().segments[0]["connect"] is None, "拖動中(還沒放開)不應送出")
+        conn.evaluate("(e) => e.dispatchEvent(new Event('change', {bubbles: true}))")
+        wait_until(lambda: proj().segments[0]["connect"] == 35, "放開後第 1 句連音應存成 35")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "連音改了之後應完成後製")
+        check(len(calls()) == n_calls, "改連音不應呼叫合成 worker")
+        check(stubs.shape_calls() and stubs.shape_calls()[-1][0]["connect"] == 35, "應以 shape 重做第 1 句的後製")
+        expect(page.locator('#props-body [data-hook="prosody"] input[aria-label="連音(百分比)"]')).to_have_value("35")
+
+        begin("完整模式:按連音的「預設」改回 null")
+        page.locator('#props-body [data-hook="prosody"] .pct-row').first.locator(".pct-reset").click()
+        wait_until(lambda: proj().segments[0]["connect"] is None, "按「預設」後連音應為 null")
+        check(len(calls()) == n_calls, "改回預設不應呼叫合成 worker")
+
+        begin("完整模式:清晰度模式拖曳選取「歡迎」設 40% 並套用")
+        page.locator('#props-body .tone-mode[data-mode="clarity"]').click()
+        expect(page.locator('#props-body .tone-mode[data-mode="clarity"]')).to_have_attribute("aria-pressed", "true")
+        c4 = page.locator('#props-body .tone-char[data-index="4"]')
+        c5 = page.locator('#props-body .tone-char[data-index="5"]')
+        expect(c4.locator(".tone-glyph")).to_have_text("歡")
+        b4, b5 = c4.bounding_box(), c5.bounding_box()
+        page.mouse.move(b4["x"] + b4["width"] / 2, b4["y"] + b4["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(b5["x"] + b5["width"] / 2, b5["y"] + b5["height"] / 2, steps=4)
+        page.mouse.up()
+        wpop = page.locator("#word-popup")
+        expect(wpop).to_be_visible()
+        expect(wpop.locator(".tone-title")).to_have_text("「歡迎」的清晰度 — 第 5–6 字")
+        wpop.locator("input[type=range]").fill("40")
+        expect(wpop.locator("output")).to_have_text("40%")
+        wpop.get_by_role("button", name="套用").click()
+        wait_until(lambda: proj().segments[0]["word_clarity"] == [{"start": 4, "end": 6, "value": 40}],
+                   f"字詞清晰度應存成 [4, 6) 40%,實際 {proj().segments[0]['word_clarity']}")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "字詞清晰度改了之後應完成後製")
+        expect(page.locator('#props-body .tone-char[data-index="4"] .clarity-bar.is-own')).to_have_count(1)
+        check(len(calls()) == n_calls, "改字詞清晰度不應呼叫合成 worker")
+        shot("prosody.png")
+
+        begin("完整模式:自錄音檔的第 2 句,韻律拉桿停用")
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[1]}"]').click()
+        expect(page.locator("#props-body .prop-title")).to_have_text("選取:片段 #2")
+        for lab in ("連音", "清晰度"):
+            expect(page.locator(f'#props-body input[aria-label="{lab}(百分比)"]')).to_be_disabled()
+        expect(page.locator('#props-body [data-hook="prosody"]')).to_contain_text("自錄音檔不做後製")
+        page.locator('#props-body .tone-mode[data-mode="tone"]').click()
+
         # 4. 免責說明與授權
         begin("回首頁點底部「免責說明與授權」連結")
         page.locator("#page-full .back-link").click()
@@ -1072,6 +1160,7 @@ def run_suite(browser, suite: str) -> int:
             patch(heavy_lock, "LOCK_PATH", root / "outputs" / ".heavy.lock")
             patch(tts_service, "BREEZY", stubs.breezy)
             patch(tts_service, "_worker_argv", stubs.worker_argv)
+            patch(tts_service, "_shape_argv", stubs.shape_argv)
             patch(taiwan_ai, "role_config", lambda role: {"wav": "voice/voice.wav", "text": VOICE_TEXT})
             kwargs = {"render": stubs.render, "annotate": stubs.annotate}
         app = ss.create_app(runner=runner, root=root, ollama_tags=lambda: list(STUB_TAGS), **kwargs)

@@ -9,6 +9,8 @@
 //   "timeline"       .tl-gap[data-after](片段之後的空隙)、.tl-img .tl-edge[data-edge](圖片邊緣)
 // 修改一律經 Studio.Store.patchSegment / patchImage(伺服器驗證範圍並回傳新的專案檢視);
 // 改語速只送 PATCH(伺服器只重做變速,不重新合成);改聲調送 PATCH 後只合成這一句(髒片段)。
+// (CHG-20261029-01 T5)屬性面板「韻律」「語調」小節的百分比拉桿([data-hook="prosody"]、
+// [data-hook="pitch-props"])與聲調區的「念法 / 清晰度」模式;改這些只 PATCH 後呼叫 POST /post(不重新合成)。
 //
 // 約束(同 app.js):原生 JS、不動態執行字串程式碼、使用者與伺服器文字一律 textContent。
 "use strict";
@@ -403,6 +405,12 @@
 
   function mountTone(holder, seg) {
     if (!holder) return;
+    ToneMode.bar(holder, seg);
+    if (ToneMode.mode === "clarity") {
+      mountClarityChars(holder, seg);
+      holder.after(el("p", "muted tone-hint", "拖曳選取字詞設定清晰度(橫條長度 = 清晰度,紫色為個別設定)"));
+      return;
+    }
     holder.querySelectorAll(".tone-char[data-index]").forEach(function (c) {
       const index = Number(c.dataset.index);
       const ch = Array.from(seg.text)[index];
@@ -599,6 +607,373 @@
     });
   }
 
+  // ---------- 韻律:連音、清晰度、圓弧拉桿與字詞清晰度(CHG-20261029-01 T5) ----------
+  //
+  // 拉桿一律 0–100 整數、步進 1%,右側 <output> 即時顯示「NN%」(input 事件),放開(change)才送出;
+  // 「預設」按鈕送 null(取程式常數:連音 0%、清晰度 100%、圓弧 50%)。送出 = PATCH 片段後呼叫
+  // POST /post(只重做這一句的後製,不重新合成);目前有合成 / 匯出在跑(409)時稍後重試。
+  // 自錄音檔片段不做後製:拉桿停用並說明原因(D4)。
+
+  const PROSODY_DEFAULTS = { connect: 0, clarity: 100, roundness: 50 };
+  const POST_RETRY_MS = 1000;
+  const POST_RETRIES = 120;
+
+  // 字詞清晰度:把 [start, end) 設為 value(null = 清除),移除與它重疊的既有區段;依起點排序(純函式)
+  function withWordClarity(list, start, end, value) {
+    const out = (list || []).filter(function (w) { return w.end <= start || w.start >= end; })
+      .map(function (w) { return { start: w.start, end: w.end, value: w.value }; });
+    if (value !== null && value !== undefined) out.push({ start: start, end: end, value: value });
+    out.sort(function (a, b) { return a.start - b.start; });
+    return out;
+  }
+
+  // 每個字的清晰度(個別設定者優先,否則整句;null 取 100)與是否個別設定(純函式)
+  function charClarity(seg) {
+    const n = Array.from(seg.text).length;
+    const base = typeof seg.clarity === "number" ? seg.clarity : PROSODY_DEFAULTS.clarity;
+    const out = [];
+    for (let i = 0; i < n; i++) out.push({ value: base, own: false });
+    (seg.word_clarity || []).forEach(function (w) {
+      for (let i = w.start; i < w.end && i < n; i++) out[i] = { value: w.value, own: true };
+    });
+    return out;
+  }
+
+  function isSynthesized(seg) {
+    return !!(seg && seg.audio && ("key" in seg.audio));
+  }
+
+  function isExternal(seg) {
+    return !!(seg && seg.audio && !("key" in seg.audio));
+  }
+
+  function sleep(ms) {
+    return new Promise(function (r) { setTimeout(r, ms); });
+  }
+
+  const Post = {
+    running: new Set(),     // 後製中的片段 id(屬性面板顯示「⏳ 後製中」)
+    autoDone: {},           // 專案名稱 → 已自動補做過(開啟舊專案時只補一次)
+
+    chain: Promise.resolve(),
+
+    // 只重做指定片段的後製;本頁的後製請求一次一個(排隊),忙碌(409)時每秒重試,最多 2 分鐘
+    run(ids) {
+      const next = this.chain.then(() => this.runOne(ids));
+      this.chain = next.catch(function () { return null; });
+      return next;
+    },
+
+    async runOne(ids) {
+      const name = Store.name;
+      (ids || []).forEach((id) => this.running.add(id));
+      S.Props && S.Props.render();
+      try {
+        for (let k = 0; k < POST_RETRIES; k++) {
+          if (Store.name !== name) return null;
+          if (!Store.busy && !S.isRunning()) {
+            const r = await Store.mutate("POST", "/post", ids ? { segments: ids } : {});
+            if (r.ok || r.stale || r.status !== 409) {
+              if (!r.ok && !r.stale) S.toast("後製失敗:" + S.errorText(r), true);
+              return r;
+            }
+          }
+          await sleep(POST_RETRY_MS);
+        }
+        S.toast("後製等待逾時:目前的工作結束後請再調整一次", true);
+        return null;
+      } finally {
+        (ids || []).forEach((id) => this.running.delete(id));
+        S.Props && S.Props.render();
+      }
+    },
+  };
+
+  // PATCH 片段後只重做這一句的後製
+  async function patchAndPost(seg, body, okText) {
+    const r = await Store.patchSegment(seg.id, body);
+    if (!r.ok) {
+      if (!r.stale) S.toast("無法修改:" + S.errorText(r), true);
+      return r;
+    }
+    if (okText) S.toast(okText + "(只重做後製,不重新合成)");
+    if (isSynthesized(seg)) await Post.run([seg.id]);
+    return r;
+  }
+
+  // 百分比拉桿:{label, value(null = 預設), dflt, disabled, onCommit(v | null)}
+  function percentSlider(o) {
+    const wrap = el("div", "pct-slider");
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = "0";
+    input.max = "100";
+    input.step = "1";
+    input.className = "pct-input";
+    const v = typeof o.value === "number" ? o.value : o.dflt;
+    input.value = String(v);
+    input.setAttribute("aria-label", o.label + "(百分比)");
+    const out = document.createElement("output");
+    out.className = "pct-output";
+    out.textContent = v + "%";
+    const reset = el("button", "btn btn-small pct-reset", "預設");
+    reset.type = "button";
+    reset.title = o.label + "改回預設(" + o.dflt + "%)";
+    reset.disabled = !!o.disabled || typeof o.value !== "number";
+    input.disabled = !!o.disabled;
+    input.addEventListener("input", function () { out.textContent = input.value + "%"; });
+    input.addEventListener("change", function () { o.onCommit(Number(input.value)); });
+    reset.addEventListener("click", function () { o.onCommit(null); });
+    wrap.append(input, out, reset);
+    return wrap;
+  }
+
+  function mountProsody(holder, seg) {
+    if (!holder) return;
+    const ext = isExternal(seg);
+    const rows = [];
+    const add = function (key, label, hint) {
+      const row = el("div", "pct-row");
+      row.appendChild(el("span", "prop-label", label));
+      row.appendChild(percentSlider({
+        label: label, value: seg[key], dflt: PROSODY_DEFAULTS[key], disabled: ext,
+        onCommit: function (v) {
+          const body = {};
+          body[key] = v;
+          patchAndPost(seg, body, v === null ? label + "改回預設" : label + "改為 " + v + "%");
+        },
+      }));
+      rows.push(row, el("p", "muted pct-hint", hint));
+    };
+    add("connect", "連音", "字與字之間的黏著;句與句之間仍由「停頓」決定");
+    add("clarity", "清晰度", "100% 字正腔圓,越低越含糊;個別字詞可在下方另設");
+    if (ext) rows.push(el("p", "muted pct-hint is-disabled-note", "自錄音檔不做後製"));
+    holder.replaceChildren(...rows);
+    holder.classList.add("has-editor");
+  }
+
+  function mountPitchProps(holder, seg) {
+    if (!holder) return;
+    const ext = isExternal(seg);
+    const pitch = seg.pitch;
+    const rows = [];
+    const row = el("div", "pct-row");
+    row.appendChild(el("span", "prop-label", "圓弧"));
+    row.appendChild(percentSlider({
+      label: "圓弧", value: pitch ? pitch.roundness : null, dflt: PROSODY_DEFAULTS.roundness,
+      disabled: ext || !pitch,
+      onCommit: function (v) {
+        patchAndPost(seg, { pitch: { points: pitch.points, roundness: v } },
+          v === null ? "圓弧改回預設" : "圓弧改為 " + v + "%");
+      },
+    }));
+    rows.push(row, el("p", "muted pct-hint", "折線轉角的圓弧程度:0% 為直線折角,100% 為最圓滑"));
+    const info = el("p", "pitch-info");
+    info.dataset.hook = "pitch-info";
+    if (ext) info.textContent = "自錄音檔不做後製";
+    else if (!pitch) info.textContent = "沒有語調;在時間軸選取的語音片段上點兩下新增關鍵點";
+    else {
+      const k = S.PitchEdit ? S.PitchEdit.selected(seg.id) : -1;
+      let text = "關鍵點 " + pitch.points.length + " 個";
+      if (k >= 0 && pitch.points[k]) {
+        const p = pitch.points[k];
+        text += " · 選取中:#" + (k + 1) + "(位置 " + Math.round(p.pos * 100) + "%," + semiText(p.semi) + ")";
+      }
+      info.textContent = text;
+    }
+    rows.push(info);
+    const clear = el("button", "btn btn-small", "清除語調");
+    clear.type = "button";
+    clear.disabled = ext || !pitch;
+    clear.addEventListener("click", function () { patchAndPost(seg, { pitch: null }, "已清除語調"); });
+    rows.push(clear);
+    holder.replaceChildren(...rows);
+    holder.classList.add("has-editor");
+  }
+
+  function semiText(v) {
+    const n = Number(v);
+    return (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toFixed(1) + " 半音";
+  }
+
+  // 聲調區的模式:念法(注音彈出框)/ 清晰度(拖曳選取字詞)
+  const ToneMode = {
+    mode: "tone",
+    modes: [["tone", "念法"], ["clarity", "清晰度"]],
+
+    bar(holder, seg) {
+      const bar = el("div", "tone-modes");
+      bar.setAttribute("role", "group");
+      bar.setAttribute("aria-label", "聲調區模式");
+      this.modes.forEach((m) => {
+        const b = el("button", "btn btn-small tone-mode" + (this.mode === m[0] ? " is-active" : ""), m[1]);
+        b.type = "button";
+        b.dataset.mode = m[0];
+        b.setAttribute("aria-pressed", this.mode === m[0] ? "true" : "false");
+        b.addEventListener("click", () => {
+          this.mode = m[0];
+          Tone.close();
+          WordPopup.close();
+          S.Props.render();
+        });
+        bar.appendChild(b);
+      });
+      holder.before(bar);
+    },
+  };
+
+  // 清晰度模式:每字下方橫條(長度 = 清晰度,個別設定者紫色),拖曳選取字詞後開彈出框
+  function mountClarityChars(holder, seg) {
+    const list = charClarity(seg);
+    const chars = Array.from(seg.text);
+    holder.classList.add("is-clarity-mode");
+    holder.querySelectorAll(".tone-char[data-index]").forEach(function (c) {
+      const i = Number(c.dataset.index);
+      const bar = el("span", "clarity-bar" + (list[i] && list[i].own ? " is-own" : ""));
+      bar.style.width = (list[i] ? list[i].value : 100) + "%";
+      c.appendChild(bar);
+      if (isHanzi(chars[i])) {
+        c.classList.add("is-selectable");
+        c.title = "拖曳選取字詞,設定清晰度";
+      }
+    });
+    if (isExternal(seg)) return;
+    let sel = null;
+    const mark = function () {
+      holder.querySelectorAll(".tone-char").forEach(function (c) {
+        const i = Number(c.dataset.index);
+        c.classList.toggle("is-range", !!sel && i >= Math.min(sel.a, sel.b) && i <= Math.max(sel.a, sel.b));
+      });
+    };
+    const at = function (x, y) {
+      const e = document.elementFromPoint(x, y);
+      const c = e && e.closest ? e.closest(".tone-char[data-index]") : null;
+      return c && holder.contains(c) ? Number(c.dataset.index) : null;
+    };
+    const move = function (e) {
+      const i = at(e.clientX, e.clientY);
+      if (i !== null && sel) {
+        sel.b = i;
+        mark();
+      }
+    };
+    const up = function () {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      if (!sel) return;
+      const s = Math.min(sel.a, sel.b);
+      const e = Math.max(sel.a, sel.b) + 1;
+      sel = null;
+      if (!chars.slice(s, e).every(isHanzi)) {
+        mark();
+        S.toast("字詞清晰度只能設定在漢字上(不可含標點)", true);
+        return;
+      }
+      WordPopup.open(seg, s, e, holder.querySelector('.tone-char[data-index="' + s + '"]'));
+    };
+    holder.addEventListener("pointerdown", function (e) {
+      const i = at(e.clientX, e.clientY);
+      if (i === null || !isHanzi(chars[i]) || e.button !== 0) return;
+      e.preventDefault();
+      sel = { a: i, b: i };
+      mark();
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up);
+    });
+  }
+
+  const WordPopup = {
+    box: null,
+    seg: null,
+    range: null,
+
+    build() {
+      const box = el("div", "tone-popup word-popup");
+      box.id = "word-popup";
+      box.setAttribute("role", "dialog");
+      box.setAttribute("aria-modal", "false");
+      box.setAttribute("aria-labelledby", "word-title");
+      box.hidden = true;
+      const head = el("div", "tone-head");
+      this.title = el("strong", "tone-title", "");
+      this.title.id = "word-title";
+      const close = el("button", "btn btn-small tone-close", "×");
+      close.type = "button";
+      close.setAttribute("aria-label", "關閉");
+      close.addEventListener("click", () => this.close());
+      head.append(this.title, close);
+      this.sliderSlot = el("div", "word-slider");
+      this.note = el("p", "tone-auto", "");
+      const actions = el("div", "tone-actions");
+      this.clearBtn = el("button", "btn btn-small", "清除");
+      this.clearBtn.type = "button";
+      this.clearBtn.addEventListener("click", () => this.apply(null));
+      this.applyBtn = el("button", "btn btn-small btn-primary", "套用");
+      this.applyBtn.type = "button";
+      this.applyBtn.addEventListener("click", () => this.apply(Number(this.input.value)));
+      actions.append(this.clearBtn, this.applyBtn);
+      box.append(head, this.sliderSlot, this.note, actions);
+      box.addEventListener("keydown", (e) => { if (e.key === "Escape") this.close(); });
+      document.body.appendChild(box);
+      document.addEventListener("pointerdown", (e) => {
+        if (!box.hidden && !box.contains(e.target) && !(e.target.closest && e.target.closest(".tone-char"))) this.close();
+      });
+      this.box = box;
+    },
+
+    open(seg, start, end, anchor) {
+      if (!this.box) this.build();
+      this.seg = seg;
+      this.range = [start, end];
+      const word = Array.from(seg.text).slice(start, end).join("");
+      const own = (seg.word_clarity || []).find(function (w) { return w.start === start && w.end === end; });
+      const base = typeof seg.clarity === "number" ? seg.clarity : PROSODY_DEFAULTS.clarity;
+      this.title.textContent = "「" + word + "」的清晰度 — 第 " + (start + 1) + (end - start > 1 ? "–" + end : "") + " 字";
+      const slider = percentSlider({ label: "「" + word + "」的清晰度", value: own ? own.value : base,
+        dflt: base, onCommit: function () {} });
+      slider.querySelector(".pct-reset").remove();
+      this.input = slider.querySelector("input");
+      this.sliderSlot.replaceChildren(slider);
+      this.note.textContent = "未個別設定的字沿用整句清晰度(" + base + "%)";
+      this.clearBtn.disabled = !(seg.word_clarity || []).some(function (w) { return w.start < end && w.end > start; });
+      this.applyBtn.disabled = false;
+      this.box.hidden = false;
+      const r = anchor ? anchor.getBoundingClientRect() : { left: 100, bottom: 100 };
+      this.box.style.left = Math.max(8, r.left + window.scrollX) + "px";
+      this.box.style.top = Math.max(8, r.bottom + window.scrollY + 6) + "px";
+      this.input.focus();
+    },
+
+    close() {
+      if (!this.box || this.box.hidden) return;
+      this.box.hidden = true;
+      this.seg = null;
+    },
+
+    async apply(value) {
+      const seg = this.seg;
+      if (!seg) return;
+      const [s, e] = this.range;
+      this.applyBtn.disabled = true;
+      this.clearBtn.disabled = true;
+      const r = await patchAndPost(seg, { word_clarity: withWordClarity(seg.word_clarity, s, e, value) },
+        value === null ? "已清除字詞清晰度" : "字詞清晰度改為 " + value + "%");
+      if (r && r.ok) this.close();
+      else {
+        this.applyBtn.disabled = false;
+        this.clearBtn.disabled = false;
+      }
+    },
+  };
+
+  // 開啟專案(含 v1 升級來的舊專案)時,對沒有有效後製的片段補做一次(D20)
+  // (只看開啟後的第一個檢視;之後的修改由各自的 patchAndPost 處理)
+  function autoPost(view) {
+    if (!view || !Store.name || Post.autoDone[Store.name]) return;
+    Post.autoDone[Store.name] = true;
+    if ((view.post_stale || []).length) Post.run(null);
+  }
+
   // ---------- 掛上鉤子 ----------
 
   S.hook("voice-row", function (a) {
@@ -610,6 +985,8 @@
     mountSpeed(box.querySelector('[data-hook="speed"]'), a.segment, "片段 #" + (a.index + 1) + " 語速");
     mountPause(box.querySelector('[data-hook="pause"]'), a.segment, a.view);
     mountTone(box.querySelector('[data-hook="tone"]'), a.segment);
+    mountProsody(box.querySelector('[data-hook="prosody"]'), a.segment);
+    mountPitchProps(box.querySelector('[data-hook="pitch-props"]'), a.segment);
   });
 
   S.hook("image-props", function (a) {
@@ -633,8 +1010,14 @@
   }
 
   // 專案換了或重新整理時關掉彈出框
-  Store.on(function () { Tone.close(); });
+  Store.on(function (view) {
+    Tone.close();
+    WordPopup.close();
+    autoPost(view);
+  });
 
   S.Edit = { Tone: Tone, speedOptions: speedOptions, pauseFromDrag: pauseFromDrag, edgeFromDrag: edgeFromDrag,
-    gapBox: gapBox, GAP_HIT: GAP_HIT };
+    gapBox: gapBox, GAP_HIT: GAP_HIT, Post: Post, patchAndPost: patchAndPost, ToneMode: ToneMode,
+    WordPopup: WordPopup, withWordClarity: withWordClarity, charClarity: charClarity, semiText: semiText,
+    PROSODY_DEFAULTS: PROSODY_DEFAULTS };
 })();
