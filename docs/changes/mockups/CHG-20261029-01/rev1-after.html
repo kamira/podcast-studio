@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-Hant-TW"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CHG-20261029-01 修訂 1 變更後畫面草稿</title>
+<!-- 修訂 1 草稿(R1 清晰度警告、R3 語調曲線與自動補點):純 HTML / CSS + 行內 SVG + 行內 JS,不引外部資源。
+     JS 只用來依修訂 1 的公式(PCHIP 混合曲線、峰前預降 / 谷前升點)算出座標並畫 SVG,不是正式實作。 -->
+<style>
+:root { --fg:#1f2328; --muted:#5d6673; --line:#d0d5dd; --bg:#f6f7f9; --panel:#fff; --accent:#2f6fdd;
+  --audio:#e8892b; --warn-bg:#fff4e0; --warn-fg:#8a4b00; --warn-line:#f0b45a; }
+* { box-sizing:border-box; }
+html,body { margin:0; }
+body { font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+  color:var(--fg); background:var(--bg); font-size:14px; padding:12px; display:grid; gap:12px; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; display:grid; gap:8px; align-content:start; }
+.panel-title { font-size:14px; margin:0; font-weight:700; }
+.muted { color:var(--muted); font-size:12px; }
+.row { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; }
+.btn { font:inherit; font-size:12px; padding:2px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); }
+.btn.is-on { background:var(--accent); color:#fff; border-color:var(--accent); }
+.btn.is-muted { color:#9aa3ae; }
+.btn.wide { width:100%; }
+/* 屬性面板(與 main 的實際畫面同版面) */
+.props { width:320px; }
+.prop-title { font-size:14px; margin:0; font-weight:700; }
+.kv { display:grid; grid-template-columns:44px 1fr; gap:6px 0; align-items:center; font-size:13px; }
+.kv .k { color:var(--muted); font-size:12px; }
+.sec { border-top:1px solid var(--line); padding-top:8px; display:grid; gap:6px; }
+.sec-title { font-size:12px; color:var(--muted); margin:0; font-weight:normal; }
+.pct-row { display:grid; grid-template-columns:44px 1fr 40px auto; gap:6px; align-items:center; font-size:12px; }
+.pct-row .k { color:var(--muted); }
+.pct-row output { text-align:right; font-variant-numeric:tabular-nums; font-size:13px; }
+input[type=range] { width:100%; accent-color:var(--accent); }
+.hint { margin:0 0 0 50px; font-size:11px; color:var(--muted); }
+.warn { margin:0 0 0 50px; font-size:12px; color:var(--warn-fg); background:var(--warn-bg); border:1px solid var(--warn-line);
+  border-radius:6px; padding:4px 8px; line-height:1.45; }
+.new-mark { outline:2px dashed #d04b8f; outline-offset:3px; border-radius:6px; }
+.tag { font-size:10px; background:#fde7c8; color:#8a4b00; border-radius:3px; padding:0 4px; margin-left:4px; vertical-align:middle; }
+.tone-modes { display:flex; gap:4px; }
+.chars { display:flex; flex-wrap:wrap; gap:3px; }
+.ch { min-width:22px; text-align:center; font-size:16px; padding:2px 2px 6px; background:var(--bg); border-radius:4px; position:relative; border:1px solid transparent; }
+.ch::after { content:""; position:absolute; left:3px; right:3px; bottom:2px; height:2px; background:#8fb3ef; border-radius:1px; }
+.ch.own::after { background:#7a52c7; right:13px; }
+.ch.picked { background:#efe8fb; border-color:#7a52c7; }
+.popup { width:270px; padding:10px 12px; display:grid; gap:6px; background:var(--panel); border:1px solid var(--line);
+  border-radius:8px; box-shadow:0 6px 24px rgba(0,0,0,.14); margin-left:30px; }
+.popup .warn, .popup .hint { margin:0; }
+.popup .pct-row { grid-template-columns:1fr 40px; }
+.acts { display:flex; justify-content:flex-end; gap:6px; }
+/* 時間軸 */
+.tl { position:relative; border:1px solid var(--line); border-radius:6px; overflow:hidden; background:#fff; }
+.tl svg { display:block; }
+.legend { display:flex; flex-wrap:wrap; gap:14px; font-size:12px; color:var(--muted); align-items:center; }
+.legend svg { vertical-align:middle; }
+.note { font-size:12px; color:var(--muted); margin:0; }
+.cmp { display:flex; gap:10px; flex-wrap:wrap; }
+.cmp figure { margin:0; border:1px solid var(--line); border-radius:6px; padding:6px; background:#fff; }
+.cmp figcaption { font-size:12px; color:var(--muted); text-align:center; }
+</style></head>
+<body>
+
+<!-- (1) 屬性面板:清晰度低於 25% 時的警告(R1) -->
+<section class="panel props" id="rev1-props">
+  <h2 class="panel-title">屬性</h2>
+  <p class="prop-title">選取:片段 #1</p>
+  <div class="kv">
+    <span class="k">文字</span><span>大家好，歡迎收聽夜市的味道。</span>
+    <span class="k">狀態</span><span>✓ 已合成 2.1 秒(已裁掉前後低音量 0.66 秒)</span>
+    <span class="k">語速</span><span><select class="btn"><option>預設(1.15×)</option></select></span>
+  </div>
+  <div class="sec">
+    <p class="sec-title">停頓</p>
+    <div class="kv"><span class="k">之後</span><span><input class="btn" style="width:72px" value="0.4"> 秒 <button class="btn is-muted">預設</button></span></div>
+  </div>
+  <div class="sec">
+    <p class="sec-title">韻律</p>
+    <div class="pct-row"><span class="k">連音</span><input type="range" min="0" max="100" value="0" aria-label="連音(百分比)"><output>0%</output><button class="btn is-muted">預設</button></div>
+    <p class="hint">字與字之間的黏著;句與句之間仍由「停頓」決定</p>
+    <div class="pct-row"><span class="k">清晰度</span><input type="range" min="0" max="100" value="20" aria-label="清晰度(百分比)"><output>20%</output><button class="btn">預設</button></div>
+    <p class="hint">100% 字正腔圓,越低越含糊;個別字詞可在下方另設</p>
+    <p class="warn new-mark" role="status" id="clarity-warn">⚠ 低於 25% 會過度含糊、聲音偏悶,不建議使用;需要含糊感時建議用 50% 或 25%。<span class="tag">修訂 1</span></p>
+  </div>
+  <div class="sec">
+    <p class="sec-title">語調</p>
+    <div class="pct-row"><span class="k">圓弧</span><input type="range" min="0" max="100" value="100" aria-label="圓弧(百分比)"><output>100%</output><button class="btn">預設</button></div>
+    <p class="hint">折線轉角的圓弧程度:0% 為直線折角,100% 為最圓滑;曲線一律經過每個實際套用的點(含放大後的峰谷與自動補點)</p>
+    <div class="kv"><span class="k">關鍵點</span><span>5 個 <span class="muted new-mark">· 自動補點 3 個(虛線,不可拖曳)</span></span></div>
+    <button class="btn wide">清除語調</button>
+  </div>
+  <div class="sec">
+    <p class="sec-title">聲調與字詞清晰度</p>
+    <div class="tone-modes"><button class="btn is-on">念法</button><button class="btn">清晰度</button><button class="btn">合音</button></div>
+  </div>
+</section>
+
+<!-- (2) 字詞清晰度彈出框:低於 25% 時同一則警告(R1) -->
+<section class="panel" id="rev1-word" style="width:360px">
+  <h2 class="panel-title">聲調與字詞清晰度(清晰度模式)</h2>
+  <div class="tone-modes"><button class="btn">念法</button><button class="btn is-on">清晰度</button><button class="btn">合音</button></div>
+  <div class="chars">
+    <span class="ch">大</span><span class="ch">家</span><span class="ch">好</span><span class="ch">，</span><span class="ch">歡</span><span class="ch">迎</span><span class="ch">收</span><span class="ch">聽</span><span class="ch own picked">夜</span><span class="ch own picked">市</span><span class="ch">的</span><span class="ch">味</span><span class="ch">道</span><span class="ch">。</span>
+  </div>
+  <div class="popup">
+    <div class="row" style="justify-content:space-between"><b style="font-size:13px">「夜市」的清晰度</b><span class="muted">第 9–10 字</span></div>
+    <div class="pct-row"><input type="range" min="0" max="100" value="15" aria-label="字詞清晰度(百分比)"><output>15%</output></div>
+    <p class="hint">未個別設定的字沿用整句清晰度(100%)</p>
+    <p class="warn new-mark" role="status">⚠ 低於 25% 會過度含糊、聲音偏悶,不建議使用;需要含糊感時建議用 50% 或 25%。<span class="tag">修訂 1</span></p>
+    <div class="acts"><button class="btn">清除</button><button class="btn is-on">套用</button></div>
+  </div>
+  <p class="note">警告只提示、不阻擋:「套用」照常可按,數值照常存檔。</p>
+</section>
+
+<!-- (3) 時間軸:語調曲線、放大後的峰谷與自動補點(R3) -->
+<section class="panel" id="rev1-timeline" style="width:1100px">
+  <h2 class="panel-title">時間軸</h2>
+  <div class="tl"><svg id="tl-svg" width="1076" height="250" viewBox="0 0 1076 250"></svg></div>
+  <div class="legend" id="tl-legend">
+    <span><svg width="16" height="16"><path d="M8 2 L14 8 L8 14 L2 8 Z" fill="#fff" stroke="#333"/></svg> 關鍵點(使用者設定,可拖曳,±6 半音)</span>
+    <span><svg width="16" height="16"><path d="M8 2 L14 8 L8 14 L2 8 Z" fill="none" stroke="#fff" stroke-dasharray="2 2" style="stroke:#333"/></svg> 放大後的峰谷(×1.2,自動,不可拖曳)</span>
+    <span><svg width="16" height="16"><circle cx="8" cy="8" r="5" fill="none" stroke="#333" stroke-dasharray="2 2"/></svg> 自動補點:峰前預降 −1、谷前升點 +1 半音(已吸附到有聲處)</span>
+    <span><svg width="26" height="10"><path d="M1 5 L25 5" stroke="#333" stroke-width="2"/></svg> 實際套用的語調曲線(經過每個實際套用的點(含放大後的峰谷與自動補點))</span>
+    <span><svg width="26" height="10"><path d="M1 5 L25 5" stroke="#333" stroke-dasharray="4 3"/></svg> 原音高(0 半音)</span>
+  </div>
+  <p class="note">自動補點與放大後的峰谷由後製結果回傳(post.pitch_points),畫面與 worker 實際套用的曲線相同;後製完成前先以同一公式在瀏覽器試算(不含吸附)並以淡色顯示。縱軸改以 ±7.2 半音繪製。</p>
+</section>
+
+<!-- (4) 圓弧程度對照:修訂前(二次貝茲,不經過關鍵點)與修訂 1(PCHIP 混合,一律經過每個實際套用的點(含放大後的峰谷與自動補點)) -->
+<section class="panel" id="rev1-roundness" style="width:1100px">
+  <h2 class="panel-title">圓弧程度對照(同一組關鍵點 0、+3、−2、+2、0 半音)</h2>
+  <div class="cmp" id="cmp"></div>
+  <p class="note">深色虛線:修訂前(D10 二次貝茲,圓弧 100% 時峰谷差由 5.00 削到 2.94 半音);實線:修訂 1(圓弧 0% 為折線、100% 為單調三次 PCHIP,中間線性混合),另含自動補點與 ×1.2 放大。</p>
+</section>
+
+<script>
+"use strict";
+// ---- 修訂 1 的曲線公式(R3;與 scipy.interpolate.PchipInterpolator 相同的導數規則) ----
+function pchipSlopes(x, y) {
+  const n = x.length, h = [], d = [], m = new Array(n).fill(0);
+  for (let i = 0; i < n - 1; i++) { h.push(x[i + 1] - x[i]); d.push((y[i + 1] - y[i]) / h[i]); }
+  if (n === 2) { m[0] = m[1] = d[0]; return m; }
+  for (let k = 1; k < n - 1; k++) {
+    if (d[k - 1] * d[k] <= 0) { m[k] = 0; continue; }
+    const w1 = 2 * h[k] + h[k - 1], w2 = h[k] + 2 * h[k - 1];
+    m[k] = (w1 + w2) / (w1 / d[k - 1] + w2 / d[k]);
+  }
+  const edge = (h0, h1, d0, d1) => {
+    let s = ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+    if (Math.sign(s) !== Math.sign(d0)) s = 0;
+    else if (Math.sign(d0) !== Math.sign(d1) && Math.abs(s) > Math.abs(3 * d0)) s = 3 * d0;
+    return s;
+  };
+  m[0] = edge(h[0], h[1], d[0], d[1]);
+  m[n - 1] = edge(h[n - 2], h[n - 3], d[n - 2], d[n - 3]);
+  return m;
+}
+function curve(pts, r, t) {            // pts [[pos, semi]],t 0–1;第一點前 / 最後一點後維持端點值
+  const x = pts.map(p => p[0]), y = pts.map(p => p[1]), m = pchipSlopes(x, y);
+  t = Math.min(Math.max(t, x[0]), x[x.length - 1]);
+  let i = 0; while (i < x.length - 2 && t > x[i + 1]) i++;
+  const hh = x[i + 1] - x[i], s = (t - x[i]) / hh;
+  const lin = y[i] + (y[i + 1] - y[i]) * s;
+  const h00 = 2*s*s*s - 3*s*s + 1, h10 = s*s*s - 2*s*s + s, h01 = -2*s*s*s + 3*s*s, h11 = s*s*s - s*s;
+  const pc = h00 * y[i] + h10 * hh * m[i] + h01 * y[i + 1] + h11 * hh * m[i + 1];
+  return (1 - r / 100) * lin + (r / 100) * pc;
+}
+const DIP = 1.0, GAIN = 1.2, FRAC = 0.3, LIMIT = 7.2;
+function expand(pts, snap) {          // 峰前預降、谷前升點;snap(x0, x1, xd) 回傳吸附後位置或 null(該段沒有有聲幀)
+  const out = [pts[0]], auto = [], amp = [];
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], inner = i < pts.length - 1;
+    const peak = inner && y1 > 0 && y1 > y0, valley = inner && y1 < 0 && y1 < y0;
+    if (peak || valley) {
+      let xd = x1 - FRAC * (x1 - x0);
+      if (snap) xd = snap(x0, x1, xd);
+      if (xd !== null) {
+        const lin = y0 + (y1 - y0) * (xd - x0) / (x1 - x0);
+        const p = [xd, Math.max(-LIMIT, Math.min(LIMIT, peak ? lin - DIP : lin + DIP))];
+        out.push(p); auto.push(p);
+      }
+      const a = [x1, Math.max(-LIMIT, Math.min(LIMIT, y1 * GAIN))]; out.push(a); amp.push([x1, y1, a[1]]);
+    } else out.push([x1, y1]);
+  }
+  return { pts: out, auto, amp };
+}
+function bezierOld(pts, r, t) {       // 修訂前 D10(對照用)
+  const path = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1], p1 = pts[i], p2 = pts[i + 1], k = r / 100 * 0.5;
+    const a = [p1[0] + (p0[0] - p1[0]) * k, p1[1] + (p0[1] - p1[1]) * k], b = [p1[0] + (p2[0] - p1[0]) * k, p1[1] + (p2[1] - p1[1]) * k];
+    for (let j = 0; j <= 24; j++) { const s = j / 24;
+      path.push([(1-s)*(1-s)*a[0] + 2*(1-s)*s*p1[0] + s*s*b[0], (1-s)*(1-s)*a[1] + 2*(1-s)*s*p1[1] + s*s*b[1]]); }
+  }
+  path.push(pts[pts.length - 1]);
+  let i = 0; while (i < path.length - 2 && t > path[i + 1][0]) i++;
+  const [xa, ya] = path[i], [xb, yb] = path[i + 1];
+  return xb === xa ? ya : ya + (yb - ya) * (t - xa) / (xb - xa);
+}
+const USER = [[0, 0], [0.25, 3], [0.5, -2], [0.75, 2], [1, 0]];
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; }
+function txt(s, attrs, parent) { const e = el("text", attrs, parent); e.textContent = s; return e; }
+
+// ---- (3) 時間軸 ----
+(function () {
+  const svg = document.getElementById("tl-svg");
+  const L = 50, ruler = 22, subY = 28, subH = 30, segY = 66, segH = 170, X0 = 56, W = 900;
+  el("rect", { x: 0, y: 0, width: 1076, height: 250, fill: "#fff" }, svg);
+  el("rect", { x: 0, y: 0, width: L, height: 250, fill: "#f6f7f9" }, svg);
+  for (let s = 0; s <= 4; s++) {
+    const x = X0 + s * 240; if (x > 1070) break;
+    el("line", { x1: x, y1: 0, x2: x, y2: ruler, stroke: "#d0d5dd" }, svg);
+    txt("00:0" + s, { x: x + 3, y: 15, "font-size": 11, fill: "#5d6673" }, svg);
+  }
+  el("line", { x1: 0, y1: ruler, x2: 1076, y2: ruler, stroke: "#d0d5dd" }, svg);
+  txt("字幕", { x: 12, y: subY + 20, "font-size": 12, fill: "#5d6673" }, svg);
+  txt("語音", { x: 12, y: segY + 90, "font-size": 12, fill: "#5d6673" }, svg);
+  el("rect", { x: X0, y: subY, width: 504, height: subH, rx: 4, fill: "#dfe9fb", stroke: "#2f6fdd" }, svg);
+  txt("大家好，歡迎收聽夜市的味道", { x: X0 + 6, y: subY + 20, "font-size": 12, fill: "#1f2c4d" }, svg);
+  const SW = 504;
+  el("rect", { x: X0, y: segY, width: SW, height: segH, rx: 4, fill: "#e8892b", stroke: "#2f6fdd", "stroke-width": 2 }, svg);
+  txt("#1 大家好，歡迎收聽夜市的味道。", { x: X0 + 6, y: segY + 15, "font-size": 12, fill: "#fff", "font-weight": 600 }, svg);
+  const top = segY + 22, bot = segY + segH - 8, mid = (top + bot) / 2, half = (bot - top) / 2;
+  const X = p => X0 + p * SW, Y = s => mid - s / LIMIT * half;
+  el("line", { x1: X0, y1: Y(0), x2: X0 + SW, y2: Y(0), stroke: "#fff", "stroke-dasharray": "4 3", "stroke-opacity": .8 }, svg);
+  for (const s of [6, -6]) el("line", { x1: X0, y1: Y(s), x2: X0 + SW, y2: Y(s), stroke: "#fff", "stroke-opacity": .25 }, svg);
+  for (let k = 1; k < 12; k++) el("line", { x1: X0 + k * SW / 12, y1: bot - 6, x2: X0 + k * SW / 12, y2: bot, stroke: "#fff", "stroke-opacity": .7 }, svg);
+  // 示意:第 2 個谷前升點原位置(0.425)無聲,吸附到同段內最近的有聲處(0.405)
+  const snap = (x0, x1, xd) => Math.abs(xd - 0.425) < 1e-9 ? 0.405 : xd;
+  const raw = expand(USER, null), ex = expand(USER, snap), R = 100;
+  let d = ""; for (let j = 0; j <= 400; j++) { const t = j / 400; d += (j ? " L " : "M ") + X(t).toFixed(1) + " " + Y(curve(ex.pts, R, t)).toFixed(1); }
+  el("path", { d, fill: "none", stroke: "#fff", "stroke-width": 2.2 }, svg);
+  // 吸附示意
+  const r0 = raw.auto[1], s0 = ex.auto[1];
+  el("circle", { cx: X(r0[0]), cy: Y(r0[1]), r: 4, fill: "none", stroke: "#fff", "stroke-opacity": .45, "stroke-dasharray": "2 2" }, svg);
+  el("path", { d: `M ${X(r0[0]) - 6} ${Y(r0[1]) - 8} L ${X(s0[0]) + 4} ${Y(s0[1]) - 8}`, stroke: "#fff", "stroke-width": 1, "marker-end": "url(#arr)" }, svg);
+  const defs = el("defs", {}, svg), mk = el("marker", { id: "arr", markerWidth: 6, markerHeight: 6, refX: 5, refY: 3, orient: "auto" }, defs);
+  el("path", { d: "M0 0 L6 3 L0 6 Z", fill: "#fff" }, mk);
+  // 放大後的峰谷:虛線菱形 + 與使用者關鍵點之間的虛線
+  for (const [x, y, a] of ex.amp) {
+    el("line", { x1: X(x), y1: Y(y), x2: X(x), y2: Y(a), stroke: "#fff", "stroke-dasharray": "2 2" }, svg);
+    el("path", { d: `M ${X(x)} ${Y(a) - 7} L ${X(x) + 7} ${Y(a)} L ${X(x)} ${Y(a) + 7} L ${X(x) - 7} ${Y(a)} Z`, fill: "none", stroke: "#ffe27a", "stroke-width": 2, "stroke-dasharray": "3 2" }, svg);
+    txt((a >= 0 ? "+" : "") + a.toFixed(1), { x: X(x) - 34, y: Y(a) + 4, "font-size": 11, fill: "#ffe27a", "font-weight": 700 }, svg);
+  }
+  for (const [x, y] of ex.auto) el("circle", { cx: X(x), cy: Y(y), r: 5, fill: "rgba(232,137,43,.6)", stroke: "#fff", "stroke-width": 1.5, "stroke-dasharray": "2 2" }, svg);
+  USER.forEach(([x, y], i) => {
+    const sel = i === 1;
+    el("path", { d: `M ${X(x)} ${Y(y) - 7} L ${X(x) + 7} ${Y(y)} L ${X(x)} ${Y(y) + 7} L ${X(x) - 7} ${Y(y)} Z`, fill: sel ? "#ffe27a" : "#fff", stroke: "#333", "stroke-width": 1 }, svg);
+  });
+  txt("選取中 #2 · 25% · +3.0 半音(套用 +3.6)", { x: X(0.25) + 12, y: Y(3.0) + 4, "font-size": 11, fill: "#fff", "font-weight": 600 }, svg);
+  txt("吸附到有聲處(示意)", { x: X(0.405) - 40, y: Y(s0[1]) + 20, "font-size": 10, fill: "#fff" }, svg);
+  el("line", { x1: X0 + 380, y1: ruler, x2: X0 + 380, y2: 250, stroke: "#d33", "stroke-width": 2 }, svg);
+  txt("(示意:語音軌放大顯示;實際高度 78 px)", { x: X0, y: 246, "font-size": 11, fill: "#5d6673" }, svg);
+  // 圖說:右側
+  const gx = X0 + SW + 30;
+  txt("圓弧 100%;使用者關鍵點 5 個:0、+3、−2、+2、0 半音", { x: gx, y: segY + 20, "font-size": 12, fill: "#1f2328" }, svg);
+  txt("實際套用 8 點:" + ex.pts.map(p => (p[1] >= 0 ? "+" : "") + p[1].toFixed(1)).join("、"), { x: gx, y: segY + 40, "font-size": 12, fill: "#1f2328" }, svg);
+  txt("峰前在前一段後 30% 處預降 −1 半音;谷前升 +1 半音;峰谷 ×1.2", { x: gx, y: segY + 60, "font-size": 12, fill: "#5d6673" }, svg);
+  txt("自動點落在無聲處時吸附到同段內最近的有聲幀", { x: gx, y: segY + 80, "font-size": 12, fill: "#5d6673" }, svg);
+  txt("(該段沒有有聲幀則不插入)", { x: gx, y: segY + 96, "font-size": 12, fill: "#5d6673" }, svg);
+})();
+
+// ---- (4) 圓弧對照 ----
+(function () {
+  const box = document.getElementById("cmp");
+  for (const R of [0, 50, 100]) {
+    const fig = document.createElement("figure"), W = 330, H = 140, P = 10;
+    const svg = document.createElementNS(NS, "svg"); svg.setAttribute("width", W); svg.setAttribute("height", H);
+    fig.appendChild(svg);
+    const X = t => P + t * (W - 2 * P), Y = s => H / 2 - s / LIMIT * (H / 2 - P);
+    el("rect", { x: 0, y: 0, width: W, height: H, fill: "#e8892b", rx: 4 }, svg);
+    el("line", { x1: P, y1: Y(0), x2: W - P, y2: Y(0), stroke: "#fff", "stroke-dasharray": "4 3", "stroke-opacity": .8 }, svg);
+    let od = "", nd = ""; const ex = expand(USER, null);
+    for (let j = 0; j <= 300; j++) { const t = j / 300;
+      od += (j ? " L " : "M ") + X(t).toFixed(1) + " " + Y(bezierOld(USER, R, t)).toFixed(1);
+      nd += (j ? " L " : "M ") + X(t).toFixed(1) + " " + Y(curve(ex.pts, R, t)).toFixed(1); }
+    el("path", { d: od, fill: "none", stroke: "#5a3a1a", "stroke-width": 1.5, "stroke-dasharray": "4 3", "stroke-opacity": .8 }, svg);
+    el("path", { d: nd, fill: "none", stroke: "#fff", "stroke-width": 2.2 }, svg);
+    for (const [x, y] of ex.auto) el("circle", { cx: X(x), cy: Y(y), r: 4, fill: "none", stroke: "#fff", "stroke-dasharray": "2 2" }, svg);
+    for (const [x, y, a] of ex.amp) el("path", { d: `M ${X(x)} ${Y(a) - 6} L ${X(x) + 6} ${Y(a)} L ${X(x)} ${Y(a) + 6} L ${X(x) - 6} ${Y(a)} Z`, fill: "none", stroke: "#fff", "stroke-dasharray": "2 2" }, svg);
+    for (const [x, y] of USER) el("path", { d: `M ${X(x)} ${Y(y) - 6} L ${X(x) + 6} ${Y(y)} L ${X(x)} ${Y(y) + 6} L ${X(x) - 6} ${Y(y)} Z`, fill: "#fff", stroke: "#333" }, svg);
+    const cap = document.createElement("figcaption"); cap.textContent = "圓弧 " + R + "%"; fig.appendChild(cap);
+    box.appendChild(fig);
+  }
+})();
+</script>
+</body></html>
