@@ -1377,7 +1377,7 @@ def test_1001筆整檔拒絕_1000筆可以(env):
     words = [{"word": chr(0x4E00 + i) + chr(0x5000 + i), "zhuyin": "ㄏㄠˇ", "enabled": True} for i in range(1001)]
     with pytest.raises(settings.FusionError) as e:
         settings.preview_import(_file(words))
-    assert e.value.status == 422
+    assert e.value.status == 413 and str(e.value) == "超過筆數上限(1000 筆)"
     assert len(settings.preview_import(_file(words[:1000]))["changes"]) >= 1000
 
 
@@ -1403,3 +1403,51 @@ def test_apply中途丟例外時rollback(env, monkeypatch):
 def test_fusion_lexicon只含啟用者(env):
     lex = settings.fusion_lexicon()
     assert lex["知道"] == "ㄗㄠˋ" and "不要" not in lex
+
+
+def test_只差被拒詞條時為一致(env):
+    settings.save(changed())
+    words = json.loads(_export())["words"] + [{"word": "好像", "zhuyin": "ㄓㄧ", "enabled": True}]
+    before = (db(env).read_bytes(), db(env).stat().st_mtime_ns)
+    p = settings.preview_import(_file(words))
+    assert p["status"] == "same" and p["changes"] == [] and [r["word"] for r in p["rejected"]] == ["好像"]
+    assert (db(env).read_bytes(), db(env).stat().st_mtime_ns) == before
+
+
+def test_匯入上限預設值與範圍(env):
+    settings.save(changed())
+    assert dict(query(env, "SELECT key, value FROM fusion_settings")) == {"import_max_kb": 256,
+                                                                         "import_max_rows": 1000}
+    assert settings.load_import_limits() == {"max_kb": 256, "max_rows": 1000}
+    for bad in ((15, 1000), (4097, 1000), (256, 9), (256, 10001), ("256", 1000), (256.0, 1000), (True, 1000)):
+        with pytest.raises(settings.FusionError) as e:
+            settings.save_import_limits(*bad)
+        assert e.value.status == 422
+        assert settings.load_import_limits() == {"max_kb": 256, "max_rows": 1000}
+    for ok in ((16, 10), (4096, 10000)):
+        settings.save_import_limits(*ok)
+        assert settings.load_import_limits() == {"max_kb": ok[0], "max_rows": ok[1]}
+
+
+def test_改上限後超過大小與筆數回413與訊息(env):
+    settings.save(changed())
+    settings.save_import_limits(32, 20)
+    with pytest.raises(settings.FusionError) as e:
+        settings.preview_import(b" " * (33 * 1024))
+    assert (e.value.status, str(e.value)) == (413, "超過允許大小上限(32 KB)")
+    words = [{"word": chr(0x4E00 + i) + "好", "zhuyin": "ㄏㄠˇ", "enabled": True} for i in range(21)]
+    with pytest.raises(settings.FusionError) as e:
+        settings.preview_import(_file(words))
+    assert (e.value.status, str(e.value)) == (413, "超過筆數上限(20 筆)")
+    assert settings.preview_import(_file(words[:20]))["status"] == "diff"
+    settings.save_import_limits(256, 1000)
+    with pytest.raises(settings.FusionError) as e:
+        settings.preview_import(b" " * (257 * 1024))
+    assert str(e.value) == "超過允許大小上限(256 KB)"
+
+
+def test_v2升級時同時建立匯入上限表(env):
+    _v2_db(env, changed())
+    settings.load()
+    assert dict(query(env, "SELECT key, value FROM fusion_settings")) == {"import_max_kb": 256,
+                                                                         "import_max_rows": 1000}

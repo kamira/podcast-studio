@@ -671,7 +671,7 @@ def test_過期代號回409(client, root, monkeypatch):
     (b"x" * (300 * 1024), 413),
     ("{}".encode("utf-16"), 422),
     (b"{\"format\": ", 422),
-    (fusion_file([{"word": chr(0x4E00 + i) + "好", "zhuyin": "ㄏㄠˇ", "enabled": True} for i in range(1001)]), 422),
+    (fusion_file([{"word": chr(0x4E00 + i) + "好", "zhuyin": "ㄏㄠˇ", "enabled": True} for i in range(1001)]), 413),
 ])
 def test_整檔不合法回413或422且詞庫不變(client, root, raw, status):
     client.put("/api/settings/fusions/然後", json={"zhuyin": "ㄖㄢˊ", "enabled": True}, headers=auth())
@@ -692,3 +692,44 @@ def test_被拒詞條列在rejected含word與reason(client):
 def test_合音建議讀設定資料庫的詞庫(client):
     r = client.post("/api/fusion/suggest", json={"text": "我也不知道"}, headers=auth())
     assert r.json()["suggestions"] == [{"index": 3, "zhuyin": "ㄗㄠˋ", "source": "lexicon"}]
+
+
+def test_匯入上限端點_缺Token403_超出範圍422(client, root):
+    r = client.get("/api/settings/fusions/limits")
+    assert r.status_code == 200 and (r.json()["max_kb"], r.json()["max_rows"]) == (256, 1000)
+    assert client.put("/api/settings/fusions/limits", json={"max_kb": 32, "max_rows": 20},
+                      headers={"Origin": ORIGIN}).status_code == 403
+    for bad in ({"max_kb": 15, "max_rows": 20}, {"max_kb": 32, "max_rows": 10001}, {"max_kb": "32", "max_rows": 20}):
+        assert client.put("/api/settings/fusions/limits", json=bad, headers=auth()).status_code == 422
+    assert client.get("/api/settings/fusions/limits").json()["max_kb"] == 256
+    r = client.put("/api/settings/fusions/limits", json={"max_kb": 32, "max_rows": 20}, headers=auth())
+    assert r.status_code == 200 and r.json()["max_kb"] == 32
+
+
+def test_改上限後預覽依設定值回413(client, root):
+    client.put("/api/settings/fusions/limits", json={"max_kb": 32, "max_rows": 20}, headers=auth())
+    r = preview(client, b" " * (33 * 1024))
+    assert r.status_code == 413 and r.json()["error"] == "超過允許大小上限(32 KB)"
+    r = preview(client, fusion_file([{"word": chr(0x4E00 + i) + "好", "zhuyin": "ㄏㄠˇ", "enabled": True}
+                                     for i in range(21)]))
+    assert r.status_code == 413 and r.json()["error"] == "超過筆數上限(20 筆)"
+
+
+def test_請求本體超過上限加16KB時不讀完即回413(client, root):
+    client.put("/api/settings/fusions/limits", json={"max_kb": 16, "max_rows": 20}, headers=auth())
+    r = client.post("/api/settings/fusions/import/preview", content=b"x" * (33 * 1024),
+                    headers=auth(**{"Content-Type": "multipart/form-data; boundary=zz"}))
+    assert r.status_code == 413 and r.json()["error"] == "超過允許大小上限(16 KB)"
+    # 串流讀取在超過上限的那一塊就停止(不讀完):以替身 request 計算被取走的區塊數
+    import asyncio
+    pulled = []
+
+    class Req:
+        headers = {}
+
+        async def stream(self):
+            for _ in range(200):
+                pulled.append(1)
+                yield b"x" * 1024
+    assert asyncio.run(ss._read_body(Req(), 16 * 1024 + ss.FUSION_MULTIPART_OVERHEAD)) is None
+    assert len(pulled) == 33

@@ -1988,6 +1988,22 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         return {"words": got["words"], "version": got["version"], **({"_warnings": got["_warnings"]}
                                                                       if got.get("_warnings") else {})}
 
+    @app.get("/api/settings/fusions/limits")
+    @_guard
+    def api_fusion_limits():
+        return JSONResponse({**settings.load_import_limits(), "kb_range": list(settings.FUSION_KB_RANGE),
+                             "rows_range": list(settings.FUSION_ROWS_RANGE)}, headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/settings/fusions/limits")
+    @_guard
+    async def api_fusion_limits_put(request: Request):
+        """(D36)匯入大小與筆數上限;超出允許範圍回 422 且不寫入。"""
+        data = await _json(request, limit=4096)
+        _only_keys(data, ("max_kb", "max_rows"))
+        out = await run_in_threadpool(fusion_call, settings.save_import_limits, data.get("max_kb"),
+                                      data.get("max_rows"))
+        return {**out, "kb_range": list(settings.FUSION_KB_RANGE), "rows_range": list(settings.FUSION_ROWS_RANGE)}
+
     @app.get("/api/settings/fusions")
     @_guard
     def api_fusions():
@@ -2029,13 +2045,15 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     @_guard
     async def api_fusions_preview(request: Request):
         """差異預覽(D30 (a)):multipart 欄位 file(只在記憶體解析,不落地);回傳預覽結果與 preview_id。"""
-        body = await _read_body(request, settings.FUSION_MAX_BYTES + FUSION_MULTIPART_OVERHEAD)
+        limits = await run_in_threadpool(settings.load_import_limits)
+        max_kb = min(limits["max_kb"], settings.FUSION_HARD_MAX_KB)
+        body = await _read_body(request, max_kb * 1024 + FUSION_MULTIPART_OVERHEAD)   # 超過即停,不讀完
         if body is None:
-            raise ApiError(413, f"檔案超過 {settings.FUSION_MAX_BYTES // 1024} KB")
+            raise ApiError(413, settings.size_limit_message(max_kb))
         raw = _multipart_file(request.headers.get("content-type", ""), body)
         if raw is None:
             raise ApiError(422, "請以 multipart/form-data 的 file 欄位上傳詞庫檔")
-        result = await run_in_threadpool(fusion_call, settings.preview_import, raw)
+        result = await run_in_threadpool(fusion_call, settings.preview_import, raw, limits)
         pid = secrets.token_hex(16)   # 128 位元
         now = time.monotonic()
         with previews_guard:

@@ -39,9 +39,11 @@ voice_defaults = {"speed", "pause_comma", "pause_sentence", "pause_paragraph"}(�
   voice_defaults(key TEXT PRIMARY KEY, value REAL NOT NULL)   (v2 新增)語速與三種停頓預設
   fusion_words(word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, enabled INTEGER NOT NULL, source TEXT NOT NULL)
                                                          (v3 新增)合音詞庫;source ∈ default / custom
+  fusion_settings(key TEXT PRIMARY KEY, value INTEGER NOT NULL)
+                                                         (v3 新增,D36)import_max_kb、import_max_rows
 
 升級 v2 → v3(CHG-20261029-01 D29):同 v1 → v2 的流程(初始化鎖、鎖內再探測、單一 BEGIN IMMEDIATE 交易、
-交易內再讀版本),只建 fusion_words 表並寫入 FUSION_DEFAULTS,meta.schema_version 改為 3;不改 roles、
+交易內再讀版本),只建 fusion_words、fusion_settings 表並寫入 FUSION_DEFAULTS 與匯入上限預設值,meta.schema_version 改為 3;不改 roles、
 review_seats、voice_defaults。失敗即 rollback 維持 v2,load() 照常回傳設定並帶 `_warnings`
 (WARN_DB_UPGRADE3),合音詞庫暫用程式內預設詞。v1 資料庫在同一個交易內連升兩版。版本大於 3 不讀不寫。
 回滾 v3:備份後 `BEGIN IMMEDIATE; DROP TABLE fusion_words; UPDATE meta SET value = '2' WHERE
@@ -372,6 +374,7 @@ _NEW = "new"      # 沒有任何資料表的資料庫(剛由本模組建立,或�
 _VOICE_TABLE = "CREATE TABLE IF NOT EXISTS voice_defaults (key TEXT PRIMARY KEY, value REAL NOT NULL)"
 _FUSION_TABLE = ("CREATE TABLE IF NOT EXISTS fusion_words (word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, "
                  "enabled INTEGER NOT NULL, source TEXT NOT NULL)")
+_FUSION_SETTINGS_TABLE = "CREATE TABLE IF NOT EXISTS fusion_settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS roles (role TEXT PRIMARY KEY, config TEXT NOT NULL)",
@@ -1025,8 +1028,13 @@ FUSION_DEFAULTS = (
 )
 FUSION_FORMAT = "podcast-studio-fusions"
 FUSION_FORMAT_VERSION = 1
-FUSION_MAX_BYTES = 256 * 1024
-FUSION_MAX_ROWS = 1000
+# 匯入上限(D36):後台設定 fusion_settings 的 import_max_kb、import_max_rows;允許範圍與程式內硬上限
+FUSION_LIMIT_DEFAULTS = {"max_kb": 256, "max_rows": 1000}
+FUSION_KB_RANGE = (16, 4096)
+FUSION_ROWS_RANGE = (10, 10000)
+FUSION_HARD_MAX_KB = 4096
+FUSION_HARD_MAX_ROWS = 10000
+_LIMIT_KEYS = {"max_kb": "import_max_kb", "max_rows": "import_max_rows"}
 FUSION_CSV_HEADER = ("word", "zhuyin", "enabled", "source")
 WARN_FUSION_FALLBACK = "設定資料庫無法使用,合音詞庫暫用程式內預設詞"
 
@@ -1055,6 +1063,62 @@ def _write_fusion_defaults(con: sqlite3.Connection) -> None:
     con.execute(_FUSION_TABLE)
     con.executemany("INSERT OR IGNORE INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
                     [(w, z, 1 if e else 0, "default") for w, z, e in FUSION_DEFAULTS])
+    con.execute(_FUSION_SETTINGS_TABLE)
+    con.executemany("INSERT OR IGNORE INTO fusion_settings (key, value) VALUES (?, ?)",
+                    [(_LIMIT_KEYS[k], v) for k, v in FUSION_LIMIT_DEFAULTS.items()])
+
+
+def load_import_limits() -> dict:
+    """匯入上限(D36):{"max_kb", "max_rows"};資料庫不存在或不能用時回預設值(不建立資料庫)。
+    讀出的值超出允許範圍時改用預設值(不超過程式內硬上限)。"""
+    out = dict(FUSION_LIMIT_DEFAULTS)
+    if _db_path_error() or not _db_file().exists():
+        return out
+    try:
+        db = _db_file()
+        if _probe(db) in (SCHEMA_V1, SCHEMA_V2):
+            load()
+        if _probe(db) != SCHEMA_VERSION:
+            return out
+        con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000,
+                              isolation_level=None)
+        try:
+            rows = dict(con.execute("SELECT key, value FROM fusion_settings").fetchall())
+        finally:
+            con.close()
+    except (_DbError, sqlite3.Error):
+        return out
+    for k, col in _LIMIT_KEYS.items():
+        v = rows.get(col)
+        lo, hi = FUSION_KB_RANGE if k == "max_kb" else FUSION_ROWS_RANGE
+        if isinstance(v, int) and lo <= v <= hi:
+            out[k] = v
+    return out
+
+
+def save_import_limits(max_kb, max_rows) -> dict:
+    """寫入匯入上限;不是整數或超出允許範圍(16–4096 KB、10–10000 筆)丟 FusionError(422),不寫入。"""
+    errors = []
+    for label, v, (lo, hi), unit in (("匯入大小上限", max_kb, FUSION_KB_RANGE, "KB"),
+                                     ("匯入筆數上限", max_rows, FUSION_ROWS_RANGE, "筆")):
+        if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
+            errors.append(f"{label}必須是 {lo}–{hi} {unit} 的整數")
+    if errors:
+        raise FusionError(";".join(errors))
+
+    def op(con):
+        con.executemany("INSERT OR REPLACE INTO fusion_settings (key, value) VALUES (?, ?)",
+                        [("import_max_kb", max_kb), ("import_max_rows", max_rows)])
+        return {"max_kb": max_kb, "max_rows": max_rows}
+    return _fusion_txn(op)
+
+
+def size_limit_message(max_kb: int) -> str:
+    return f"超過允許大小上限({max_kb} KB)"
+
+
+def rows_limit_message(max_rows: int) -> str:
+    return f"超過筆數上限({max_rows} 筆)"
 
 
 def _fusion_rows(con: sqlite3.Connection) -> list[dict]:
@@ -1237,15 +1301,18 @@ def _parse_bool(v):
     return None
 
 
-def parse_fusion_file(raw: bytes) -> list[dict]:
+def parse_fusion_file(raw: bytes, limits: dict | None = None) -> list[dict]:
     """解析匯入檔(JSON 或 CSV)成 [{"row", "word", "zhuyin", "enabled"}](未驗證詞條)。
 
-    整檔不合法一律丟 FusionError:超過 256 KB(413)、不是 UTF-8、JSON / CSV 結構錯誤、format 或 version
-    不符、超過 1000 筆(422)。"""
+    整檔不合法一律丟 FusionError:超過大小上限或筆數上限(413,上限為後台設定,D36)、不是 UTF-8、
+    JSON / CSV 結構錯誤、format 或 version 不符(422)。"""
     import csv
     import io
-    if not isinstance(raw, (bytes, bytearray)) or len(raw) > FUSION_MAX_BYTES:
-        raise FusionError(f"檔案超過 {FUSION_MAX_BYTES // 1024} KB", 413)
+    limits = limits or load_import_limits()
+    max_kb = min(limits["max_kb"], FUSION_HARD_MAX_KB)
+    max_rows = min(limits["max_rows"], FUSION_HARD_MAX_ROWS)
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > max_kb * 1024:
+        raise FusionError(size_limit_message(max_kb), 413)
     try:
         text = bytes(raw).decode("utf-8")
     except UnicodeDecodeError:
@@ -1265,8 +1332,8 @@ def parse_fusion_file(raw: bytes) -> list[dict]:
         words = body["words"]
         if not isinstance(words, list):
             raise FusionError("JSON 結構不符(words 必須是陣列)")
-        if len(words) > FUSION_MAX_ROWS:
-            raise FusionError(f"詞條超過 {FUSION_MAX_ROWS} 筆")
+        if len(words) > max_rows:
+            raise FusionError(rows_limit_message(max_rows), 413)
         for n, it in enumerate(words, 1):
             if not isinstance(it, dict) or not {"word", "zhuyin", "enabled"} <= set(it) \
                     or not set(it) <= set(FUSION_CSV_HEADER) \
@@ -1281,8 +1348,8 @@ def parse_fusion_file(raw: bytes) -> list[dict]:
     rows = [r for r in rows if r]
     if not rows or [c.strip() for c in rows[0]] != list(FUSION_CSV_HEADER):
         raise FusionError("CSV 表頭必須是 word,zhuyin,enabled,source")
-    if len(rows) - 1 > FUSION_MAX_ROWS:
-        raise FusionError(f"詞條超過 {FUSION_MAX_ROWS} 筆")
+    if len(rows) - 1 > max_rows:
+        raise FusionError(rows_limit_message(max_rows), 413)
     for n, r in enumerate(rows[1:], 1):
         if len(r) != 4:
             raise FusionError(f"CSV 第 {n} 筆不是四個欄位")
@@ -1291,13 +1358,13 @@ def parse_fusion_file(raw: bytes) -> list[dict]:
     return out
 
 
-def preview_import(raw: bytes) -> dict:
+def preview_import(raw: bytes, limits: dict | None = None) -> dict:
     """差異預覽(只讀不寫):{"status": same | diff, "base_version", "changes": [{id, word, kind, old, new}],
     "unchanged": 筆數, "rejected": [{row, word, reason}]}。
 
     kind:add(檔案有、詞庫沒有)、update(注音或啟用不同)、disable(詞庫的啟用預設詞不在檔案中)、
     delete(詞庫的自訂詞不在檔案中)。被拒絕的詞不產生更動,詞庫中同一個詞的原資料保留。"""
-    items = parse_fusion_file(raw)
+    items = parse_fusion_file(raw, limits)
     current = load_fusions()
     have = {r["word"]: r for r in current["words"]}
     rejected, seen, valid = [], set(), {}
