@@ -619,3 +619,22 @@ tr.diff-del td:first-child { text-decoration: none; }
 }
 .tl-badge { position: absolute; right: 4px; bottom: 3px; font-size: 10px; padding: 0 4px; border-radius: 3px; background: rgba(0, 0, 0, .35); }
 .fusion-diff td { white-space: pre-line; }   /* 顯示字差異在合音注音格第二行 */
+
+/* CHG-20261029-01 修訂 1 T13:清晰度低於 25% 的警告(R1-3);語調自動補點與放大峰谷(R1-9、R1-10) */
+.clarity-warn {
+  margin: 2px 0 6px 56px; padding: 6px 8px; font-size: 12px; line-height: 1.5;
+  background: #fff3e0; border: 1px solid #f0b45a; border-radius: 6px; color: #8a4b00;
+}
+.word-popup .clarity-warn { margin: 0; }
+@media (prefers-color-scheme: dark) {
+  .clarity-warn { background: rgba(230, 126, 34, .22); border-color: #c98a2e; color: #ffd8a6; }
+}
+.tl-pitch-limit { stroke: rgba(255, 255, 255, .25); stroke-width: 1; }
+.tl-pitch-line.is-estimate { opacity: .45; stroke-dasharray: 5 3; }
+.tl-pitch.is-editable .tl-pitch-line.is-estimate { opacity: .5; }
+.tl-pitch-auto { fill: rgba(232, 137, 43, .6); stroke: #fff; stroke-width: 1.5; stroke-dasharray: 2 2; }
+.tl-pitch-amp { fill: none; stroke: #ffe27a; stroke-width: 2; stroke-dasharray: 3 2; }
+.tl-pitch-amp-link { stroke: #fff; stroke-width: 1; stroke-dasharray: 2 2; }
+.tl-pitch-amp-label { fill: #ffe27a; font-size: 10px; font-weight: 700; }
+.tl-pitch-auto.is-estimate, .tl-pitch-amp.is-estimate, .tl-pitch-amp-link.is-estimate, .tl-pitch-amp-label.is-estimate { opacity: .5; }
+.tl-pitch-limit, .tl-pitch-auto, .tl-pitch-amp, .tl-pitch-amp-link, .tl-pitch-amp-label { pointer-events: none; }
