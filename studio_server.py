@@ -211,7 +211,7 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi import FastAPI, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse  # noqa: E402
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 import executor  # noqa: E402
@@ -1071,8 +1071,30 @@ def annotate_text(text: str, root: Path) -> list:
 
 
 def _fusion_lexicon() -> dict:
-    """合音詞庫(啟用者):{2~4 字詞: 合音注音}。T7 先回空詞庫;T8 起讀設定資料庫(settings.load_fusions)。"""
-    return {}
+    """合音詞庫(啟用者):{2~4 字詞: 合音注音},讀設定資料庫(CHG-20261029-01 T8,settings.fusion_lexicon)。"""
+    return settings.fusion_lexicon()
+
+
+FUSION_PREVIEW_TTL = 600          # 匯入預覽代號 10 分鐘過期(D30)
+FUSION_PREVIEW_MAX = 32           # 記憶體內最多保留的預覽數
+FUSION_MULTIPART_OVERHEAD = 16 * 1024
+FUSION_WORD_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\U00020000-\U000323af]{2,4}")
+
+
+def _multipart_file(content_type: str, body: bytes, field: str = "file") -> bytes | None:
+    """以標準庫 email 解析 multipart/form-data,回傳欄位 field 的檔案內容(只在記憶體,不落地);沒有回 None。"""
+    from email.parser import BytesParser
+    from email.policy import HTTP
+    if not content_type.lower().startswith("multipart/form-data"):
+        return None
+    msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body)
+    if not msg.is_multipart():
+        return None
+    for part in msg.iter_parts():
+        if part.get_param("name", header="content-disposition") == field:
+            data = part.get_payload(decode=True)
+            return data if isinstance(data, bytes) else b""
+    return None
 
 
 def _render_default(proj):
@@ -1960,6 +1982,131 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         finally:
             end_job(run)
         return result
+
+    # ---------- 合音詞庫(CHG-20261029-01 T8;D29~D31) ----------
+
+    previews: "OrderedDict[str, dict]" = OrderedDict()   # 預覽代號 → {"result", "expires"}(只在記憶體)
+    previews_guard = threading.Lock()
+
+    def fusion_call(fn, *a):
+        try:
+            return fn(*a)
+        except settings.FusionError as e:
+            raise ApiError(e.status, str(e)) from None
+
+    def fusion_word(word) -> str:
+        if not isinstance(word, str) or not FUSION_WORD_RE.fullmatch(word):
+            raise ApiError(404, "詞庫沒有這個詞(詞須為 2~4 個漢字)")
+        return word
+
+    def fusions_view() -> dict:
+        got = settings.load_fusions()
+        return {"words": got["words"], "version": got["version"], **({"_warnings": got["_warnings"]}
+                                                                      if got.get("_warnings") else {})}
+
+    @app.get("/api/settings/fusions/limits")
+    @_guard
+    def api_fusion_limits():
+        return JSONResponse({**settings.load_import_limits(), "kb_range": list(settings.FUSION_KB_RANGE),
+                             "rows_range": list(settings.FUSION_ROWS_RANGE)}, headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/settings/fusions/limits")
+    @_guard
+    async def api_fusion_limits_put(request: Request):
+        """(D36)匯入大小與筆數上限;超出允許範圍回 422 且不寫入。"""
+        data = await _json(request, limit=4096)
+        _only_keys(data, ("max_kb", "max_rows"))
+        out = await run_in_threadpool(fusion_call, settings.save_import_limits, data.get("max_kb"),
+                                      data.get("max_rows"))
+        return {**out, "kb_range": list(settings.FUSION_KB_RANGE), "rows_range": list(settings.FUSION_ROWS_RANGE)}
+
+    @app.get("/api/settings/fusions")
+    @_guard
+    def api_fusions():
+        return JSONResponse(fusions_view(), headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/settings/fusions/{word}")
+    @_guard
+    async def api_fusion_put(word: str, request: Request):
+        word = fusion_word(word)
+        data = await _json(request, limit=4096)
+        if data.get("restore") is True:
+            _only_keys(data, ("restore",))
+            await run_in_threadpool(fusion_call, settings.restore_fusion, word)
+        else:
+            _only_keys(data, ("zhuyin", "enabled", "display"))
+            await run_in_threadpool(fusion_call, settings.save_fusion, word, data.get("zhuyin"),
+                                    data.get("enabled"), data.get("display"))
+        return fusions_view()
+
+    @app.delete("/api/settings/fusions/{word}")
+    @_guard
+    async def api_fusion_delete(word: str):
+        word = fusion_word(word)
+        await run_in_threadpool(fusion_call, settings.delete_fusion, word)
+        return fusions_view()
+
+    @app.get("/api/settings/fusions/export")
+    @_guard
+    def api_fusions_export(format: str = "json"):
+        if format not in ("json", "csv"):
+            raise ApiError(422, "匯出格式只能是 json 或 csv")
+        data = settings.export_fusions(format)
+        ctype = "application/json; charset=utf-8" if format == "json" else "text/csv; charset=utf-8"
+        return Response(data, media_type=ctype, headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": _content_disposition("attachment", f"合音詞庫.{format}")})
+
+    @app.post("/api/settings/fusions/import/preview")
+    @_guard
+    async def api_fusions_preview(request: Request):
+        """差異預覽(D30 (a)):multipart 欄位 file(只在記憶體解析,不落地);回傳預覽結果與 preview_id。"""
+        limits = await run_in_threadpool(settings.load_import_limits)
+        max_kb = min(limits["max_kb"], settings.FUSION_HARD_MAX_KB)
+        body = await _read_body(request, max_kb * 1024 + FUSION_MULTIPART_OVERHEAD)   # 超過即停,不讀完
+        if body is None:
+            raise ApiError(413, settings.size_limit_message(max_kb))
+        raw = _multipart_file(request.headers.get("content-type", ""), body)
+        if raw is None:
+            raise ApiError(422, "請以 multipart/form-data 的 file 欄位上傳詞庫檔")
+        result = await run_in_threadpool(fusion_call, settings.preview_import, raw, limits)
+        pid = secrets.token_hex(16)   # 128 位元
+        now = time.monotonic()
+        with previews_guard:
+            for k in [k for k, v in previews.items() if v["expires"] <= now]:
+                previews.pop(k, None)
+            while len(previews) >= FUSION_PREVIEW_MAX:
+                previews.popitem(last=False)
+            previews[pid] = {"result": result, "expires": now + FUSION_PREVIEW_TTL}
+        return {**result, "preview_id": pid}
+
+    @app.post("/api/settings/fusions/import/apply")
+    @_guard
+    async def api_fusions_apply(request: Request):
+        """套用預覽(D30 (b)):{preview_id, base_version, apply: "all"} 或 {preview_id, base_version, keep: [詞]}。
+        代號單次有效、10 分鐘過期;代號失效、詞庫版本不符、預覽為「一致」皆回 409。"""
+        data = await _json(request, limit=64 * 1024)
+        _only_keys(data, ("preview_id", "base_version", "apply", "keep"))
+        pid = data.get("preview_id")
+        if ("apply" in data) == ("keep" in data):
+            raise ApiError(422, "請指定 apply: \"all\" 或 keep: [詞…] 其中之一")
+        if "apply" in data and data["apply"] != "all":
+            raise ApiError(422, "apply 只能是 \"all\"")
+        keep = data.get("keep", [])
+        if not isinstance(keep, list) or any(not isinstance(w, str) for w in keep) or len(keep) > 2000:
+            raise ApiError(422, "keep 必須是詞的陣列")
+        with previews_guard:
+            entry = previews.pop(pid, None) if isinstance(pid, str) else None
+        if entry is None or entry["expires"] <= time.monotonic():
+            raise ApiError(409, "預覽已失效或已使用,請重新匯入預覽")
+        result = entry["result"]
+        if data.get("base_version") != result["base_version"]:
+            raise ApiError(409, "詞庫在預覽後被修改,請重新預覽")
+        if result["status"] == "same":
+            raise ApiError(409, "與現有詞庫一致,無需更動")
+        out = await run_in_threadpool(fusion_call, settings.apply_import, result["changes"],
+                                      result["base_version"], "apply" in data, keep)
+        return {**fusions_view(), **out}
 
     @app.post("/api/fusion/suggest")
     @_guard
