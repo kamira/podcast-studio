@@ -334,7 +334,7 @@ def test_save_load_round_trip(projects):
     assert got.segments[0]["speed"] == 1.25
     assert got.to_dict() == pj.validate(p.to_dict())
     raw = json.loads((projects / "夜市的味道" / "project.json").read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 1
+    assert raw["schema_version"] == 2
 
 
 def test_eleventh_save_keeps_10_history(projects):
@@ -409,21 +409,21 @@ def test_concurrent_saves_from_two_threads(projects):
     assert not [f for f in os.listdir(pdir) if f.endswith(".tmp")]
 
 
-def test_schema_version_2_refused(projects):
+def test_schema_version_3_refused(projects):
     d = projects / "夜市的味道"
     d.mkdir()
     body = data()
-    body["schema_version"] = 2
+    body["schema_version"] = 3
     (d / "project.json").write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(pj.ProjectError) as e:
         pj.load("夜市的味道")
     assert "版本" in errors_of(e)
-    for v in (2, 0, "1", None, True, 1.0):
+    for v in (3, 0, "1", "2", None, True, 1.0, 2.0):
         body["schema_version"] = v
         with pytest.raises(pj.ProjectError):
             pj.validate(body)
     with pytest.raises(pj.ProjectError):
-        pj.save(pj.Project(name="夜市的味道", schema_version=2))
+        pj.save(pj.Project(name="夜市的味道", schema_version=3))
 
 
 def test_load_rejects_bad_files(projects, outside):
@@ -760,3 +760,210 @@ def test_race_trash_dir_swapped_before_move_project_not_moved_outside(projects, 
     moved = pj.trash("夜市的味道", confirm=True)
     assert snapshot(outside) == before                     # 沒有搬進連結目標
     assert (projects / ".trash-moved" / moved / "project.json").is_file()
+
+
+# ---------- CHG-20261029-01 T1:schema 2(連音、清晰度、字詞清晰度、語調、後製) ----------
+
+V1_SEGMENT_KEYS = ("id", "text", "break", "pause_after", "speed", "annotations", "audio")
+KEY_A = "a" * 64
+KEY_B = "b" * 64
+
+
+def v1_body(**kw):
+    body = data(segments=[seg("大家好，歡迎收聽夜市的味道。", id="0123456789abcdef",
+                              audio={"id": KEY_A[:32], "seconds": 2.5, "key": KEY_A}),
+                          seg("今天好熱。", id="fedcba9876543210")], **kw)
+    body["schema_version"] = 1
+    for s in body["segments"]:
+        for k in list(s):
+            if k not in V1_SEGMENT_KEYS:
+                del s[k]
+    return body
+
+
+def synth_seg(**kw):
+    s = seg("大家好，歡迎收聽夜市的味道。", audio={"id": KEY_A[:32], "seconds": 2.5, "key": KEY_A})
+    s.update(kw)
+    return pj.validate(data(segments=[s]))["segments"][0]
+
+
+def test_v1專案載入後補預設值_存檔為v2且v1舊檔在history(projects):
+    d = projects / "夜市的味道"
+    d.mkdir()
+    raw_v1 = json.dumps(v1_body(), ensure_ascii=False)
+    (d / "project.json").write_text(raw_v1, encoding="utf-8")
+    got = pj.load("夜市的味道")
+    assert got.schema_version == 2
+    for s in got.segments:
+        assert s["connect"] is None and s["clarity"] is None
+        assert s["word_clarity"] == [] and s["pitch"] is None and s["post"] is None
+    vid = pj.save(got)
+    assert vid is not None
+    assert json.loads((d / "project.json").read_text(encoding="utf-8"))["schema_version"] == 2
+    assert (d / "history" / f"{vid}.json").read_text(encoding="utf-8") == raw_v1
+    assert pj.load_version("夜市的味道", vid).schema_version == 2   # 舊版本也可讀(還原時升級)
+
+
+def test_v1專案不得含v2欄位():
+    body = v1_body()
+    body["segments"][0]["connect"] = 50
+    with pytest.raises(pj.ProjectError):
+        pj.validate(body)
+
+
+def test_prosody預設常數():
+    assert pj.PROSODY_DEFAULTS == {"connect": 0, "clarity": 100, "roundness": 50}
+    assert pj.SCHEMA_VERSION == 2
+
+
+@pytest.mark.parametrize("field,value", [("connect", 101), ("connect", -1), ("clarity", -1), ("clarity", 101),
+                                         ("connect", 50.5), ("connect", "50"), ("clarity", True),
+                                         ("connect", float("nan"))])
+def test_連音清晰度範圍(field, value):
+    with pytest.raises(pj.ProjectError) as e:
+        synth_seg(**{field: value})
+    assert "0" in errors_of(e)
+
+
+def test_連音清晰度合法值():
+    s = synth_seg(connect=0, clarity=100)
+    assert (s["connect"], s["clarity"]) == (0, 100)
+    s = synth_seg(connect=35, clarity=70)
+    assert (s["connect"], s["clarity"]) == (35, 70)
+
+
+def pitch(points, roundness=50):
+    return {"points": [{"pos": p, "semi": v} for p, v in points], "roundness": roundness}
+
+
+def test_語調圓弧必須是0到100整數():
+    for bad in ("50", 50.5, 101, -1, True):
+        with pytest.raises(pj.ProjectError):
+            synth_seg(pitch=pitch([(0, 0), (1, 0)], bad))
+    assert synth_seg(pitch=pitch([(0, 0), (1, 0)], None))["pitch"]["roundness"] is None
+
+
+def test_語調半音四捨五入到01_超出範圍拒絕():
+    s = synth_seg(pitch=pitch([(0, 6.04), (1, -6.04)]))
+    assert [p["semi"] for p in s["pitch"]["points"]] == [6.0, -6.0]
+    for bad in (6.06, -6.06, 7, "3"):
+        with pytest.raises(pj.ProjectError) as e:
+            synth_seg(pitch=pitch([(0, bad), (1, 0)]))
+        assert "半音" in errors_of(e)
+
+
+def test_語調位置四捨五入到001():
+    s = synth_seg(pitch=pitch([(0, 0), (0.505, 3), (1, 0)]))
+    assert [p["pos"] for p in s["pitch"]["points"]] == [0.0, 0.51, 1.0]
+    for bad in (-0.01, 1.01, "0.5"):
+        with pytest.raises(pj.ProjectError):
+            synth_seg(pitch=pitch([(0, 0), (bad, 0), (1, 0)]))
+
+
+def test_語調關鍵點數量與遞增():
+    with pytest.raises(pj.ProjectError):
+        synth_seg(pitch=pitch([(0.5, 1)]))
+    with pytest.raises(pj.ProjectError):
+        synth_seg(pitch=pitch([(i / 16, 0) for i in range(17)]))
+    assert len(synth_seg(pitch=pitch([(i / 15, 0) for i in range(16)]))["pitch"]["points"]) == 16
+    with pytest.raises(pj.ProjectError) as e:
+        synth_seg(pitch=pitch([(0, 0), (0.5, 1), (0.5, 2)]))
+    assert "遞增" in errors_of(e)
+    with pytest.raises(pj.ProjectError):   # 0.501 與 0.504 取到 0.01 後相同 → 不遞增
+        synth_seg(pitch=pitch([(0.501, 0), (0.504, 1)]))
+    with pytest.raises(pj.ProjectError):
+        synth_seg(pitch={"points": [{"pos": 0, "semi": 0}, {"pos": 1, "semi": 0}], "roundness": 50, "x": 1})
+    with pytest.raises(pj.ProjectError):
+        synth_seg(pitch={"points": [[0, 0], [1, 0]], "roundness": 50})
+
+
+def wc(start, end, value):
+    return {"start": start, "end": end, "value": value}
+
+
+def test_字詞清晰度合法():
+    # 「大家好，歡迎收聽夜市的味道。」:夜市 = 索引 8、9
+    s = synth_seg(word_clarity=[wc(8, 10, 40), wc(0, 2, 60)])
+    assert s["word_clarity"] == [wc(0, 2, 60), wc(8, 10, 40)]   # 依起點排序
+
+
+@pytest.mark.parametrize("bad", [
+    [wc(8, 10, 40), wc(9, 11, 40)],      # 重疊
+    [wc(12, 60, 40)],                    # 超出句長
+    [wc(2, 5, 40)],                      # 含標點「，」
+    [wc(13, 14, 40)],                    # 落在標點「。」
+    [wc(5, 5, 40)],                      # 空區段
+    [wc(8, 10, 101)],                    # 值超出範圍
+    [wc(8, 10, "40")],
+    [{"start": 8, "end": 10}],
+    [wc(i, i + 1, 50) for i in range(14, 47)],   # 33 段
+])
+def test_字詞清晰度不合法(bad):
+    s = seg("大家好，歡迎收聽夜市的味道。" + "夜市" * 20, word_clarity=bad)
+    with pytest.raises(pj.ProjectError):
+        pj.validate(data(segments=[s]))
+
+
+def test_字詞清晰度上限32段():
+    text = "夜" * 40
+    ok = [wc(i, i + 1, 50) for i in range(32)]
+    assert len(pj.validate(data(segments=[seg(text, word_clarity=ok)]))["segments"][0]["word_clarity"]) == 32
+
+
+def test_post欄位格式():
+    good = {"id": KEY_B[:32], "key": KEY_B, "seconds": 2.1, "trim": 0.4}
+    assert synth_seg(post=good)["post"] == good
+    for bad in ({"id": "x", "key": KEY_B, "seconds": 1, "trim": 0},
+                {"id": KEY_B[:32], "key": "short", "seconds": 1, "trim": 0},
+                {"id": KEY_B[:32], "key": KEY_B, "seconds": -1, "trim": 0},
+                {"id": KEY_B[:32], "key": KEY_B, "seconds": 1},
+                {"id": KEY_B[:32], "key": KEY_B, "seconds": 1, "trim": 0, "path": "/etc/passwd"}):
+        with pytest.raises(pj.ProjectError):
+            synth_seg(post=bad)
+
+
+def test_PATCH不能寫入post():
+    assert "post" not in ss.SEGMENT_PATCH_KEYS
+
+
+def test_post_params以程式常數補預設():
+    p = pj.post_params(synth_seg())
+    assert p["connect"] == 0 and p["clarity"] == 100 and p["word_clarity"] == [] and p["pitch"] is None
+    assert p["trim"] == pj.TRIM_PARAMS
+    p = pj.post_params(synth_seg(pitch=pitch([(0, 0), (1, 2)], None)))
+    assert p["pitch"] == {"points": [[0.0, 0.0], [1.0, 2.0]], "roundness": 50}
+    assert pj.is_default_post(synth_seg())
+    assert pj.is_default_post(synth_seg(connect=0, clarity=100))
+    assert not pj.is_default_post(synth_seg(connect=1))
+    assert not pj.is_default_post(synth_seg(word_clarity=[wc(8, 10, 40)]))
+
+
+def test_post_key同參數相同_改任一參數不同_改語速不變():
+    base = synth_seg()
+    k = pj.post_key(base)
+    assert len(k) == 64 and pj.KEY_RE.fullmatch(k)
+    assert pj.post_key(synth_seg()) == k
+    assert pj.post_key(synth_seg(connect=0, clarity=100)) == k          # null 與常數同義
+    assert pj.post_key(synth_seg(speed=1.5)) == k
+    assert pj.post_key(synth_seg(pause_after=2.0)) == k
+    others = [synth_seg(connect=1), synth_seg(clarity=99), synth_seg(word_clarity=[wc(8, 10, 40)]),
+              synth_seg(word_clarity=[wc(8, 10, 41)]), synth_seg(pitch=pitch([(0, 0), (1, 1)])),
+              synth_seg(pitch=pitch([(0, 0), (1, 1)], 0)),
+              synth_seg(audio={"id": KEY_B[:32], "seconds": 2.5, "key": KEY_B})]
+    keys = {pj.post_key(s) for s in others}
+    assert k not in keys and len(keys) == len(others)
+
+
+def test_is_post_fresh():
+    s = synth_seg()
+    assert not pj.is_post_fresh(s)
+    k = pj.post_key(s)
+    s = synth_seg(post={"id": k[:32], "key": k, "seconds": 2.0, "trim": 0.5})
+    assert pj.is_post_fresh(s)
+    assert not pj.is_post_fresh({**s, "connect": 30})
+    ext = pj.validate(data(segments=[seg("自錄。", audio={"id": KEY_B[:32], "seconds": 1.0},
+                                         post={"id": k[:32], "key": k, "seconds": 2.0, "trim": 0.5})]))
+    assert not pj.is_post_fresh(ext["segments"][0])      # 自錄音檔不後製
+    assert not pj.is_post_fresh(pj.validate(data(segments=[seg()]))["segments"][0])
+    with pytest.raises(pj.ProjectError):
+        pj.post_key(ext["segments"][0])
