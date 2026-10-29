@@ -108,6 +108,23 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 .fusion-grid { display:grid; grid-template-columns:1fr 320px; gap:16px; align-items:start; }
 .static-popup { position:static; width:auto; }
 .pause-input.wide { width:110px; }
+#panel-fusion-typing { margin:8px; width:600px; }
+.typing-wrap { position:relative; height:190px; }
+.fake-textarea { border:1px solid var(--accent); border-radius:6px; padding:8px; height:100px; line-height:1.7; }
+.w { position:relative; text-decoration-line:underline; text-decoration-style:wavy; text-decoration-thickness:2px; text-underline-offset:4px; }
+.w-pending { text-decoration-color:#e0b000; } .w-on { text-decoration-color:#2e9e5b; } .w-off { text-decoration-color:#c93c37; }
+.pill { position:absolute; left:-2px; right:-2px; top:-3px; bottom:2px; display:flex; align-items:center; justify-content:center; background:#e3f5ea; border:1px solid #2e9e5b; border-radius:5px; color:#1e6b3e; font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.15); }
+.float-actions { display:flex; gap:6px; } .float-actions .on { border-color:#2e9e5b; color:#1e6b3e; } .float-actions .off { border-color:#c93c37; color:#a12e2a; }
+.lg-w { margin-right:10px; }
+.caret { display:inline-block; width:1px; height:16px; background:var(--fg); vertical-align:middle; margin-left:1px; }
+.float-tip { position:absolute; left:118px; top:96px; width:220px; background:var(--panel); border:1px solid #b7cdf3; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.16); padding:8px 10px; display:grid; gap:6px; }
+.float-tip::before { content:''; position:absolute; top:-6px; left:40px; width:10px; height:10px; background:var(--panel); border-left:1px solid #b7cdf3; border-top:1px solid #b7cdf3; transform:rotate(45deg); }
+.float-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.pause-input.wider { width:160px; }
+.pair-list { display:grid; gap:2px; font-size:13px; }
+.pair-list .is-off { color:#9aa3ae; }
+.pair-list .is-on { color:var(--accent); font-weight:600; }
+.tone-char.is-picked { background:#fff4e0; border-color:#e8892b; }
 #panel-settings-fusion { margin:8px; width:1100px; padding:0; }
 .set-head { display:flex; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); }
 .set-head .page-title { flex:1; text-align:center; font-size:18px; margin:0; }
@@ -121,6 +138,8 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 .license-table th { background:var(--bg); }
 .import-box { border:1px dashed var(--accent); border-radius:8px; padding:10px 12px; display:grid; gap:6px; background:#f7faff; }
 .import-box p { margin:0; }
+.limit-row { display:flex; gap:16px; align-items:center; padding:6px 10px; border:1px solid var(--line); border-radius:6px; }
+.limit-row label { display:flex; gap:6px; align-items:center; }
 .reject-box { border:1px solid #7a828c; border-left:4px solid #7a828c; background:rgba(120,128,140,.12); border-radius:6px; padding:6px 10px; display:grid; gap:2px; }
 #panel-import-errors { margin:8px; width:560px; }
 .toast-demo { padding:8px 12px; border-radius:8px; color:#fff; background:#c93c37; box-shadow:0 4px 12px rgba(0,0,0,.18); }
@@ -231,20 +250,37 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
     <div class="prop-row"><span class="prop-label">狀態</span><span>⏳ 重新合成中…(合音改變送給模型的文字)</span></div>
     <h4 class="prop-section">聲調、字詞清晰度與合音</h4>
     <div class="seg-toggle"><button class="btn tiny">念法</button><button class="btn tiny">清晰度</button><button class="btn tiny is-on">合音</button></div>
-    <div class="tone-chars"><span class="tone-char is-clickable"><span class="tone-glyph">我</span><span class="tone-zhuyin">ㄨㄛˇ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">也</span><span class="tone-zhuyin">ㄧㄝˇ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">不</span><span class="tone-zhuyin">ㄅㄨˋ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">知</span><span class="tone-zhuyin">ㄓ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">道</span><span class="tone-zhuyin">ㄉㄠˋ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">，</span><span class="tone-zhuyin"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">反</span><span class="tone-zhuyin">ㄈㄢˇ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">正</span><span class="tone-zhuyin">ㄓㄥˋ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">就</span><span class="tone-zhuyin">ㄐㄧㄡˋ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">是</span><span class="tone-zhuyin">ㄕˋ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">這</span><span class="tone-zhuyin">ㄓㄜˋ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">樣</span><span class="tone-zhuyin">ㄧㄤˋ</span></span></div>
-    <p class="prop-hint">合音模式:拖曳選取相鄰兩字,依「第一字聲母 + 第二字韻母與聲調」合成一個音;虛線底線為常用合音詞建議(清晰度 ≤ 50% 時顯示)</p>
-    <div class="prop-row"><span class="prop-label">已套用</span><span class="chip">知道 → ㄗㄠˋ(詞庫)✕</span><span class="chip">這樣 → ㄐㄧㄤˋ(規則)✕</span></div>
-    <div class="prop-row"><span class="prop-label">送模型</span><code>我也不知[:ㄗㄠˋ]，反正就是這[:ㄐㄧㄤˋ]</code></div>
+    <div class="tone-chars"><span class="tone-char is-clickable"><span class="tone-glyph">我</span><span class="tone-zhuyin">ㄨㄛˇ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">也</span><span class="tone-zhuyin">ㄧㄝˇ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">不</span><span class="tone-zhuyin">ㄅㄨˋ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">知</span><span class="tone-zhuyin">ㄓ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">道</span><span class="tone-zhuyin">ㄉㄠˋ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">，</span><span class="tone-zhuyin"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">反</span><span class="tone-zhuyin">ㄈㄢˇ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">正</span><span class="tone-zhuyin">ㄓㄥˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">就</span><span class="tone-zhuyin">ㄐㄧㄡˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">是</span><span class="tone-zhuyin">ㄕˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">這</span><span class="tone-zhuyin">ㄓㄜˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">樣</span><span class="tone-zhuyin">ㄧㄤˋ</span></span></div>
+    <p class="prop-hint">合音模式:拖曳選取相鄰 2~4 字;詞庫有該詞用詞庫值,兩字無詞庫時依「第一字聲母 + 第二字韻母與聲調」合成,3~4 字時選一對相鄰兩字合併;另外在輸入文字時,含詞庫合音詞會跳出浮動窗提示(見輸入示意)</p>
+    <div class="prop-row"><span class="prop-label">已套用</span><span class="chip">不知道 → ㄅㄨˋ ㄗㄠˋ(詞庫)✕</span></div>
+    <div class="prop-row"><span class="prop-label">送模型</span><code>我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]，反正就是這樣</code></div>
     <div class="prop-row"><span class="prop-label">字幕</span><span>我也不知道，反正就是這樣(原文不變)</span></div>
   </div>
   <div class="tone-popup static-popup">
-    <div class="tone-head"><strong class="tone-title">「這樣」合音</strong><span class="muted">第 11–12 字</span></div>
-    <p class="prop-hint">規則:ㄓ(這的聲母)+ ㄧㄤˋ(樣的韻母與聲調)→ ㄓㄧㄤˋ → 顎化 → <b>ㄐㄧㄤˋ</b></p>
-    <div class="prop-row"><span class="prop-label">結果</span><input class="pause-input wide" value="ㄐㄧㄤˋ"><span class="muted">可改注音</span></div>
-    <p class="prop-hint">套用後需重新合成這一句(約 30 秒);字幕與文稿仍顯示「這樣」</p>
+    <div class="tone-head"><strong class="tone-title">「就是這樣」合音</strong><span class="muted">第 9–12 字(4 字)</span></div>
+    <p class="prop-hint">詞庫沒有「就是這樣」,請選一對相鄰兩字合併:</p>
+    <div class="pair-list">
+      <label class="is-off">○ 就是 — 跳過</label>
+      <label>○ 是這 → ㄕㄜˋ(規則)</label>
+      <label class="is-on">● 這樣 → ㄐㄧㄤˋ(詞庫)</label>
+    </div>
+    <div class="prop-row"><span class="prop-label">結果</span><input class="pause-input wider" value="ㄐㄧㄡˋ ㄕˋ ㄐㄧㄤˋ"><span class="muted">4 字 → 3 音節</span></div>
+    <p class="prop-hint">套用後需重新合成這一句(約 30 秒);字幕與文稿仍顯示原文</p>
     <div class="tone-actions"><button class="btn tiny">存入合音詞庫</button><button class="btn tiny">取消</button><button class="btn tiny primary">套用</button></div>
   </div>
   </div>
+</section>
+
+<section class="panel" id="panel-fusion-typing">
+  <h2 class="panel-title">文稿</h2>
+  <div class="typing-wrap">
+    <div class="fake-textarea">大家好，歡迎收聽夜市的味道。…這家攤販已經開了四十年。<br><span class="w w-on">是這樣<span class="pill">是醬</span></span>啊，我也<span class="w w-pending">不知道</span>，<span class="w w-off">為什麼</span>夜市這麼好逛？<span class="caret"></span></div>
+    <div class="float-tip">
+      <div class="float-head"><span><b>不知道</b> → <b>ㄅㄨˋ ㄗㄠˋ</b></span></div>
+      <div class="float-actions"><button class="btn tiny on">啟用</button><button class="btn tiny off">停用</button></div>
+    </div>
+  </div>
+  <div class="diff-legend">圖例:<span class="lg-w"><span class="w w-pending">黃色波浪</span> 可合音(未決定,點擊開啟)</span><span class="lg-w"><span class="w w-on">綠色波浪</span> 已啟用(上方浮層顯示合音詞)</span><span class="lg-w"><span class="w w-off">紅色波浪</span> 已停用</span></div>
 </section>
 
 <section class="panel" id="panel-settings-fusion">
@@ -252,9 +288,13 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
   <div class="set-body">
     <nav class="subnav"><span>模型</span><span>審議席位</span><span>語音預設</span><span class="is-on">合音詞庫</span><span>進階流程</span></nav>
     <div class="set-main">
-      <div class="tl-toolbar"><h3 class="panel-title">合音詞庫</h3><span class="muted">共 7 筆(預設 6、自訂 1);合音模式的建議與「存入合音詞庫」都讀寫這裡</span><span class="spacer"></span>
+      <div class="tl-toolbar"><h3 class="panel-title">合音詞庫</h3><span class="muted">共 12 筆(預設 11、自訂 1;表中列出部分);合音模式的建議與「存入合音詞庫」都讀寫這裡</span><span class="spacer"></span>
         <button class="btn tiny">＋ 新增</button><button class="btn tiny">匯入…</button><button class="btn tiny">匯出 JSON</button><button class="btn tiny">匯出 CSV</button></div>
-      <table class="license-table"><thead><tr><th>原詞(兩字)</th><th>合音注音</th><th>同音字(參考)</th><th>來源</th><th>啟用</th><th></th></tr></thead><tbody><tr><td>這樣</td><td>ㄐㄧㄤˋ</td><td>醬</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>那樣</td><td>ㄋㄧㄤˋ</td><td>釀</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>知道</td><td>ㄗㄠˋ</td><td>造</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>什麼</td><td>ㄕㄚˊ</td><td>啥</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>我們</td><td>ㄨㄣˇ</td><td>穩</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>不要</td><td>ㄅㄧㄠˋ</td><td>—</td><td>預設</td><td>☐</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>然後</td><td>ㄖㄡˋ</td><td>肉</td><td>自訂</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>刪除</button></td></tr></tbody></table>
+      <table class="license-table"><thead><tr><th>原詞(2~4 字)</th><th>合音注音</th><th>同音字(參考)</th><th>來源</th><th>啟用</th><th></th></tr></thead><tbody><tr><td>這樣</td><td>ㄐㄧㄤˋ</td><td>醬</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>那樣</td><td>ㄋㄧㄤˋ</td><td>釀</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>知道</td><td>ㄗㄠˋ</td><td>造</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>什麼</td><td>ㄕㄚˊ</td><td>啥</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>我們</td><td>ㄨㄣˇ</td><td>穩</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>不要</td><td>ㄅㄧㄠˋ</td><td>—</td><td>預設</td><td>☐</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>不知道</td><td>ㄅㄨˋ ㄗㄠˋ</td><td>不造</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>是這樣</td><td>ㄕˋ ㄐㄧㄤˋ</td><td>是醬</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>然後</td><td>ㄖㄡˋ</td><td>肉</td><td>自訂</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>刪除</button></td></tr></tbody></table>
+      <div class="limit-row"><strong>匯入上限</strong>
+        <label>大小上限 <input class="pause-input" value="256"> KB <span class="muted">(16–4096)</span></label>
+        <label>筆數上限 <input class="pause-input" value="1000"> 筆 <span class="muted">(10–10000)</span></label>
+        <button class="btn tiny">儲存上限</button></div>
       <div class="import-box">
         <strong>匯入預覽:fusions-2026-10-29.json(3.1 KB)</strong>
         <p class="warn">⚠ 匯入檔與現有詞庫<b>不一致</b>:6 項會更動(新增 2、修改 2、停用 1、刪除 1)· 不變 4 · 拒絕 1</p>
@@ -278,9 +318,11 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 </section>
 
 <section class="panel" id="panel-import-errors">
-  <h2 class="panel-title">匯入時只有這兩種情況跳出訊息提示(示意;另一種額外提示為表格下方的「拒絕原因」區塊)</h2>
+  <h2 class="panel-title">匯入時跳出的訊息提示(示意:格式錯誤、匯入失敗、超過上限;另一種額外提示為表格下方的「拒絕原因」區塊)</h2>
   <div class="toast-demo is-error">✗ 格式錯誤:檔案不是 UTF-8 編碼的 JSON 或 CSV,未匯入</div>
   <div class="toast-demo is-error">✗ 匯入失敗:詞庫在預覽後被修改,請重新預覽</div>
+  <div class="toast-demo is-error">✗ 超過允許大小上限(256 KB)</div>
+  <div class="toast-demo is-error">✗ 超過筆數上限(1000 筆)</div>
   <div class="same-state">與現有詞庫一致,無需更動</div>
 </section>
 </body></html>

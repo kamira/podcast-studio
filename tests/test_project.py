@@ -967,3 +967,108 @@ def test_is_post_fresh():
     assert not pj.is_post_fresh(pj.validate(data(segments=[seg()]))["segments"][0])
     with pytest.raises(pj.ProjectError):
         pj.post_key(ext["segments"][0])
+
+
+# ---------- CHG-20261029-01 T7:片段合音 ----------
+
+def fz(index, zhuyin="ㄐㄧㄤˋ", source="rule", length=2):
+    return {"index": index, "length": length, "zhuyin": zhuyin, "source": source}
+
+
+def test_tts_text套用合音_第一字標註刪第二字():
+    s = pj.validate(data(segments=[seg("是這樣啊", fusions=[fz(1)])]))["segments"][0]
+    assert pj.tts_text(s) == "是這[:ㄐㄧㄤˋ]啊"
+    s = pj.validate(data(segments=[seg("是這樣啊，我也不知道", fusions=[fz(8, "ㄗㄠˋ", "lexicon"), fz(1)])]))["segments"][0]
+    assert [f["index"] for f in s["fusions"]] == [1, 8]
+    assert pj.tts_text(s) == "是這[:ㄐㄧㄤˋ]啊，我也不知[:ㄗㄠˋ]"
+    assert pj.fused_out(s) == {2, 9}
+
+
+def test_v1專案載入後合音為空陣列(projects):
+    d = projects / "夜市的味道"
+    d.mkdir()
+    (d / "project.json").write_text(json.dumps(v1_body(), ensure_ascii=False), encoding="utf-8")
+    assert all(s["fusions"] == [] for s in pj.load("夜市的味道").segments)
+
+
+@pytest.mark.parametrize("text,kw", [
+    ("是這樣啊", {"fusions": [fz(1)], "annotations": [{"index": 2, "zhuyin": "ㄧㄤˋ"}]}),   # 範圍內有標註
+    ("是這樣啊", {"fusions": [fz(1)], "annotations": [{"index": 1, "zhuyin": "ㄓㄜˋ"}]}),
+    ("這樣樣子", {"fusions": [fz(0), fz(1)]}),                                                # 重疊
+    ("是這，啊", {"fusions": [fz(1)]}),                                                       # 第二字不是漢字
+    ("是這樣啊", {"fusions": [fz(3)]}),                                                       # 沒有第二字
+    ("是這樣啊", {"fusions": [fz(1)], "word_clarity": [{"start": 2, "end": 4, "value": 40}]}),  # 字詞清晰度切過
+    ("是這樣啊", {"fusions": [fz(1, "ㄐㄧㄤ4")]}),
+    ("是這樣啊", {"fusions": [fz(1, source="auto")]}),
+    ("是這樣啊", {"fusions": [{"index": 1, "zhuyin": "ㄐㄧㄤˋ", "source": "rule"}]}),        # 缺 length
+    ("是這樣啊", {"fusions": [fz(1, length=1)]}),
+    ("是這樣啊是這", {"fusions": [fz(0, "ㄕˋ ㄐㄧㄤˋ ㄚ ㄕˋ", length=5)]}),
+    ("我不知道耶", {"fusions": [fz(1, "ㄅㄨˋ ㄓ ㄉㄠˋ", length=3)]}),                       # 三字配三音節
+    ("我不知，耶", {"fusions": [fz(1, "ㄅㄨˋ ㄗㄠˋ", length=3)]}),                           # 範圍含非漢字
+    ("我不知道耶", {"fusions": [fz(1, "ㄅㄨˋ  ㄗㄠˋ", length=3)]}),                         # 兩個空白
+    ("我不知道耶", {"fusions": [fz(1, "ㄅㄨˋ ㄗㄠˋ", length=3), fz(3)]}),                     # 重疊
+    ("這樣" * 17, {"fusions": [fz(2 * k) for k in range(17)]}),                               # 超過 16 組
+])
+def test_合音不合法(text, kw):
+    with pytest.raises(pj.ProjectError):
+        pj.validate(data(segments=[seg(text, **kw)]))
+
+
+def test_字詞清晰度完整包含合音範圍可以():
+    s = pj.validate(data(segments=[seg("是這樣啊", fusions=[fz(1)],
+                                       word_clarity=[{"start": 0, "end": 3, "value": 40}])]))["segments"][0]
+    assert s["fusions"] == [fz(1)]
+
+
+def test_套用合音後cache_key改變_移除後回到原鍵():
+    import tts_service as tts
+    voice = tts.Voice(wav=Path("/dev/null"), text="逐字稿", wav_sha="a" * 64, text_sha="b" * 64)
+    base = pj.validate(data(segments=[seg("是這樣啊")]))["segments"][0]
+    fused = pj.validate(data(segments=[{**base, "fusions": [fz(1)]}]))["segments"][0]
+    k0, k1 = tts.cache_key(base, voice), tts.cache_key(fused, voice)
+    assert k0 != k1
+    assert tts.cache_key({**fused, "fusions": []}, voice) == k0
+
+
+def test_shape工作的字數以送模型的字為準():
+    import tts_service as tts
+    s = pj.validate(data(segments=[seg("是這樣啊，我也不知道", fusions=[fz(1), fz(8, "ㄗㄠˋ", "lexicon")],
+                                       word_clarity=[{"start": 5, "end": 7, "value": 30}],
+                                       audio={"id": KEY_A[:32], "seconds": 2.0, "key": KEY_A})]))["segments"][0]
+    job = tts.shape_job(s, "c" * 32, "d" * 32)
+    assert job["chars"] == 7                                   # 9 個漢字 − 2 個合音第二字
+    assert job["word_clarity"] == [{"start": 3, "end": 5, "value": 30}]
+
+
+def test_三字合音_tts_text前k字帶音節刪其餘字():
+    s = pj.validate(data(segments=[seg("我也不知道", fusions=[fz(2, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)])]))["segments"][0]
+    assert pj.tts_text(s) == "我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]"
+    assert pj.fused_out(s) == {4}
+    s = pj.validate(data(segments=[seg("怎麼樣都可以", fusions=[fz(0, "ㄗㄣˇ ㄧㄤˋ", "lexicon", 3)])]))["segments"][0]
+    assert pj.tts_text(s) == "怎[:ㄗㄣˇ]麼[:ㄧㄤˋ]都可以"
+    s = pj.validate(data(segments=[seg("就是這樣", fusions=[fz(0, "ㄐㄧㄡˋ ㄕˋ ㄐㄧㄤˋ", "rule", 4)])]))["segments"][0]
+    assert pj.tts_text(s) == "就[:ㄐㄧㄡˋ]是[:ㄕˋ]這[:ㄐㄧㄤˋ]"
+
+
+def test_fusion_off驗證_與fusions互斥():
+    ok = pj.validate(data(segments=[seg("是這樣啊", fusion_off=[{"index": 1, "length": 2}])]))
+    assert ok["segments"][0]["fusion_off"] == [{"index": 1, "length": 2}]
+    for bad in ([{"index": 35, "length": 2}], [{"index": 0, "length": 5}], [{"index": 0}],
+                [{"index": 0, "length": 2}] * 33, "x"):
+        with pytest.raises(pj.ProjectError):
+            pj.validate(data(segments=[seg("是這樣啊" * 9, fusion_off=bad)]))
+    with pytest.raises(pj.ProjectError) as e:
+        pj.validate(data(segments=[seg("是這樣啊", fusions=[fz(1)], fusion_off=[{"index": 1, "length": 2}])]))
+    assert "同時" in errors_of(e)
+
+
+def test_shift_marks依位移調整_改動範圍內清除():
+    s = {"fusions": [fz(4, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)],
+         "fusion_off": [{"index": 0, "length": 2}, {"index": 8, "length": 2}]}
+    old = "是這樣啊我不知道耶好的"
+    got = pj.shift_marks(s, old, "是這樣啊，我不知道耶好的")          # 索引 4 插入一字
+    assert got["fusions"] == [fz(5, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)] and got["cleared"] == 0
+    assert got["fusion_off"] == [{"index": 0, "length": 2}, {"index": 9, "length": 2}]
+    got = pj.shift_marks(s, old, "是這樣啊我不道耶好的")              # 刪掉「知」(被合音的字)
+    assert got["fusions"] == [] and got["cleared"] == 1
+    assert got["fusion_off"] == [{"index": 0, "length": 2}, {"index": 7, "length": 2}]

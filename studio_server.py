@@ -215,6 +215,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # n
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 import executor  # noqa: E402
+import fusion  # noqa: E402
 import heavy_lock  # noqa: E402
 import media  # noqa: E402
 import names  # noqa: E402
@@ -709,7 +710,8 @@ MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "w
 WAV_ONLY = "取代語音只接受 WAV 音檔"
 BUSY = "已有語音合成、匯出、注音標註或流程在執行中,請等它結束"
 SEGMENT_PATCH_KEYS = ("text", "pause_after", "speed", "annotations", "split_at", "merge_next",
-                      "audio_file", "audio", "connect", "clarity", "word_clarity", "pitch")
+                      "audio_file", "audio", "connect", "clarity", "word_clarity", "pitch", "fusions",
+                      "fusion_off")
 PROSODY_KEYS = ("connect", "clarity", "word_clarity", "pitch")   # CHG-20261029-01:改了只重做後製,不重新合成
 NO_POST_EXTERNAL = "自錄音檔不做後製(連音、清晰度、字詞清晰度、語調只適用於合成的語音)"
 MAX_POST_IDS = 2000
@@ -834,23 +836,33 @@ def _view(proj) -> dict:
 def _new_segment(text: str, brk: str) -> dict:
     return {"id": pj.new_id(), "text": text, "break": brk, "pause_after": None, "speed": None,
             "annotations": [], "audio": None, "connect": None, "clarity": None, "word_clarity": [],
-            "pitch": None, "post": None}
+            "pitch": None, "post": None, "fusions": [], "fusion_off": []}
 
 
 def _resplit(proj, script, forced) -> None:
-    """文稿改寫後重新分句;文字相同的片段(依序配對)沿用 id、停頓、語速、標註與音檔,只有新句沒有音檔。"""
+    """文稿改寫後重新分句;文字相同的片段(依序配對)沿用 id、停頓、語速、標註與音檔,只有新句沒有音檔。
+
+    (CHG-20261029-01 D41)句數不變時,改過文字的句子沿用同一位置舊句的合音狀態(依位移調整、
+    與改動範圍重疊者清除);音檔、標註與其他設定不沿用。"""
     pieces = pj.split_segments(script, forced)
     pool: dict[str, list] = {}
     for s in proj.segments:
         pool.setdefault(s["text"], []).append(s)
+    same_count = len(pieces) == len(proj.segments)
+    used = set()
     segs = []
-    for p in pieces:
+    for k, p in enumerate(pieces):
         olds = pool.get(p["text"])
         if olds:
             s = dict(olds.pop(0))
             s["break"] = p["break"]
+            used.add(s["id"])
         else:
             s = _new_segment(p["text"], p["break"])
+            old = proj.segments[k] if same_count else None
+            if old is not None and old["id"] not in used and (old.get("fusions") or old.get("fusion_off")):
+                moved = pj.shift_marks(old, old["text"], p["text"])
+                s["fusions"], s["fusion_off"] = moved["fusions"], moved["fusion_off"]
         segs.append(s)
     proj.script = script
     proj.segments = segs
@@ -1058,6 +1070,11 @@ def annotate_text(text: str, root: Path) -> list:
     return out
 
 
+def _fusion_lexicon() -> dict:
+    """合音詞庫(啟用者):{2~4 字詞: 合音注音}。T7 先回空詞庫;T8 起讀設定資料庫(settings.load_fusions)。"""
+    return {}
+
+
 def _render_default(proj):
     return media.render_timeline(proj, timeline.layout(proj))
 
@@ -1091,7 +1108,8 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                synth: Callable | None = None, render: Callable | None = None,
                annotate: Callable[[str], list] | None = None,
                voice_defaults: Callable[[], dict] | None = None,
-               post: Callable | None = None) -> FastAPI:
+               post: Callable | None = None,
+               fusion_lexicon: Callable[[], dict] | None = None) -> FastAPI:
     """建立 app。runner 預設為 executor.run(測試可換替身);token 預設每次隨機產生;
     root 為 repo 根目錄(`outputs/`、`workflows/` 所在處),預設本檔所在目錄,測試可指到暫存目錄;
     ollama_tags 為取得 Ollama 已下載模型清單的函式(預設 fetch_ollama_tags,測試可換替身;
@@ -1099,7 +1117,8 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     專案 API(T6)的替身:synth(project, emit)預設 tts_service.synth;render(project) -> (mp4, srt)
     預設 media.render_timeline(project, timeline.layout(project));annotate(text) -> 注音陣列預設
     annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8:讀設定資料庫);
-    post(project, segment_ids, emit) 預設 tts_service.post_process(CHG-20261029-01 T4)。
+    post(project, segment_ids, emit) 預設 tts_service.post_process(CHG-20261029-01 T4);
+    fusion_lexicon() -> {2~4 字詞: 合音注音}(只含啟用者)預設 _fusion_lexicon(CHG-20261029-01 T7)。
     專案目錄由 project.ROOT 決定(不是 root)。"""
     token = token or secrets.token_urlsafe(32)
     tags_fn = ollama_tags or fetch_ollama_tags
@@ -1401,6 +1420,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     annotate_fn = annotate or (lambda text: annotate_text(text, root))
     defaults_fn = voice_defaults or _voice_defaults
     post_fn = post or tts_service.post_process
+    lexicon_fn = fusion_lexicon or _fusion_lexicon
     plocks: dict[str, threading.Lock] = {}
     plocks_guard = threading.Lock()
     jobs: dict[str, str] = {}   # run_id → 執行合成 / 匯出中的專案名稱(比對鍵),刪除專案時檢查
@@ -1598,8 +1618,21 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             for key in ("pause_after", "speed"):
                 if key in data:
                     seg[key] = data[key]
-            if "text" in data and seg["text"] != proj.segments[idx]["text"] and "word_clarity" not in data:
-                seg["word_clarity"] = []   # 字詞清晰度以字元索引記錄,文字改了即清除(同注音標註)
+            if "text" in data and seg["text"] != proj.segments[idx]["text"]:
+                if "word_clarity" not in data:
+                    seg["word_clarity"] = []   # 字詞清晰度以字元索引記錄,文字改了即清除(同注音標註)
+                moved = pj.shift_marks(seg, proj.segments[idx]["text"], seg["text"])   # D41:依位移調整
+                if "fusions" not in data:
+                    seg["fusions"] = moved["fusions"]
+                if "fusion_off" not in data:
+                    seg["fusion_off"] = moved["fusion_off"]
+            if "fusion_off" in data:
+                seg["fusion_off"] = data["fusion_off"]
+            if "fusions" in data:   # 合音改變送模型的文字:該句變髒、走既有 synth(D28)
+                if seg.get("fusions") != data["fusions"] and _external(seg.get("audio")) \
+                        and "audio_file" not in data:
+                    seg["audio"] = None
+                seg["fusions"] = data["fusions"]
             for key in PROSODY_KEYS:   # (CHG-20261029-01 T4)範圍驗證在 project.validate()
                 if key in data:
                     if _external(seg.get("audio")) and data[key] not in (None, []):
@@ -1619,7 +1652,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 skip = len(second) - len(second.lstrip())
                 anns = seg.get("annotations") or []
                 a = {**seg, "text": first.strip(), "break": "forced", "pause_after": None, "audio": None,
-                     "word_clarity": [], "pitch": None, "post": None,
+                     "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_off": [],
                      "annotations": [{"index": x["index"] - lead, "zhuyin": x["zhuyin"]}
                                      for x in anns if x["index"] <= i]}
                 b = {**_new_segment(second.strip(), seg["break"]), "pause_after": seg.get("pause_after"),
@@ -1635,7 +1668,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 shift = len(seg["text"])
                 merged = {**seg, "text": seg["text"] + nxt["text"], "break": nxt["break"],
                           "pause_after": nxt.get("pause_after"), "audio": None,
-                          "word_clarity": [], "pitch": None, "post": None,
+                          "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_off": [],
                           "annotations": (seg.get("annotations") or []) + [
                               {"index": x["index"] + shift, "zhuyin": x["zhuyin"]}
                               for x in nxt.get("annotations") or []]}
@@ -1927,6 +1960,65 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         finally:
             end_job(run)
         return result
+
+    @app.post("/api/fusion/suggest")
+    @_guard
+    async def api_fusion_suggest(request: Request):
+        """(CHG-20261029-01 T7)合音建議與選取範圍的推導(純計算,不寫檔、不佔執行旗標)。
+
+        body {"text": 句子, "zhuyin"?: 逐字注音(null = 非中文字), "exclude"?: 不提示的字元索引,
+        "index"?: 選取起點, "length"?: 選取字數 2~4(預設 2)}。回傳
+        {"suggestions": 詞庫詞(4 → 3 → 2 字、由左至右、不重疊), "fusion"?: 選取範圍的推導}:
+          2 字:{"index", "length", "word", "a", "b", "rule", "raw", "reason", "lexicon", "zhuyin", "source"}
+          3~4 字:{"index", "length", "word", "lexicon", "options": [{offset, length, zhuyin, source, reason,
+                   "combined"}], "default": 預設選項索引或 null, "zhuyin", "source", "reason"}(D37)
+        zhuyin 為整個選取範圍的合音注音(音節以半形空白分隔);不合音時為 null。"""
+        data = await _json(request)
+        _only_keys(data, ("text", "zhuyin", "index", "length", "exclude"))
+        text = data.get("text")
+        if not isinstance(text, str) or not text or len(text) > MAX_ANNOTATE_CHARS:
+            raise ApiError(422, f"句子必須是 1 到 {MAX_ANNOTATE_CHARS} 字的文字")
+        zh = data.get("zhuyin")
+        if zh is not None and (not isinstance(zh, list) or len(zh) != len(text)
+                               or any(z is not None and (not isinstance(z, str) or len(z) > 5) for z in zh)):
+            raise ApiError(422, "zhuyin 必須是與句子等長的注音陣列(非中文字為 null)")
+        exclude = data.get("exclude", [])
+        if not isinstance(exclude, list) or len(exclude) > MAX_ANNOTATE_CHARS \
+                or any(not isinstance(k, int) or isinstance(k, bool) for k in exclude):
+            raise ApiError(422, "exclude 必須是字元索引的陣列")
+        lexicon = await run_in_threadpool(lexicon_fn)
+        out = {"suggestions": fusion.suggest(text, zh, lexicon, exclude)}
+        if "index" in data:
+            i, n = data["index"], data.get("length", 2)
+            if not isinstance(n, int) or isinstance(n, bool) or not pj.FUSION_MIN <= n <= pj.FUSION_MAX:
+                raise ApiError(422, f"合音最多 {pj.FUSION_MAX} 個漢字(至少 {pj.FUSION_MIN} 個)")
+            if not isinstance(i, int) or isinstance(i, bool) or not 0 <= i or i + n > len(text):
+                raise ApiError(422, "合音需要句內相鄰的字")
+            word = text[i:i + n]
+            if not all(fusion.is_hanzi(c) for c in word):
+                raise ApiError(422, "合音只能合併相鄰的漢字")
+            zs = list(zh[i:i + n]) if zh else [None] * n
+            lex = lexicon.get(word)
+            if n == 2:
+                a, b = zs
+                r = fusion.explain(a, b) if a and b else {"zhuyin": None, "reason": "缺少這兩個字的注音",
+                                                          "raw": None}
+                out["fusion"] = {"index": i, "length": 2, "word": word, "a": a, "b": b, "rule": r["zhuyin"],
+                                 "raw": r["raw"], "reason": r["reason"], "lexicon": lex,
+                                 "zhuyin": lex or r["zhuyin"],
+                                 "source": "lexicon" if lex else ("rule" if r["zhuyin"] else None)}
+            else:
+                options = fusion.pair_options(word, zs, lexicon)
+                for o in options:
+                    o["combined"] = fusion.combine(zs, o)
+                k = fusion.default_option(options)
+                pick = options[k] if k is not None else None
+                z = lex or (pick and pick["combined"])
+                out["fusion"] = {"index": i, "length": n, "word": word, "lexicon": lex, "options": options,
+                                 "default": None if lex else k, "zhuyin": z or None,
+                                 "source": "lexicon" if lex else (pick["source"] if z else None),
+                                 "reason": "詞庫" if lex else (pick["reason"] if pick else "沒有可合併的相鄰兩字")}
+        return out
 
     @app.post("/api/annotate")
     @_guard
