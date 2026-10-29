@@ -131,7 +131,7 @@ POS_STEP = Decimal("0.01")
 MAX_WORD_CLARITY = 32
 MAX_FUSIONS = 16
 FUSION_MIN, FUSION_MAX = 2, 4     # 合音字數(使用者 2026-10-29:不超過四字)
-MAX_DISMISSED = 32                # fusion_dismissed 每句上限(D41)
+MAX_FUSION_OFF = 32                # fusion_off 每句上限(D41)
 FUSION_SOURCES = ("rule", "lexicon", "manual")
 POST_VERSION = 1
 # 裁切參數(D2):-40 dBFS 樣本峰值門檻、前後各留 30 ms、10 ms 淡入淡出
@@ -159,7 +159,7 @@ LINK_TRIES = 16
 TOP_KEYS = ("schema_version", "name", "script", "defaults", "segments", "images", "assets")
 SEGMENT_KEYS_V1 = ("id", "text", "break", "pause_after", "speed", "annotations", "audio")
 SEGMENT_KEYS = (*SEGMENT_KEYS_V1, "connect", "clarity", "word_clarity", "pitch", "post", "fusions",
-                "fusion_dismissed")
+                "fusion_off")
 POST_KEYS = ("id", "key", "seconds", "trim")
 IMAGE_KEYS = ("id", "asset", "start", "end")
 ASSET_KEYS = ("id", "kind", "ext", "bytes", "label")
@@ -451,43 +451,54 @@ def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> l
     return out
 
 
-def _check_dismissed(text: str, items, where: str) -> list[dict]:
-    """關閉合音提示的位置(D41):[{"index", "length": 2~4}],範圍在句內,每句 ≤ MAX_DISMISSED 筆。"""
+def _check_fusion_off(text: str, items, where: str) -> list[dict]:
+    """停用合音的位置(D41):[{"index", "length": 2~4}],範圍在句內,每句 ≤ MAX_FUSION_OFF 筆。"""
     if items is None:
         return []
-    if not isinstance(items, list) or len(items) > MAX_DISMISSED:
-        raise ProjectError(f"{where}.fusion_dismissed 必須是最多 {MAX_DISMISSED} 筆的陣列")
+    if not isinstance(items, list) or len(items) > MAX_FUSION_OFF:
+        raise ProjectError(f"{where}.fusion_off 必須是最多 {MAX_FUSION_OFF} 筆的陣列")
     out = []
     for d in items:
         if not isinstance(d, dict) or set(d) != {"index", "length"}:
-            raise ProjectError(f"{where}.fusion_dismissed 每項必須恰為 index、length 兩個欄位")
+            raise ProjectError(f"{where}.fusion_off 每項必須恰為 index、length 兩個欄位")
         i, n = d["index"], d["length"]
         if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX or not _is_int(i) or i < 0 or i + n > len(text):
-            raise ProjectError(f"{where}.fusion_dismissed 的範圍超出句子")
+            raise ProjectError(f"{where}.fusion_off 的範圍超出句子")
         if {"index": i, "length": n} not in out:
             out.append({"index": i, "length": n})
     return sorted(out, key=lambda x: (x["index"], x["length"]))
 
 
-def shift_dismissed(old: str, new: str, items) -> list[dict]:
-    """句子文字由 old 改成 new 時調整關閉紀錄(D41):改動範圍之前的保留、之後的依位移調整、
-    與改動範圍重疊者刪除。改動範圍以共同前綴與共同後綴求出。"""
+def _changed_range(old: str, new: str) -> tuple[int, int, int]:
+    """old → new 的改動範圍(以共同前綴與共同後綴求出):回傳 (舊文字中的起點, 終點, 長度差)。"""
     p = 0
     while p < min(len(old), len(new)) and old[p] == new[p]:
         p += 1
     q = 0
     while q < min(len(old), len(new)) - p and old[len(old) - 1 - q] == new[len(new) - 1 - q]:
         q += 1
-    a, b = p, len(old) - q          # 舊文字中被改動的範圍 [a, b)
-    delta = len(new) - len(old)
+    return p, len(old) - q, len(new) - len(old)
+
+
+def _shift(items, a: int, b: int, delta: int) -> list[dict]:
     out = []
     for d in items or []:
         i, n = d["index"], d["length"]
-        if i + n <= a:
-            out.append({"index": i, "length": n})
+        if i + n <= a and not (a == b and i + n > a):
+            out.append({**d})
         elif i >= b and (a < b or i >= a):
-            out.append({"index": i + delta, "length": n})
+            out.append({**d, "index": i + delta})
     return out
+
+
+def shift_marks(segment: dict, old_text: str, new_text: str) -> dict:
+    """句子文字由 old_text 改成 new_text 時調整合音狀態(D41):改動範圍之前的紀錄不動、之後的依位移調整、
+    與改動範圍重疊者清除(回到未決定)。回傳 {"fusions", "fusion_off", "cleared": 被清除的 fusions 筆數}。"""
+    a, b, delta = _changed_range(old_text, new_text)
+    fus = segment.get("fusions") or []
+    kept = _shift(fus, a, b, delta)
+    return {"fusions": kept, "fusion_off": _shift(segment.get("fusion_off"), a, b, delta),
+            "cleared": len(fus) - len(kept)}
 
 
 def fused_out(segment) -> set:
@@ -705,7 +716,12 @@ def _validate_segment(s, where, errors, seen, version: int = SCHEMA_VERSION) -> 
                               out["word_clarity"], where)
     else:
         out["fusions"] = []
-    out["fusion_dismissed"] = _try(errors, _check_dismissed, text, s.get("fusion_dismissed"), where)
+    out["fusion_off"] = _try(errors, _check_fusion_off, text, s.get("fusion_off"), where)
+    if out["fusions"] and out["fusion_off"]:
+        on = {(f["index"], f["length"]) for f in out["fusions"]}
+        if any((d["index"], d["length"]) in on for d in out["fusion_off"]):
+            errors.append(f"{where}:同一範圍不能同時啟用與停用合音")
+            ok = False
     if len(errors) != n_err:
         ok = False
     return out if ok else None
@@ -1224,7 +1240,7 @@ def create(name, script: str = "", defaults: dict | None = None) -> Project:
                    segments=[{"id": new_id(), "text": p["text"], "break": p["break"], "pause_after": None,
                               "speed": None, "annotations": [], "audio": None, "connect": None,
                               "clarity": None, "word_clarity": [], "pitch": None, "post": None,
-                              "fusions": [], "fusion_dismissed": []}
+                              "fusions": [], "fusion_off": []}
                              for p in pieces])
     proj = Project.from_dict(proj.to_dict())
     with safe_fs.closing(_root_fd(create=True)) as rfd:
