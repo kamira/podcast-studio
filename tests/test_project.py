@@ -1050,20 +1050,25 @@ def test_三字合音_tts_text前k字帶音節刪其餘字():
     assert pj.tts_text(s) == "就[:ㄐㄧㄡˋ]是[:ㄕˋ]這[:ㄐㄧㄤˋ]"
 
 
-def test_fusion_dismissed驗證():
-    ok = pj.validate(data(segments=[seg("是這樣啊", fusion_dismissed=[{"index": 1, "length": 2}])]))
-    assert ok["segments"][0]["fusion_dismissed"] == [{"index": 1, "length": 2}]
+def test_fusion_off驗證_與fusions互斥():
+    ok = pj.validate(data(segments=[seg("是這樣啊", fusion_off=[{"index": 1, "length": 2}])]))
+    assert ok["segments"][0]["fusion_off"] == [{"index": 1, "length": 2}]
     for bad in ([{"index": 35, "length": 2}], [{"index": 0, "length": 5}], [{"index": 0}],
                 [{"index": 0, "length": 2}] * 33, "x"):
         with pytest.raises(pj.ProjectError):
-            pj.validate(data(segments=[seg("是這樣啊" * 9, fusion_dismissed=bad)]))
+            pj.validate(data(segments=[seg("是這樣啊" * 9, fusion_off=bad)]))
+    with pytest.raises(pj.ProjectError) as e:
+        pj.validate(data(segments=[seg("是這樣啊", fusions=[fz(1)], fusion_off=[{"index": 1, "length": 2}])]))
+    assert "同時" in errors_of(e)
 
 
-def test_shift_dismissed依位移調整_改動範圍內刪除():
-    items = [{"index": 0, "length": 2}, {"index": 4, "length": 3}, {"index": 8, "length": 2}]
+def test_shift_marks依位移調整_改動範圍內清除():
+    s = {"fusions": [fz(4, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)],
+         "fusion_off": [{"index": 0, "length": 2}, {"index": 8, "length": 2}]}
     old = "是這樣啊我不知道耶好的"
-    new = "是這樣啊，我不知道耶好的"            # 在索引 4 插入一個字
-    assert pj.shift_dismissed(old, new, items) == [{"index": 0, "length": 2}, {"index": 5, "length": 3},
-                                                  {"index": 9, "length": 2}]
-    new2 = "是這樣啊我不曉得耶好的"            # 改動「知道」→ 落在 [4, 7) 的紀錄刪除
-    assert pj.shift_dismissed(old, new2, items) == [{"index": 0, "length": 2}, {"index": 8, "length": 2}]
+    got = pj.shift_marks(s, old, "是這樣啊，我不知道耶好的")          # 索引 4 插入一字
+    assert got["fusions"] == [fz(5, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)] and got["cleared"] == 0
+    assert got["fusion_off"] == [{"index": 0, "length": 2}, {"index": 9, "length": 2}]
+    got = pj.shift_marks(s, old, "是這樣啊我不道耶好的")              # 刪掉「知」(被合音的字)
+    assert got["fusions"] == [] and got["cleared"] == 1
+    assert got["fusion_off"] == [{"index": 0, "length": 2}, {"index": 7, "length": 2}]

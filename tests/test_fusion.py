@@ -164,3 +164,16 @@ def test_api_suggest三四字選取(client):
     assert f["options"][0]["zhuyin"] is None and f["options"][1]["combined"] == "ㄐㄧㄡˋ ㄕㄜˋ ㄧㄤˋ"
     assert client.post("/api/fusion/suggest", json={"text": "就是這樣啊", "index": 0, "length": 5},
                        headers=AUTH).status_code == 422
+
+
+def test_marks三種狀態_display():
+    lex = {"不知道": {"zhuyin": "ㄅㄨˋ ㄗㄠˋ", "display": "不造"}, "知道": "ㄗㄠˋ", "這樣": {"zhuyin": "ㄐㄧㄤˋ", "display": "醬"},
+           "那樣": "ㄋㄧㄤˋ"}
+    seg = {"text": "是這樣啊，我不知道，那樣好嗎",
+           "fusions": [{"index": 6, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}],
+           "fusion_off": [{"index": 1, "length": 2}], "annotations": []}
+    got = fu.marks(seg, lex)
+    assert [(m["index"], m["length"], m["state"], m["display"]) for m in got] == [
+        (1, 2, "off", "醬"), (6, 3, "on", "不造"), (10, 2, "pending", "")]
+    seg["annotations"] = [{"index": 10, "zhuyin": "ㄋㄚˋ"}]
+    assert [m["state"] for m in fu.marks(seg, lex)] == ["off", "on"]     # 有聲調標註的範圍不比對

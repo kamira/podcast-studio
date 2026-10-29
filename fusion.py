@@ -16,6 +16,9 @@
   pair_options(chars, zhuyins, lexicon) -> [{"offset", "length", "zhuyin", "source", "reason"}]
                                                3~4 字選取不在詞庫時的候選(D37):4 字選取先列其中的 3 字詞庫詞,
                                                再列每一對相鄰兩字(詞庫值優先,其次規則結果,不合法者 zhuyin 為 None)
+  marks(segment, lexicon) -> [{"index", "length", "zhuyin", "display", "state": pending | on | off}]
+                                               文稿編輯時的三色標示(D40、D41):on = 已啟用(fusions)、off = 已停用
+                                               (fusion_off)、pending = 其餘詞庫命中(排除聲調標註與已決定的範圍)
   combine(zhuyins, option) -> str               選取範圍的合音注音:其餘字維持原讀音,option 範圍換成它的音節
   syllables(z) / is_fusion_zhuyin(z, n)        合音注音以半形空白分隔多個音節;n 字的合音必須是 1~n−1 個音節
   is_syllable(z) -> bool                        單一合法音節(聲母與介音組合依合法化表檢查;聲調組合不檢查)
@@ -173,6 +176,36 @@ def suggest(text: str, zhuyins, lexicon: dict, exclude=()) -> list[dict]:
                 continue
             i += 1
     return sorted(out, key=lambda x: x["index"])
+
+
+def _entry(lexicon, word):
+    """詞庫值可為合音注音字串或 {"zhuyin", "display"};回傳 (zhuyin, display) 或 (None, "")。"""
+    v = (lexicon or {}).get(word)
+    if isinstance(v, dict):
+        return v.get("zhuyin"), v.get("display") or ""
+    return (v, "") if v else (None, "")
+
+
+def marks(segment: dict, lexicon: dict) -> list[dict]:
+    """片段的合音標示(D40、D41):已啟用 → on、已停用 → off、其餘詞庫命中(4 → 3 → 2 字)→ pending。"""
+    text = segment.get("text") or ""
+    out, used = [], set()
+    for f in segment.get("fusions") or []:
+        word = text[f["index"]:f["index"] + f["length"]]
+        z, disp = _entry(lexicon, word)
+        out.append({"index": f["index"], "length": f["length"], "zhuyin": f["zhuyin"],
+                    "display": disp if z == f["zhuyin"] else "", "state": "on"})
+        used |= set(range(f["index"], f["index"] + f["length"]))
+    for d in segment.get("fusion_off") or []:
+        z, disp = _entry(lexicon, text[d["index"]:d["index"] + d["length"]])
+        out.append({"index": d["index"], "length": d["length"], "zhuyin": z, "display": disp, "state": "off"})
+        used |= set(range(d["index"], d["index"] + d["length"]))
+    used |= {a["index"] for a in segment.get("annotations") or []}
+    flat = {w: _entry(lexicon, w)[0] for w in (lexicon or {})}
+    for h in suggest(text, None, {w: z for w, z in flat.items() if z}, used):
+        out.append({"index": h["index"], "length": h["length"], "zhuyin": h["zhuyin"],
+                    "display": _entry(lexicon, text[h["index"]:h["index"] + h["length"]])[1], "state": "pending"})
+    return sorted(out, key=lambda m: m["index"])
 
 
 def pair_options(chars, zhuyins, lexicon: dict) -> list[dict]:
