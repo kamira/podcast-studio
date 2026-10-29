@@ -555,3 +555,66 @@ body {
 .tl-word-clarity rect { fill: rgba(138, 79, 209, .35); stroke: #c9a8f0; stroke-dasharray: 3 2; }
 .tl-word-clarity text { fill: #fff; font-size: 10px; }
 .tl-pitch-zero, .tl-pitch-tick, .tl-pitch-line, .tl-pitch-label, .tl-word-clarity { pointer-events: none; }
+
+/* CHG-20261029-01 T9:設定 › 合音詞庫與匯入差異預覽 */
+.fusion-toolbar { display: flex; gap: 6px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.fusion-new { font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; width: 150px; }
+.fusion-table, .fusion-diff { border-collapse: collapse; width: 100%; font-size: 13px; }
+.fusion-table th, .fusion-table td, .fusion-diff th, .fusion-diff td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+.fusion-zhuyin { font: inherit; width: 90px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; }
+.fusion-actions { display: flex; gap: 4px; }
+.fusion-preview { margin: 12px 0; display: grid; gap: 8px; }
+.fusion-same { margin: 0; color: var(--muted); }
+.fusion-legend { display: flex; gap: 6px; margin: 0; font-size: 12px; }
+.legend-chip { padding: 1px 8px; border-radius: 10px; border-left: 4px solid transparent; }
+.fusion-diff tr { border-left: 4px solid transparent; }
+.diff-add { background: #e3f6e8; border-left-color: #2e9e5b !important; }
+.diff-upd { background: #fff6cc; }
+.diff-dis { background: #ffe6cc; }
+.diff-del { background: #fde4e2; border-left-color: var(--err) !important; }
+tr.diff-del td { text-decoration: line-through; }
+tr.diff-del td:first-child { text-decoration: none; }
+.diff-rej { background: #eceef1; color: var(--muted); border-left-color: #9aa3ad !important; }
+.fusion-reject-reasons { display: grid; gap: 2px; }
+.fusion-apply { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.fusion-mode { display: flex; gap: 4px; align-items: center; }
+@media (prefers-color-scheme: dark) {
+  .diff-add { background: rgba(46, 158, 91, .35); }
+  .diff-upd { background: rgba(214, 178, 0, .35); }
+  .diff-dis { background: rgba(230, 126, 34, .4); }
+  .diff-del { background: rgba(201, 60, 55, .4); }
+  .diff-rej { background: rgba(154, 163, 173, .35); }
+}
+
+/* CHG-20261029-01 T9:合音模式、輸入時提示與時間軸徽章 */
+.tone-chars.is-fusion-mode .tone-char { user-select: none; }
+.tone-char.is-fused { outline: 1px solid #2f6fd6; background: #eaf1fd; border-bottom: 2px dotted #2f6fd6; }
+.fusion-list { list-style: none; margin: 4px 0; padding: 0; display: grid; gap: 2px; font-size: 12px; }
+.fusion-item { display: flex; gap: 6px; align-items: center; }
+.fusion-popup { width: 300px; }
+.fusion-options { display: grid; gap: 2px; font-size: 13px; }
+.fusion-input { width: 160px; }
+.fusion-wrap { position: relative; }
+.fusion-mirror { position: absolute; pointer-events: none; overflow: hidden; color: transparent; background: transparent; margin: 0; }
+.fusion-mirror .mk { text-decoration-line: underline; text-decoration-style: wavy; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.mk.mark-pending { text-decoration-color: #e0b000; }
+.mk.mark-on { text-decoration-color: #2e9e5b; }
+.mk.mark-off { text-decoration-color: #c93c37; }
+.fusion-pill {
+  position: absolute; z-index: 2; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  background: #e3f5ea; border: 1px solid #2e9e5b; border-radius: 5px; color: #1e6b3e; font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .15); overflow: hidden; white-space: nowrap;
+}
+.fusion-pop {
+  position: absolute; z-index: 50; background: #fff; border: 1px solid #b7cdf3; border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .16); padding: 8px 10px; display: grid; gap: 6px; min-width: 180px;
+}
+.fusion-pop[hidden] { display: none; }
+.fusion-pop-row { display: flex; gap: 6px; }
+.fusion-pop .b-on { border-color: #2e9e5b; color: #1e6b3e; }
+.fusion-pop .b-off { border-color: #c93c37; color: #a12e2a; }
+@media (prefers-color-scheme: dark) {
+  .fusion-pill { background: #1f3b2b; color: #a8f0c6; }
+}
+.tl-badge { position: absolute; right: 4px; bottom: 3px; font-size: 10px; padding: 0 4px; border-radius: 3px; background: rgba(0, 0, 0, .35); }
+.fusion-diff td { white-space: pre-line; }   /* 顯示字差異在合音注音格第二行 */

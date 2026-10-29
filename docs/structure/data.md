@@ -143,3 +143,32 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,�
 | 合成事件 | waiting、segment(`id`、`seconds`、`cached`、`audio`)、error、finished(`status`、`synthesized`、`cached`、`saved`) | 〔觀察〕`studio_server.py`、`tts_service.py` |
 
 〔觀察〕CLI 模式(ask、code、image、speak、auto)已隨 CLI 移除(CHG-20261022-01 T2)。
+
+## CHG-20261029-01:專案檔 schema 2、後製檔、設定資料庫 schema 3
+
+〔觀察〕以下為 CHG-20261029-01 T1、T3、T7、T8 的資料變更(程式為準:`project.py`、`tts_service.py`、`settings.py`)。
+
+**專案檔 `schema_version: 2`**(v1 載入時在記憶體補預設值,存檔寫成 v2,舊檔照例移入 `history/`;3 以上拒絕)。Segment 新增:
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `connect` | null 或 0~100 整數 | 連音;null = 0% |
+| `clarity` | null 或 0~100 整數 | 清晰度(咬字含糊程度);null = 100% |
+| `word_clarity` | `[{start, end, value}]` | 字詞清晰度;`[start, end)` 為句內漢字、不重疊、≤ 32 段 |
+| `pitch` | null 或 `{points: [{pos, semi}], roundness}` | 語調折線;2~16 點、pos 0~1(0.01)嚴格遞增、semi −6~+6(0.1);roundness null = 50% |
+| `post` | null 或 `{id, key, seconds, trim}` | 伺服器產生的後製結果;`key` = 後製鍵,`seconds` = 後製後長度(變速前),`trim` = 裁掉的秒數;PATCH 不接受 |
+| `fusions` | `[{index, length, zhuyin, source}]` | 合音;length 2~4、zhuyin 為 1~length−1 個音節(半形空白分隔)、source ∈ rule / lexicon / manual;範圍內都是漢字、不重疊、≤ 16 組、範圍內不得有聲調標註 |
+| `fusion_off` | `[{index, length}]` | 停用的合音位置(≤ 32 筆);與 `fusions` 同一範圍互斥;文字改動時兩者依位移調整、與改動範圍重疊者清除 |
+
+**後製鍵**:SHA-256(JSON 陣列 [audio.id, 後製版本號 1, 裁切參數, connect, clarity, word_clarity, pitch]);語速、停頓不在鍵內。
+
+**`projects/<名稱>/audio/`** 新增:裁切檔與後製檔 `<後製鍵前 32 碼>.wav`(預設參數的後製檔即裁切檔);變速檔改以後製檔為基礎 `<後製 id>-s<語速×100>.wav`。合成檔 `<audio.id>.wav` 不改寫;後製檔與變速檔不自動刪除。
+
+**設定資料庫 schema 3**(v2 在初始化鎖內單一交易升級,失敗 rollback 維持 v2;不改 `roles`、`review_seats`、`voice_defaults`):
+
+| 表 | 欄位 | 說明 |
+|----|------|------|
+| `fusion_words` | `word` PK、`zhuyin`、`display`(預設 '')、`enabled`、`source`(default / custom) | 合音詞庫;預設詞(`settings.FUSION_DEFAULTS`,11 筆)可編輯 / 停用 / 還原、不可刪 |
+| `fusion_settings` | `key` PK、`value` INTEGER | `import_max_kb`(預設 256,16–4096)、`import_max_rows`(預設 1000,10–10000) |
+
+匯出格式:JSON `{"format": "podcast-studio-fusions", "version": 1, "words": [{word, zhuyin, display, enabled, source}]}`;CSV 表頭 `word,zhuyin,display,enabled,source`(UTF-8)。

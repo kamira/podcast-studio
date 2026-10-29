@@ -1482,3 +1482,13 @@ def test_display欄位驗證與往返(env):
         ("這樣", "update", "醬", "降")]
     settings.apply_import(p["changes"], p["base_version"], True)
     assert settings.fusion_entries()["這樣"]["display"] == "降"
+
+
+def test_匯入時檔案的source一律忽略_由伺服器判定(env):
+    settings.save(changed())
+    words = json.loads(_export())["words"] + [{"word": "好像", "zhuyin": "ㄏㄠˇ", "display": "好", "enabled": True,
+                                               "source": "default"}]
+    p = settings.preview_import(_file(words))
+    settings.apply_import(p["changes"], p["base_version"], True)
+    row = {r["word"]: r for r in settings.load_fusions()["words"]}["好像"]
+    assert row["source"] == "custom" and row["display"] == "好"

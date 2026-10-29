@@ -191,6 +191,7 @@
     <a class="subnav-link" href="#/settings/seats" data-sub="seats">審議席位</a>
     <a class="subnav-link" href="#/settings/voice" data-sub="voice">語音預設</a>
     <a class="subnav-link" href="#/settings/flow" data-sub="flow">進階流程</a>
+    <a class="subnav-link" href="#/settings/fusion" data-sub="fusion">合音詞庫</a>
   </nav>
 
   <!-- 設定表單(T12):模型、審議席位與語音預設(CHG-20261022-04 T8)三個子頁共用提示列與「還原預設 / 儲存」;
@@ -307,6 +308,36 @@
           <input type="number" data-field="voice_defaults.pause_paragraph" data-kind="num" min="0" max="5" step="0.1" inputmode="decimal"></label>
       </div>
       <p class="section-hint">已建立的專案保留各自的預設,不受這裡影響;逗號停頓用於「強制停頓」切開的句子。</p>
+    </section>
+  </div>
+
+  <!-- 設定 › 合音詞庫(CHG-20261029-01 T9):存設定資料庫 fusion_words;匯入先差異預覽再確認 -->
+  <div class="subpage settings-sub" data-sub="fusion" hidden>
+    <section class="settings-section">
+      <h2 class="section-title">合音詞庫</h2>
+      <p class="section-hint">剪輯時「合音」模式的建議與預填值 · 預設詞可編輯、停用或還原,自訂詞可刪除 · 已套用的合音不受這裡影響</p>
+      <div class="fusion-toolbar">
+        <input type="text" id="fusion-new-word" class="fusion-new" maxlength="4" placeholder="詞(例:這樣)" aria-label="新增的詞">
+        <input type="text" id="fusion-new-zhuyin" class="fusion-new" maxlength="24" placeholder="合音注音(例:ㄐㄧㄤˋ)" aria-label="新增的合音注音">
+        <button type="button" class="btn" id="fusion-add">＋ 新增</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="fusion-import">匯入…</button>
+        <input type="file" id="fusion-file" accept=".json,.csv,application/json,text/csv" hidden>
+        <button type="button" class="btn" id="fusion-export-json">匯出 JSON</button>
+        <button type="button" class="btn" id="fusion-export-csv">匯出 CSV</button>
+      </div>
+      <table class="fusion-table" id="fusion-table">
+        <thead><tr><th>原詞</th><th>合音注音</th><th>同音字(參考)</th><th>來源</th><th>啟用</th><th>操作</th></tr></thead>
+        <tbody id="fusion-rows"></tbody>
+      </table>
+      <div class="fusion-preview" id="fusion-preview" hidden></div>
+      <div class="role-row fusion-limits">
+        <label class="field field-num"><span class="field-label">匯入大小上限(KB,16–4096)</span>
+          <input type="number" id="fusion-max-kb" min="16" max="4096" step="1" inputmode="numeric"></label>
+        <label class="field field-num"><span class="field-label">匯入筆數上限(筆,10–10000)</span>
+          <input type="number" id="fusion-max-rows" min="10" max="10000" step="1" inputmode="numeric"></label>
+        <button type="button" class="btn" id="fusion-limits-save">儲存上限</button>
+      </div>
     </section>
   </div>
 

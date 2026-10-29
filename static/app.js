@@ -57,7 +57,7 @@
   const CASE_COLLISION_MARK = "只差大小寫";
 
   const TOKEN = (document.querySelector('meta[name="studio-token"]') || {}).content || "";
-  const SUBPAGES = ["models", "seats", "voice", "flow"];
+  const SUBPAGES = ["models", "seats", "voice", "flow", "fusion"];
   const NODE_TEMPLATE = "studio-node";
   const LONG_TEXT = 200;          // 字串參數上限超過此值改用多行輸入框
   const TOAST_MS = 6000;
@@ -108,6 +108,7 @@
     const t = document.getElementById("toast");
     t.textContent = String(message);
     t.classList.toggle("toast-error", !!isError);
+    t.classList.toggle("is-error", !!isError);   // CHG-20261029-01 T9:錯誤提示的共通標記
     t.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.hidden = true; }, TOAST_MS);
@@ -255,6 +256,7 @@
       else a.removeAttribute("aria-current");
     });
     if (sub === "flow") Flow.open();
+    if (sub === "fusion") FusionLib.open();
   }
 
   // ---------- 精靈步驟的保留規則(修訂 3 R3-2) ----------
@@ -1627,6 +1629,342 @@
     });
   }
 
+  // ---------- 設定 › 合音詞庫(CHG-20261029-01 T9;D29~D32、D36) ----------
+  //
+  // 列表(新增、編輯注音、啟用、刪除自訂詞 / 還原預設詞)、匯出 JSON / CSV、匯入差異預覽與套用、匯入上限。
+  // 匯入:檔案以 multipart 送 /import/preview(只在伺服器記憶體解析);一致時只顯示一行狀態、沒有確認按鈕;
+  // 不一致時顯示警告列、圖例與「保留|類別|詞|合音注音|啟用」五欄差異表,儲存格只有值或「原值 → 新值」;
+  // 被拒詞條以類別「拒絕」列出(灰底、沒有保留勾選框),原因只列在 #fusion-reject-reasons。
+  // 跳出訊息只有三類:匯入失敗(409 / 寫入失敗)、格式錯誤(422)、超過上限(413,沿用伺服器訊息)。
+
+  const FUSION_KIND_LABEL = { add: "新增", update: "修改", disable: "停用", delete: "刪除", reject: "拒絕" };
+
+  // 差異表的一列(純函式):回傳 {kind, word, keepable, keepDefault, cells: [{text, cls}](合音注音、啟用)}
+  function fusionDiffRow(change) {
+    const onOff = function (v) { return v ? "啟用" : "停用"; };
+    const o = change.old, n = change.new;
+    const cell = function (a, b, cls) {
+      if (a === null || a === undefined) return { text: b, cls: "" };
+      if (b === null || b === undefined || a === b) return { text: a, cls: "" };
+      return { text: a + " → " + b, cls: cls };
+    };
+    let z, en;
+    if (change.kind === "add") {
+      z = { text: n.zhuyin, cls: "" };
+      en = { text: onOff(n.enabled), cls: "" };
+    } else if (change.kind === "delete") {
+      z = { text: o.zhuyin, cls: "" };
+      en = { text: onOff(o.enabled), cls: "" };
+    } else {
+      z = cell(o.zhuyin, n.zhuyin, "diff-upd");
+      en = cell(onOff(o.enabled), onOff(n.enabled), change.kind === "disable" ? "diff-dis" : "diff-upd");
+      const od = o.display || "", nd = n.display || "";
+      if (change.kind === "update" && od !== nd) {   // 只差顯示字也屬修改:合音注音格第二行(D43)
+        z = { text: z.text + "\n顯示字 " + (od || "(無)") + " → " + (nd || "(無)"), cls: "diff-upd" };
+      }
+    }
+    return { kind: change.kind, word: change.word, keepable: true,
+             keepDefault: change.kind === "delete" || change.kind === "disable", cells: [z, en] };
+  }
+
+  // multipart/form-data 本文(以 Blob 自組邊界與欄位)
+  async function postFile(url, file) {
+    const boundary = "----studio" + Math.random().toString(16).slice(2) + Date.now().toString(16);
+    const safeName = String(file.name || "fusions").replace(/["\r\n\\]/g, "_");
+    const head = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\""
+      + safeName + "\"\r\nContent-Type: application/octet-stream\r\n\r\n";
+    const body = new Blob([head, file, "\r\n--" + boundary + "--\r\n"]);
+    let res;
+    try {
+      res = await fetch(url, { method: "POST", credentials: "same-origin", cache: "no-store", body: body,
+        headers: { "X-Studio-Token": TOKEN, "Content-Type": "multipart/form-data; boundary=" + boundary } });
+    } catch (e) {
+      return { ok: false, status: 0, data: null };
+    }
+    let data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
+    return { ok: res.ok, status: res.status, data: data };
+  }
+
+  const FusionLib = {
+    inited: false,
+    words: [],
+    preview: null,
+
+    $(id) { return document.getElementById(id); },
+
+    init() {
+      if (this.inited) return;
+      this.inited = true;
+      this.$("fusion-add").addEventListener("click", () => this.add());
+      this.$("fusion-import").addEventListener("click", () => this.$("fusion-file").click());
+      this.$("fusion-file").addEventListener("change", (e) => {
+        const f = e.target.files && e.target.files[0];
+        e.target.value = "";
+        if (f) this.importFile(f);
+      });
+      this.$("fusion-limits-save").addEventListener("click", () => this.saveLimits());
+      this.$("fusion-export-json").addEventListener("click", () => this.download("json"));
+      this.$("fusion-export-csv").addEventListener("click", () => this.download("csv"));
+    },
+
+    // 匯出:同源 GET 下載(瀏覽器存檔,不經伺服器寫檔)
+    download(fmt) {
+      const a = document.createElement("a");
+      a.href = "/api/settings/fusions/export?format=" + (fmt === "csv" ? "csv" : "json");
+      a.download = "合音詞庫." + (fmt === "csv" ? "csv" : "json");
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    },
+
+    async open() {
+      this.init();
+      const [r, l] = await Promise.all([api("GET", "/api/settings/fusions"), api("GET", "/api/settings/fusions/limits")]);
+      if (r.ok && r.data) {
+        this.words = r.data.words || [];
+        this.render();
+      } else toast("無法讀取合音詞庫:" + errorText(r), true);
+      if (l.ok && l.data) {
+        this.$("fusion-max-kb").value = String(l.data.max_kb);
+        this.$("fusion-max-rows").value = String(l.data.max_rows);
+      }
+    },
+
+    render() {
+      const body = this.$("fusion-rows");
+      body.replaceChildren();
+      this.words.forEach((w) => body.appendChild(this.row(w)));
+      if (!this.words.length) {
+        const tr = el("tr");
+        const td = el("td", "muted", "詞庫是空的");
+        td.colSpan = 6;
+        tr.appendChild(td);
+        body.appendChild(tr);
+      }
+    },
+
+    row(w) {
+      const tr = el("tr");
+      tr.dataset.word = w.word;
+      tr.appendChild(el("td", "fusion-word", w.word));
+      const ztd = el("td");
+      const z = document.createElement("input");
+      z.type = "text";
+      z.className = "fusion-zhuyin";
+      z.maxLength = 24;
+      z.value = w.zhuyin;
+      z.setAttribute("aria-label", "「" + w.word + "」的合音注音");
+      ztd.appendChild(z);
+      tr.appendChild(ztd);
+      tr.appendChild(el("td", "muted", w.display || "—"));   // D43:浮層顯示字(同音字參考)
+      tr.appendChild(el("td", "", w.source === "default" ? "預設" : "自訂"));
+      const etd = el("td");
+      const en = document.createElement("input");
+      en.type = "checkbox";
+      en.checked = !!w.enabled;
+      en.setAttribute("aria-label", "啟用「" + w.word + "」");
+      en.addEventListener("change", () => this.save(w.word, z.value.trim(), en.checked));
+      etd.appendChild(en);
+      tr.appendChild(etd);
+      const act = el("td", "fusion-actions");
+      const save = el("button", "btn btn-small", "儲存");
+      save.type = "button";
+      save.addEventListener("click", () => this.save(w.word, z.value.trim(), en.checked));
+      act.appendChild(save);
+      if (w.source === "default") {
+        const rs = el("button", "btn btn-small", "還原");
+        rs.type = "button";
+        rs.addEventListener("click", () => this.put(w.word, { restore: true }, "已還原「" + w.word + "」"));
+        act.appendChild(rs);
+      } else {
+        const del = el("button", "btn btn-small", "刪除");
+        del.type = "button";
+        del.addEventListener("click", () => this.remove(w.word));
+        act.appendChild(del);
+      }
+      tr.appendChild(act);
+      return tr;
+    },
+
+    async put(word, body, okText) {
+      const r = await api("PUT", "/api/settings/fusions/" + encodeURIComponent(word), body);
+      if (!r.ok) {
+        toast("無法儲存:" + errorText(r), true);
+        return false;
+      }
+      this.words = r.data.words || [];
+      this.render();
+      toast(okText);
+      return true;
+    },
+
+    save(word, zhuyin, enabled) {
+      return this.put(word, { zhuyin: zhuyin, enabled: enabled }, "已儲存「" + word + "」");
+    },
+
+    async add() {
+      const word = this.$("fusion-new-word").value.trim();
+      const zhuyin = this.$("fusion-new-zhuyin").value.trim();
+      if (!word || !zhuyin) {
+        toast("請輸入詞與合音注音", true);
+        return;
+      }
+      if (this.words.some(function (w) { return w.word === word; })
+          && !window.confirm("「" + word + "」已在詞庫中,要覆寫嗎?")) return;
+      if (await this.save(word, zhuyin, true)) {
+        this.$("fusion-new-word").value = "";
+        this.$("fusion-new-zhuyin").value = "";
+      }
+    },
+
+    async remove(word) {
+      if (!window.confirm("刪除自訂詞「" + word + "」?")) return;
+      const r = await api("DELETE", "/api/settings/fusions/" + encodeURIComponent(word));
+      if (!r.ok) {
+        toast("無法刪除:" + errorText(r), true);
+        return;
+      }
+      this.words = r.data.words || [];
+      this.render();
+      toast("已刪除「" + word + "」");
+    },
+
+    async saveLimits() {
+      const kb = Number(this.$("fusion-max-kb").value);
+      const rows = Number(this.$("fusion-max-rows").value);
+      const r = await api("PUT", "/api/settings/fusions/limits", { max_kb: kb, max_rows: rows });
+      if (!r.ok) {
+        toast("無法儲存上限:" + errorText(r), true);
+        return;
+      }
+      toast("匯入上限已儲存:" + r.data.max_kb + " KB、" + r.data.max_rows + " 筆");
+    },
+
+    async importFile(file) {
+      const box = this.$("fusion-preview");
+      const r = await postFile("/api/settings/fusions/import/preview", file);
+      if (!r.ok) {
+        // 跳出訊息三類:超過上限(413,伺服器訊息即「超過允許大小上限(N KB)」等)、格式錯誤(422)、其他匯入失敗
+        if (r.status === 413) toast(errorText(r), true);
+        else if (r.status === 422) toast("格式錯誤:" + errorText(r), true);
+        else toast("匯入失敗:" + errorText(r), true);
+        return;
+      }
+      this.preview = r.data;
+      this.renderPreview(box, r.data);
+    },
+
+    renderPreview(box, p) {
+      box.replaceChildren();
+      box.hidden = false;
+      const rejected = p.rejected || [];
+      if (p.status === "same") {
+        box.appendChild(el("p", "fusion-same", "與現有詞庫一致,無需更動"));
+      } else {
+        const counts = {};
+        p.changes.forEach(function (c) { counts[c.kind] = (counts[c.kind] || 0) + 1; });
+        const warn = el("p", "notice notice-warn fusion-warn", "⚠ 匯入會更動詞庫:" + ["add", "update", "disable", "delete"]
+          .filter(function (k) { return counts[k]; })
+          .map(function (k) { return FUSION_KIND_LABEL[k] + " " + counts[k] + " 筆"; }).join("、"));
+        box.appendChild(warn);
+        const legend = el("p", "fusion-legend");
+        [["diff-add", "新增"], ["diff-upd", "修改"], ["diff-dis", "停用"], ["diff-del", "刪除"], ["diff-rej", "拒絕"]]
+          .forEach(function (x) { legend.appendChild(el("span", "legend-chip " + x[0], x[1])); });
+        box.appendChild(legend);
+      }
+      if (p.status !== "same" || rejected.length) box.appendChild(this.table(p.changes || [], rejected));
+      if (rejected.length) {
+        const rr = el("div", "notice notice-info fusion-reject-reasons");
+        rr.id = "fusion-reject-reasons";
+        rejected.forEach(function (x) { rr.appendChild(el("div", "reject-line", x.word + ":" + x.reason)); });
+        box.appendChild(rr);
+      }
+      if (p.status !== "same") box.appendChild(this.actions(p));
+    },
+
+    table(changes, rejected) {
+      const t = el("table", "fusion-diff");
+      t.id = "fusion-diff";
+      const head = el("tr");
+      ["保留", "類別", "詞", "合音注音", "啟用"].forEach(function (h) { head.appendChild(el("th", "", h)); });
+      const thead = el("thead");
+      thead.appendChild(head);
+      t.appendChild(thead);
+      const tb = el("tbody");
+      changes.forEach(function (c) {
+        const d = fusionDiffRow(c);
+        const tr = el("tr", "kind-" + d.kind + (d.kind === "add" ? " diff-add" : d.kind === "delete" ? " diff-del" : ""));
+        tr.dataset.word = d.word;
+        const k = el("td");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.className = "fusion-keep";
+        box.checked = d.keepDefault;
+        box.dataset.word = d.word;
+        box.setAttribute("aria-label", "保留「" + d.word + "」的現值");
+        k.appendChild(box);
+        tr.append(k, el("td", "fusion-kind", FUSION_KIND_LABEL[d.kind]), el("td", "", d.word));
+        d.cells.forEach(function (c2) { tr.appendChild(el("td", c2.cls, c2.text)); });
+        tb.appendChild(tr);
+      });
+      rejected.forEach(function (x) {
+        const tr = el("tr", "kind-reject diff-rej");
+        tr.dataset.word = x.word;
+        tr.append(el("td"), el("td", "fusion-kind", "拒絕"), el("td", "", x.word), el("td"), el("td"));
+        tb.appendChild(tr);
+      });
+      t.appendChild(tb);
+      return t;
+    },
+
+    actions(p) {
+      const wrap = el("div", "fusion-apply");
+      const mk = function (value, label, checked) {
+        const lab = el("label", "fusion-mode");
+        const r = document.createElement("input");
+        r.type = "radio";
+        r.name = "fusion-mode";
+        r.value = value;
+        r.checked = checked;
+        lab.append(r, el("span", "", label));
+        return lab;
+      };
+      wrap.append(mk("all", "全部覆蓋", false), mk("custom", "自訂(勾選「保留」的不更新)", true));
+      const go = el("button", "btn btn-primary", "");
+      go.type = "button";
+      go.id = "fusion-apply";
+      const count = () => {
+        const all = wrap.querySelector('input[value="all"]').checked;
+        const kept = all ? 0 : document.querySelectorAll("#fusion-diff .fusion-keep:checked").length;
+        go.textContent = "確認匯入(更動 " + (p.changes.length - kept) + " 筆)";
+        document.querySelectorAll("#fusion-diff .fusion-keep").forEach(function (b) { b.disabled = all; });
+      };
+      this.$("fusion-preview").onchange = count;   // 模式切換與「保留」勾選(每次預覽重設,不累積監聽)
+      go.addEventListener("click", () => this.apply(p, wrap.querySelector('input[value="all"]').checked));
+      wrap.appendChild(go);
+      setTimeout(count, 0);
+      return wrap;
+    },
+
+    async apply(p, all) {
+      const body = { preview_id: p.preview_id, base_version: p.base_version };
+      if (all) body.apply = "all";
+      else body.keep = Array.from(document.querySelectorAll("#fusion-diff .fusion-keep:checked"))
+        .map(function (b) { return b.dataset.word; });
+      const r = await api("POST", "/api/settings/fusions/import/apply", body);
+      if (!r.ok) {
+        toast("匯入失敗:" + errorText(r), true);
+        return;
+      }
+      this.words = r.data.words || [];
+      this.render();
+      this.$("fusion-preview").replaceChildren();
+      this.$("fusion-preview").hidden = true;
+      this.preview = null;
+    },
+  };
+
   window.Studio = Object.assign(window.Studio || {}, {
     TOKEN: TOKEN,
     NAME_RE: WORKFLOW_NAME_RE,         // 專案名稱與工作流程名稱同一套中英日白名單(names.py)
@@ -1646,6 +1984,8 @@
     addRoute: function (re, page, enter) { extraRoutes.push({ re: re, page: page, enter: enter }); },
     pageHooks: pageHooks,
     route: route,
+    FusionLib: FusionLib,
+    fusionDiffRow: fusionDiffRow,
   });
 
   // ---------- 啟動 ----------
