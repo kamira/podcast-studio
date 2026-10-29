@@ -624,7 +624,7 @@ def test_匯出JSON與CSV_匯出內容等於列表(client):
     assert json.loads(r.content)["words"] == client.get("/api/settings/fusions").json()["words"]
     r = client.get("/api/settings/fusions/export?format=csv")
     lines = r.content.decode("utf-8").splitlines()
-    assert lines[0] == "word,zhuyin,enabled,source" and len(lines) == len(settings.FUSION_DEFAULTS) + 1
+    assert lines[0] == "word,zhuyin,display,enabled,source" and len(lines) == len(settings.FUSION_DEFAULTS) + 1
     assert all(not ln[0] in "=+-@" for ln in lines)
     assert client.get("/api/settings/fusions/export?format=xml").status_code == 422
 

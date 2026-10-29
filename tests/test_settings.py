@@ -1200,8 +1200,9 @@ def test_v2資料庫開啟後升為3_既有三表逐列不變_預設詞6筆(env)
     assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
     assert _all_rows(env) == before
     rows = _fusion_rows(env)
-    assert len(rows) == len(settings.FUSION_DEFAULTS) == 11 and {r[0] for r in rows} == {w for w, _, _ in settings.FUSION_DEFAULTS}
+    assert len(rows) == len(settings.FUSION_DEFAULTS) == 11 and {r[0] for r in rows} == {row[0] for row in settings.FUSION_DEFAULTS}
     assert ("不要", "ㄅㄧㄠˋ", 0, "default") in rows and ("知道", "ㄗㄠˋ", 1, "default") in rows
+    assert dict(query(env, "SELECT word, display FROM fusion_words"))["不知道"] == "不造"
 
 
 def test_v2升級中途丟例外時維持v2_回預設詞庫帶警告(env, monkeypatch, capsys):
@@ -1235,7 +1236,7 @@ def test_版本4的資料庫合音詞庫不讀不寫(env):
 
 def test_資料庫不存在時讀預設詞_寫入時建立資料庫(env):
     got = settings.load_fusions()
-    assert [r["word"] for r in got["words"]] == sorted(w for w, _, _ in settings.FUSION_DEFAULTS)
+    assert [r["word"] for r in got["words"]] == sorted(row[0] for row in settings.FUSION_DEFAULTS)
     assert not db(env).exists()
     settings.save_fusion("然後", "ㄖㄢˊ", True)
     assert ("然後", "ㄖㄢˊ", 1, "custom") in _fusion_rows(env)
@@ -1287,8 +1288,8 @@ def test_改一筆後預覽只有一筆update(env):
     p = settings.preview_import(raw)
     assert p["status"] == "diff"
     assert p["changes"] == [{"id": "那樣", "word": "那樣", "kind": "update",
-                             "old": {"zhuyin": "ㄋㄧㄤˋ", "enabled": False},
-                             "new": {"zhuyin": "ㄋㄧㄤˋ", "enabled": True}}]
+                             "old": {"zhuyin": "ㄋㄧㄤˋ", "display": "釀", "enabled": False},
+                             "new": {"zhuyin": "ㄋㄧㄤˋ", "display": "釀", "enabled": True}}]
     raw_csv = _export("csv")
     settings.save_fusion("那樣", "ㄋㄧㄤˋ", True)
     p = settings.preview_import(raw_csv)
@@ -1363,7 +1364,7 @@ def test_被拒絕的詞不產生更動_原資料保留(env):
     (b"{\"format\": \"podcast-studio-fusions\", \"version\": 1, \"words\": {}}", 422),
     (b"{\"format\": \"podcast-studio-fusions\", \"version\": 1, \"words\": [[1]]}", 422),
     ("word,zhuyin\n這樣,ㄐㄧㄤˋ\n".encode("utf-8"), 422),
-    ("word,zhuyin,enabled,source\n這樣,ㄐㄧㄤˋ,true\n".encode("utf-8"), 422),
+    ("word,zhuyin,display,enabled,source\n這樣,ㄐㄧㄤˋ,true\n".encode("utf-8"), 422),
 ])
 def test_整檔不合法一律拒絕(env, raw, status):
     settings.save(changed())
@@ -1460,4 +1461,24 @@ def test_三四字詞可存入_CSV多音節往返(env):
     settings.save_fusion("怎麼辦", "ㄗㄣˇ ㄅㄢˋ", True)
     p = settings.preview_import(_export("csv"))
     assert p["status"] == "same" and p["rejected"] == []
-    assert "不知道,ㄅㄨˋ ㄗㄠˋ,true,default" in _export("csv").decode("utf-8")
+    assert "不知道,ㄅㄨˋ ㄗㄠˋ,不造,true,default" in _export("csv").decode("utf-8")
+
+
+def test_display欄位驗證與往返(env):
+    settings.save(changed())
+    settings.save_fusion("然後", "ㄖㄢˊ", True, "然")
+    assert settings.fusion_entries()["然後"] == {"zhuyin": "ㄖㄢˊ", "display": "然"}
+    settings.save_fusion("然後", "ㄖㄢˊ", False)                     # 省略 display = 沿用
+    assert {r["word"]: r for r in settings.load_fusions()["words"]}["然後"]["display"] == "然"
+    for bad in ("a", "一二三四五", "然,"):
+        with pytest.raises(settings.FusionError):
+            settings.save_fusion("然後", "ㄖㄢˊ", True, bad)
+    words = json.loads(_export())["words"]
+    for w in words:
+        if w["word"] == "這樣":
+            w["display"] = "降"
+    p = settings.preview_import(_file(words))
+    assert [(c["word"], c["kind"], c["old"]["display"], c["new"]["display"]) for c in p["changes"]] == [
+        ("這樣", "update", "醬", "降")]
+    settings.apply_import(p["changes"], p["base_version"], True)
+    assert settings.fusion_entries()["這樣"]["display"] == "降"

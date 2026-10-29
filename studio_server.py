@@ -2034,9 +2034,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             _only_keys(data, ("restore",))
             await run_in_threadpool(fusion_call, settings.restore_fusion, word)
         else:
-            _only_keys(data, ("zhuyin", "enabled"))
+            _only_keys(data, ("zhuyin", "enabled", "display"))
             await run_in_threadpool(fusion_call, settings.save_fusion, word, data.get("zhuyin"),
-                                    data.get("enabled"))
+                                    data.get("enabled"), data.get("display"))
         return fusions_view()
 
     @app.delete("/api/settings/fusions/{word}")
