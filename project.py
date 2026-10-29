@@ -69,6 +69,9 @@
                                或有字詞清晰度附 clarity、有語調附 pitch,合為一個物件),只有裁切或連音時不附加、
                                鍵與修訂前相同。語速、停頓不在內。自錄音檔(audio 沒有 key)丟 ProjectError
   is_post_fresh(segment)       post 存在且 post.key == post_key(segment)(只比對資料,不看檔案)
+  (修訂 1 T11)post 的選填欄位 pitch_points:worker 實際套用的語調內部點(伺服器產生,PATCH 不能寫入)
+  check_pitch_points(points, where) -> list
+                               2–30 個 [位置 0–1 嚴格遞增, 半音 ±7.2];不合格丟 ProjectError
   is_default_post(segment)     連音 0%、清晰度 100%、沒有字詞清晰度、沒有語調(後製結果 = 裁切結果)
   subdir(name, sub, create=False) -> Path
                                專案的 audio/、assets/、tmp/ 真實路徑(符號連結規則同下;T3 起使用)
@@ -131,6 +134,9 @@ PROSODY_DEFAULTS = {"connect": 0, "clarity": 100, "roundness": 50}
 PITCH_POINTS_MIN, PITCH_POINTS_MAX = 2, 16
 SEMI_MIN, SEMI_MAX, SEMI_STEP = Decimal("-6"), Decimal("6"), Decimal("0.1")
 POS_STEP = Decimal("0.01")
+# 修訂 1(R1-9、R1-10):worker 實際套用的內部點(使用者點 + 自動補點,峰谷 × 1.2)
+INNER_POINTS_MAX = 30          # 16 個使用者點 + 14 個自動補點
+INNER_SEMI_LIMIT = 7.2         # = 6 × 1.2
 MAX_WORD_CLARITY = 32
 MAX_FUSIONS = 16
 FUSION_MIN, FUSION_MAX = 2, 4     # 合音字數(使用者 2026-10-29:不超過四字)
@@ -167,6 +173,7 @@ SEGMENT_KEYS_V1 = ("id", "text", "break", "pause_after", "speed", "annotations",
 SEGMENT_KEYS = (*SEGMENT_KEYS_V1, "connect", "clarity", "word_clarity", "pitch", "post", "fusions",
                 "fusion_off")
 POST_KEYS = ("id", "key", "seconds", "trim")
+POST_OPTIONAL = ("pitch_points",)  # 修訂 1(R1-10):伺服器依 shape 回傳寫入;PATCH 不能寫入
 IMAGE_KEYS = ("id", "asset", "start", "end")
 ASSET_KEYS = ("id", "kind", "ext", "bytes", "label")
 
@@ -346,10 +353,29 @@ def _check_pitch(p, where: str):
     return {"points": out, "roundness": check_percent(p["roundness"], f"{where}.pitch 的圓弧")}
 
 
+def check_pitch_points(points, where: str) -> list:
+    """worker 實際套用的語調內部點(修訂 1 R1-10):2–30 個 [位置, 半音],位置 0–1 嚴格遞增、
+    半音 ±7.2。不合格丟 ProjectError;回傳新的 list(位置與半音一律為 float)。"""
+    if not isinstance(points, list) or not 2 <= len(points) <= INNER_POINTS_MAX:
+        raise ProjectError(f"{where} 必須是 2 到 {INNER_POINTS_MAX} 個語調點")
+    out = []
+    for q in points:
+        if not isinstance(q, list) or len(q) != 2 or not all(_is_number(x) for x in q):
+            raise ProjectError(f"{where} 每個語調點必須是 [位置, 半音] 兩個數字")
+        if not 0 <= q[0] <= 1:
+            raise ProjectError(f"{where} 的位置必須在 0 到 1 之間")
+        if not -INNER_SEMI_LIMIT <= q[1] <= INNER_SEMI_LIMIT:
+            raise ProjectError(f"{where} 的音高必須在 −{INNER_SEMI_LIMIT} 到 +{INNER_SEMI_LIMIT} 半音之間")
+        out.append([float(q[0]), float(q[1])])
+    if any(b[0] <= a[0] for a, b in zip(out, out[1:])):
+        raise ProjectError(f"{where} 的位置必須嚴格遞增")
+    return out
+
+
 def _check_post(post, where: str):
     if post is None:
         return None
-    if not isinstance(post, dict) or set(post) != set(POST_KEYS):
+    if not isinstance(post, dict) or not set(POST_KEYS) <= set(post) <= {*POST_KEYS, *POST_OPTIONAL}:
         raise ProjectError(f"{where}.post 格式不正確")
     if not isinstance(post["id"], str) or not ID_RE.fullmatch(post["id"]):
         raise ProjectError(f"{where}.post.id 格式不正確")
@@ -358,7 +384,10 @@ def _check_post(post, where: str):
     for k in ("seconds", "trim"):
         if not _is_number(post[k]) or post[k] < 0:
             raise ProjectError(f"{where}.post.{k} 必須是非負數字")
-    return dict(post)
+    out = dict(post)
+    if "pitch_points" in post:
+        out["pitch_points"] = check_pitch_points(post["pitch_points"], f"{where}.post.pitch_points")
+    return out
 
 
 def _eff(segment: dict, key: str, default_key: str | None = None) -> int:
