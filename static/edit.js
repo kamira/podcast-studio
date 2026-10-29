@@ -1051,7 +1051,7 @@
 
   // 這一句送給模型的文字(同 project.tts_text():`[`、`]` 換全形;合音帶顯示字時整段換成顯示字、不加注音;
   // 沒有顯示字時前 k 字帶 `[:音節]`、刪除其餘字(D26);範圍外的聲調標註帶 `[:注音]`)(純函式;T14 前端試算,
-  // 只供彈出框「送模型」列顯示,實際送出仍以伺服器為準)
+  // 只供屬性面板合音模式「送模型」列顯示,實際送出仍以伺服器為準)
   function ttsText(seg) {
     const esc = function (t) { return String(t).replace(/\[/g, "［").replace(/\]/g, "］"); };
     const anns = {};
@@ -1210,15 +1210,6 @@
         this.sync();
       });
       custom.appendChild(this.input);
-      // T14:「送模型」列(依目前選取即時試算整句送出的文字)與「字幕」列(原文);一律以 textContent 寫入
-      const sentRow = el("div", "prop-row fusion-row");
-      sentRow.appendChild(el("span", "prop-label", "送模型"));
-      this.sent = el("code", "fusion-sent", "");
-      sentRow.appendChild(this.sent);
-      const subRow = el("div", "prop-row fusion-row");
-      subRow.appendChild(el("span", "prop-label", "字幕"));
-      this.subtitle = el("span", "fusion-subtitle", "");
-      subRow.appendChild(this.subtitle);
       this.error = el("p", "tone-error", "");
       this.error.setAttribute("role", "alert");
       const actions = el("div", "tone-actions");
@@ -1229,7 +1220,7 @@
       this.applyBtn.type = "button";
       this.applyBtn.addEventListener("click", () => this.apply());
       actions.append(this.saveBtn, this.applyBtn);
-      box.append(head, this.derive, this.options, custom, sentRow, subRow, this.error, actions);
+      box.append(head, this.derive, this.options, custom, this.error, actions);
       box.addEventListener("keydown", (e) => { if (e.key === "Escape") this.close(); });
       document.body.appendChild(box);
       document.addEventListener("pointerdown", (e) => {
@@ -1251,11 +1242,9 @@
       this.options.replaceChildren();
       this.input.value = "";
       this.error.textContent = "";
-      this.subtitle.textContent = seg.text + "(原文不變)";
-      this.preview();
       this.box.hidden = false;
       const r = anchor ? anchor.getBoundingClientRect() : { left: 100, bottom: 100 };
-      // 不超出視窗右緣(T14 新增兩列後,彈出框貼右側時內容會被切掉)
+      // 不超出視窗右緣(T14:原本片段靠右時彈出框超出視窗、內容被切掉)
       const maxLeft = document.documentElement.clientWidth - this.box.offsetWidth - 8;
       this.box.style.left = Math.max(8, Math.min(r.left, maxLeft) + window.scrollX) + "px";
       this.box.style.top = Math.max(8, r.bottom + window.scrollY + 6) + "px";
@@ -1274,8 +1263,6 @@
       if (this.seg !== seg) return;
       const res = await S.api("POST", "/api/fusion/suggest", { text: seg.text, zhuyin: zh || undefined,
                                                               index: start, length: n });
-      if (this.seg !== seg) return;
-      await Lexicon.load(true);      // 「送模型」列試算顯示字用(T14)
       if (this.seg !== seg) return;
       if (!res.ok || !res.data || !res.data.fusion) {
         this.derive.textContent = "無法取得合音建議(" + S.errorText(res) + "),可直接輸入注音";
@@ -1329,23 +1316,6 @@
       this.error.textContent = z && !ok ? "合音注音須為 1~" + (n - 1) + " 個音節(以半形空白分隔),音節數少於字數" : "";
       this.applyBtn.disabled = !ok;
       this.saveBtn.disabled = !ok;
-      this.preview();
-    },
-
-    // T14「送模型」列:已套用的合音加上這次選取(注音合法時)後,這一句送給模型的文字
-    preview() {
-      const seg = this.seg;
-      if (!seg || !this.sent) return;
-      let fusions = seg.fusions || [];
-      const n = this.range ? this.range[1] - this.range[0] : 0;
-      const z = this.input.value.trim();
-      if (this.range && !this.input.disabled && fusionZhuyinOk(z, n)) {
-        const [s, e] = this.range;
-        const word = Array.from(seg.text).slice(s, e).join("");
-        fusions = withFusion(fusions, { index: s, length: n, zhuyin: z, source: this.source(),
-          display: this.shownFor(word, z, this.source()) });
-      }
-      this.sent.textContent = ttsText({ text: seg.text, annotations: seg.annotations, fusions: fusions });
     },
 
     close() {
@@ -1375,12 +1345,6 @@
     async display(word, z, source) {
       if (source !== "lexicon" || !this.info || this.info.lexicon !== z) return "";
       await Lexicon.load(true);
-      return this.shownFor(word, z, source);
-    },
-
-    // 同 display(),以目前載入的詞庫判斷(不重新載入)
-    shownFor(word, z, source) {
-      if (source !== "lexicon" || !this.info || this.info.lexicon !== z) return "";
       return Lexicon.words && Lexicon.words[word] === z ? (Lexicon.display[word] || "") : "";
     },
 
@@ -1440,7 +1404,13 @@
       li.appendChild(x);
       list.appendChild(li);
     });
-    holder.after(list);
+    // T14:「已套用」下方的「送模型」(依已套用的合音算出整句送出的文字,有顯示字時為顯示字,R1-4)
+    // 與「字幕」(原文)兩列,照已核准的 after-fusion.png;一律以 textContent 寫入
+    const sentRow = el("div", "prop-row fusion-row");
+    sentRow.append(el("span", "prop-label", "送模型"), el("code", "fusion-sent", ttsText(seg)));
+    const subRow = el("div", "prop-row fusion-row");
+    subRow.append(el("span", "prop-label", "字幕"), el("span", "fusion-subtitle", seg.text + "(原文不變)"));
+    holder.after(list, sentRow, subRow);
     if (isExternal(seg)) return;
     let sel = null;
     const mark = function () {
