@@ -555,3 +555,33 @@ body {
 .tl-word-clarity rect { fill: rgba(138, 79, 209, .35); stroke: #c9a8f0; stroke-dasharray: 3 2; }
 .tl-word-clarity text { fill: #fff; font-size: 10px; }
 .tl-pitch-zero, .tl-pitch-tick, .tl-pitch-line, .tl-pitch-label, .tl-word-clarity { pointer-events: none; }
+
+/* CHG-20261029-01 T9:設定 › 合音詞庫與匯入差異預覽 */
+.fusion-toolbar { display: flex; gap: 6px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.fusion-new { font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; width: 150px; }
+.fusion-table, .fusion-diff { border-collapse: collapse; width: 100%; font-size: 13px; }
+.fusion-table th, .fusion-table td, .fusion-diff th, .fusion-diff td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+.fusion-zhuyin { font: inherit; width: 90px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; }
+.fusion-actions { display: flex; gap: 4px; }
+.fusion-preview { margin: 12px 0; display: grid; gap: 8px; }
+.fusion-same { margin: 0; color: var(--muted); }
+.fusion-legend { display: flex; gap: 6px; margin: 0; font-size: 12px; }
+.legend-chip { padding: 1px 8px; border-radius: 10px; border-left: 4px solid transparent; }
+.fusion-diff tr { border-left: 4px solid transparent; }
+.diff-add { background: #e3f6e8; border-left-color: #2e9e5b !important; }
+.diff-upd { background: #fff6cc; }
+.diff-dis { background: #ffe6cc; }
+.diff-del { background: #fde4e2; border-left-color: var(--err) !important; }
+tr.diff-del td { text-decoration: line-through; }
+tr.diff-del td:first-child { text-decoration: none; }
+.diff-rej { background: #eceef1; color: var(--muted); border-left-color: #9aa3ad !important; }
+.fusion-reject-reasons { display: grid; gap: 2px; }
+.fusion-apply { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.fusion-mode { display: flex; gap: 4px; align-items: center; }
+@media (prefers-color-scheme: dark) {
+  .diff-add { background: rgba(46, 158, 91, .35); }
+  .diff-upd { background: rgba(214, 178, 0, .35); }
+  .diff-dis { background: rgba(230, 126, 34, .4); }
+  .diff-del { background: rgba(201, 60, 55, .4); }
+  .diff-rej { background: rgba(154, 163, 173, .35); }
+}

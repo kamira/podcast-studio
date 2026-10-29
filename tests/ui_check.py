@@ -20,6 +20,7 @@
 
 兩組檢查,各自用一個暫存目錄與一個伺服器:
 - `canvas`(CHG-20261022-01):節點畫布、檔案拖放、設定頁;截圖 canvas.png、dnd.png、settings.png。
+  (CHG-20261029-01 T9)設定頁「合音詞庫」:列表、匯出、差異預覽匯入與三類提示訊息;截圖 settings-fusion.png。
 - `editor`(CHG-20261022-04 T9):首頁雙卡片、精靈 ①~⑤、完整模式、剪輯互動、免責頁、
   畫布刪除封面步驟後的精靈步驟;截圖 home.png、wizard.png、full.png、editor.png、tone.png、disclaimer.png。
   (CHG-20261029-01 T5)屬性面板的連音、清晰度拉桿與字詞清晰度;截圖 prosody.png。
@@ -203,7 +204,7 @@ def file_arg(name: str, data: bytes, mime: str) -> dict:
 
 # ---------- 主流程 ----------
 
-def run_checks(page, base: str, root: Path, runner: StubRunner, settings) -> None:
+def run_checks(page, base: str, root: Path, runner: StubRunner, settings, problems: list) -> None:
     from playwright.sync_api import expect
 
     step = {"name": ""}
@@ -408,12 +409,142 @@ def run_checks(page, base: str, root: Path, runner: StubRunner, settings) -> Non
         expect(sel).to_have_value(NEW_REASON_MODEL)
         expect(page.locator("#cfg-warnings")).to_be_hidden()
         page.screenshot(path=str(SHOT_DIR / "settings.png"))
+
+        # CHG-20261029-01 T9:設定 › 合音詞庫(列表、匯出、差異預覽匯入、提示訊息)
+        fusion_steps(page, expect, begin, settings, toast, problems)
     except StepFailed as e:
         raise StepFailed(f"步驟「{step['name']}」:{e}") from None
     except AssertionError as e:
         raise StepFailed(f"步驟「{step['name']}」:畫面不符預期({str(e).splitlines()[0] if str(e) else 'AssertionError'})") from None
     except Exception as e:  # Playwright 逾時等
         raise StepFailed(f"步驟「{step['name']}」:{type(e).__name__}:{str(e).splitlines()[0] if str(e) else ''}") from None
+
+
+FUSION_FORMAT = "podcast-studio-fusions"
+
+
+def fusion_file(words) -> dict:
+    return {"name": "詞庫.json", "mimeType": "application/json",
+            "buffer": json.dumps({"format": FUSION_FORMAT, "version": 1, "words": words}, ensure_ascii=False).encode("utf-8")}
+
+
+def fusion_steps(page, expect, begin, settings, toast, problems: list) -> None:
+    """CHG-20261029-01 T9:設定頁「合音詞庫」子頁。跳出訊息(#toast.is-error)只在格式錯誤、超過上限、
+    匯入失敗三類出現;一致、不一致、含被拒詞條的預覽都不跳出訊息。"""
+    preview = page.locator("#fusion-preview")
+
+    def quiet_toast():
+        page.evaluate("() => { const t = document.getElementById('toast'); t.hidden = true; t.classList.remove('is-error'); }")
+
+    def no_popup():
+        check(page.evaluate("document.getElementById('toast').hidden"), "這個情況不應出現跳出的提示訊息")
+
+    def upload(f):
+        quiet_toast()
+        page.locator("#fusion-file").set_input_files(f)
+
+    begin("設定 › 合音詞庫:列出 6 筆預設詞")
+    page.locator('.subnav-link[data-sub="fusion"]').click()
+    rows = page.locator("#fusion-rows tr[data-word]")
+    expect(rows).to_have_count(6)
+
+    begin("合音詞庫:匯出 JSON 的內容等於 GET /api/settings/fusions")
+    with page.expect_download() as dl:
+        page.locator("#fusion-export-json").click()
+    exported = json.loads(Path(dl.value.path()).read_text(encoding="utf-8"))
+    check(exported["words"] == settings.load_fusions()["words"], "匯出 JSON 應等於詞庫列表")
+
+    begin("合音詞庫:匯入與現有詞庫相同的檔案 → 只顯示一行狀態,沒有確認按鈕")
+    upload(fusion_file(exported["words"]))
+    expect(preview.locator(".fusion-same")).to_have_text("與現有詞庫一致,無需更動")
+    expect(page.locator("#fusion-apply")).to_have_count(0)
+    expect(page.locator("#fusion-diff")).to_have_count(0)
+    no_popup()
+
+    begin("合音詞庫:新增自訂詞「然後」")
+    page.locator("#fusion-new-word").fill("然後")
+    page.locator("#fusion-new-zhuyin").fill("ㄖㄢˊ")
+    page.locator("#fusion-add").click()
+    expect(rows).to_have_count(7)
+
+    begin("合音詞庫:匯入不一致的檔案 → 警告、圖例與五欄差異表")
+    words = [dict(w, zhuyin="ㄓㄠˋ") if w["word"] == "知道" else w for w in exported["words"] if w["word"] != "我們"]
+    words.append({"word": "好像", "zhuyin": "ㄏㄠˇ", "enabled": True, "source": "custom"})
+    upload(fusion_file(words))
+    table = page.locator("#fusion-diff")
+    expect(table).to_be_visible()
+    expect(preview.locator(".fusion-warn")).to_be_visible()
+    expect(preview.locator(".fusion-legend")).to_be_visible()
+    expect(table.locator("thead th")).to_have_text(["保留", "類別", "詞", "合音注音", "啟用"])
+    upd = table.locator('tr[data-word="知道"] td')
+    expect(upd.nth(3)).to_have_text("ㄗㄠˋ → ㄓㄠˋ")
+    expect(upd.nth(3)).to_have_class(re.compile(r"\bdiff-upd\b"))
+    check("diff-" not in (upd.nth(4).get_attribute("class") or ""), "「知道」的啟用沒有變,不應有差異標示")
+    expect(table.locator('tr[data-word="好像"]')).to_have_class(re.compile(r"\bdiff-add\b"))
+    dele = table.locator('tr[data-word="然後"]')
+    expect(dele).to_have_class(re.compile(r"\bdiff-del\b"))
+    deco = dele.locator("td").nth(2).evaluate("e => getComputedStyle(e).textDecorationLine")
+    check("line-through" in deco, f"刪除列文字應有刪除線,實際 {deco}")
+    dis = table.locator('tr[data-word="我們"] td').nth(4)
+    expect(dis).to_have_class(re.compile(r"\bdiff-dis\b"))
+    expect(dis).to_have_text("啟用 → 停用")
+    expect(dele.locator(".fusion-keep")).to_be_checked()
+    expect(table.locator('tr[data-word="我們"] .fusion-keep')).to_be_checked()
+    expect(table.locator('tr[data-word="好像"] .fusion-keep')).not_to_be_checked()
+    expect(page.locator("#fusion-reject-reasons")).to_have_count(0)
+    cells = [t.strip() for t in table.locator("tbody td").all_text_contents()]
+    check(all(("→" in t) or t in ("", "新增", "修改", "停用", "刪除", "拒絕", "啟用") or not any(
+        k in t for k in ("檔案外", "注音不同", "不合法", "原因")) for t in cells), f"儲存格不應有原因說明:{cells}")
+    no_popup()
+    page.screenshot(path=str(SHOT_DIR / "settings-fusion.png"))
+
+    begin("合音詞庫:取消勾選「然後」的保留並確認 → 只有該詞被刪,勾保留的「我們」不變")
+    dele.locator(".fusion-keep").uncheck()
+    page.locator("#fusion-apply").click()
+    expect(page.locator("#fusion-diff")).to_have_count(0)
+    got = {w["word"]: w for w in settings.load_fusions()["words"]}
+    check("然後" not in got and got["我們"]["enabled"] is True and got["知道"]["zhuyin"] == "ㄓㄠˋ"
+          and got["好像"]["source"] == "custom", f"套用結果不符:{sorted(got)}")
+    no_popup()
+
+    begin("合音詞庫:含 1 筆非法注音的檔案 → 類別「拒絕」1 列、沒有保留框,拒絕原因區塊 1 行")
+    cur = settings.load_fusions()["words"]
+    bad = [w for w in cur] + [{"word": "然後", "zhuyin": "ㄓㄧ", "enabled": True}]
+    upload(fusion_file(bad))
+    rej = page.locator("#fusion-preview tr.kind-reject")
+    expect(rej).to_have_count(1)
+    expect(rej.locator(".fusion-keep")).to_have_count(0)
+    reasons = page.locator("#fusion-reject-reasons .reject-line")
+    expect(reasons).to_have_count(1)
+    expect(reasons.first).to_have_text("然後:注音不是單一合法音節")
+    expect(page.locator("#fusion-apply")).to_have_count(0)            # 只差被拒詞條 → 一致,不給確認
+    no_popup()
+
+    def allow_one(status):
+        """預期的錯誤回應(格式錯誤 422、超過上限 413、版本不符 409)瀏覽器會記一筆 console error;只容許一筆。"""
+        hit = [p for p in problems if f"status of {status}" in p]
+        check(len(hit) == 1, f"應恰有一筆 {status} 回應:{hit}")
+        problems.remove(hit[0])
+
+    begin("合音詞庫:非 UTF-8 檔 → 格式錯誤提示;300 KB 檔 → 超過上限提示")
+    upload({"name": "壞.json", "mimeType": "application/json", "buffer": "{}".encode("utf-16")})
+    expect(toast).to_have_class(re.compile(r"\bis-error\b"))
+    expect(toast).to_contain_text("格式錯誤")
+    allow_one(422)
+    upload({"name": "大.json", "mimeType": "application/json", "buffer": b" " * (300 * 1024)})
+    expect(toast).to_have_class(re.compile(r"\bis-error\b"))
+    expect(toast).to_have_text("超過允許大小上限(256 KB)")
+    allow_one(413)
+
+    begin("合音詞庫:預覽後另一處修改詞庫再確認 → 匯入失敗提示")
+    upload(fusion_file([w for w in settings.load_fusions()["words"] if w["word"] != "好像"]))
+    expect(page.locator("#fusion-apply")).to_be_visible()
+    settings.save_fusion("知道", "ㄗㄠˋ", True)
+    page.locator("#fusion-apply").click()
+    expect(toast).to_have_class(re.compile(r"\bis-error\b"))
+    expect(toast).to_contain_text("匯入失敗")
+    allow_one(409)
+    check("好像" in {w["word"] for w in settings.load_fusions()["words"]}, "版本不符時詞庫不應被改")
 
 
 # ---------- editor(CHG-20261022-04 T9)----------
@@ -426,7 +557,7 @@ OWN_WAV_SECONDS = 1.2        # 自錄音檔長度
 VOICE_TEXT = "這是聲線逐字稿(UI 檢查替身)。"
 EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "pitch.png",
                 "disclaimer.png")
-CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png")
+CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png", "settings-fusion.png")
 STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ"}
 
 # 替身 worker:參數格式同 breezy_worker.py synth;每句寫一個真的 16 kHz 正弦波 WAV,
@@ -1273,7 +1404,7 @@ def run_suite(browser, suite: str) -> int:
                 if suite == "editor":
                     run_editor_checks(page, base, root, stubs, problems)
                 else:
-                    run_checks(page, base, root, runner, settings)
+                    run_checks(page, base, root, runner, settings, problems)
                 csp = page.evaluate("window.__csp || []")
                 problems.extend(f"CSP 違規:{c}" for c in csp)
             except StepFailed as e:
