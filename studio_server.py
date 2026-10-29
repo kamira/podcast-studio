@@ -709,7 +709,10 @@ MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "w
 WAV_ONLY = "取代語音只接受 WAV 音檔"
 BUSY = "已有語音合成、匯出、注音標註或流程在執行中,請等它結束"
 SEGMENT_PATCH_KEYS = ("text", "pause_after", "speed", "annotations", "split_at", "merge_next",
-                      "audio_file", "audio")
+                      "audio_file", "audio", "connect", "clarity", "word_clarity", "pitch")
+PROSODY_KEYS = ("connect", "clarity", "word_clarity", "pitch")   # CHG-20261029-01:改了只重做後製,不重新合成
+NO_POST_EXTERNAL = "自錄音檔不做後製(連音、清晰度、字詞清晰度、語調只適用於合成的語音)"
+MAX_POST_IDS = 2000
 PROJECT_PUT_KEYS = ("script", "forced_breaks", "defaults")
 
 
@@ -721,6 +724,10 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.extra = extra
+
+
+class _NoChange(Exception):
+    """mutate 的 change 沒有任何修改:不存檔(避免 history 多一版)。"""
 
 
 class AnnotateError(RuntimeError):
@@ -817,13 +824,17 @@ def _forced_breaks(proj) -> list[int]:
 
 
 def _view(proj) -> dict:
-    """GET /api/projects/{p} 與各修改端點共用的回應本體。"""
-    return {"project": proj.to_dict(), "layout": timeline.layout(proj), "forced_breaks": _forced_breaks(proj)}
+    """GET /api/projects/{p} 與各修改端點共用的回應本體。
+
+    (CHG-20261029-01 T4)post_stale:後製過期的合成片段 id(前端開啟專案或改參數後據此呼叫 POST /post)。"""
+    return {"project": proj.to_dict(), "layout": timeline.layout(proj), "forced_breaks": _forced_breaks(proj),
+            "post_stale": [s["id"] for s in tts_service.stale_post(proj)]}
 
 
 def _new_segment(text: str, brk: str) -> dict:
     return {"id": pj.new_id(), "text": text, "break": brk, "pause_after": None, "speed": None,
-            "annotations": [], "audio": None}
+            "annotations": [], "audio": None, "connect": None, "clarity": None, "word_clarity": [],
+            "pitch": None, "post": None}
 
 
 def _resplit(proj, script, forced) -> None:
@@ -917,6 +928,9 @@ def _media_file(name: str, aid: str, overlay: Callable | None = None) -> tuple[i
     found = next(((("assets", a["ext"])) for a in proj.assets if a["id"] == aid), None)
     if found is None and any((s.get("audio") or {}).get("id") == aid for s in proj.segments):
         found = ("audio", "wav")
+    if found is None and any((s.get("post") or {}).get("id") == aid and pj.is_post_fresh(s)
+                             for s in proj.segments):
+        found = ("audio", "wav")   # CHG-20261029-01 D18:預覽播放後製檔
     if found is None or found[1] not in MEDIA_TYPES:
         raise ApiError(404, "找不到這個檔案")
     sub, ext = found
@@ -1076,14 +1090,16 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                ollama_tags: Callable[[], list] | None = None,
                synth: Callable | None = None, render: Callable | None = None,
                annotate: Callable[[str], list] | None = None,
-               voice_defaults: Callable[[], dict] | None = None) -> FastAPI:
+               voice_defaults: Callable[[], dict] | None = None,
+               post: Callable | None = None) -> FastAPI:
     """建立 app。runner 預設為 executor.run(測試可換替身);token 預設每次隨機產生;
     root 為 repo 根目錄(`outputs/`、`workflows/` 所在處),預設本檔所在目錄,測試可指到暫存目錄;
     ollama_tags 為取得 Ollama 已下載模型清單的函式(預設 fetch_ollama_tags,測試可換替身;
     失敗時應丟 OllamaUnavailable)。設定資料庫的位置由 settings.ROOT 決定。
     專案 API(T6)的替身:synth(project, emit)預設 tts_service.synth;render(project) -> (mp4, srt)
     預設 media.render_timeline(project, timeline.layout(project));annotate(text) -> 注音陣列預設
-    annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8:讀設定資料庫)。
+    annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8:讀設定資料庫);
+    post(project, segment_ids, emit) 預設 tts_service.post_process(CHG-20261029-01 T4)。
     專案目錄由 project.ROOT 決定(不是 root)。"""
     token = token or secrets.token_urlsafe(32)
     tags_fn = ollama_tags or fetch_ollama_tags
@@ -1384,12 +1400,13 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     render_fn = render or _render_default
     annotate_fn = annotate or (lambda text: annotate_text(text, root))
     defaults_fn = voice_defaults or _voice_defaults
+    post_fn = post or tts_service.post_process
     plocks: dict[str, threading.Lock] = {}
     plocks_guard = threading.Lock()
     jobs: dict[str, str] = {}   # run_id → 執行合成 / 匯出中的專案名稱(比對鍵),刪除專案時檢查
     # 合成中途可試聽(DIR-5 統整 M-1):本次合成已完成、尚未寫回專案的片段音檔,只存在記憶體。
     # 專案比對鍵 → {片段 id: (合成當時的含標註文字, audio)};結束寫回(merge_audio)後清除。
-    live_audio: dict[str, dict[str, tuple[str, dict]]] = {}
+    live_audio: dict[str, dict[str, tuple]] = {}   # (CHG-20261029-01)值為 (合成文字, audio, post)
     live_guard = threading.Lock()
 
     def overlay(name: str, proj):
@@ -1401,6 +1418,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             if got is None or _external(s.get("audio")) or pj.tts_text(s) != got[0]:
                 continue
             s["audio"] = dict(got[1])
+            post = got[2] if len(got) > 2 else None
+            if post and pj.is_post_fresh({**s, "post": post}):
+                s["post"] = dict(post)
         return proj
 
     def plock(name: str) -> threading.Lock:
@@ -1578,6 +1598,13 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             for key in ("pause_after", "speed"):
                 if key in data:
                     seg[key] = data[key]
+            if "text" in data and seg["text"] != proj.segments[idx]["text"] and "word_clarity" not in data:
+                seg["word_clarity"] = []   # 字詞清晰度以字元索引記錄,文字改了即清除(同注音標註)
+            for key in PROSODY_KEYS:   # (CHG-20261029-01 T4)範圍驗證在 project.validate()
+                if key in data:
+                    if _external(seg.get("audio")) and data[key] not in (None, []):
+                        raise ApiError(422, NO_POST_EXTERNAL)
+                    seg[key] = data[key]
             # 先驗證單一片段(注音、停頓、語速不合法 → 422,不存檔)
             pj.Project.from_dict({**proj.to_dict(), "segments": [seg]})
             new_segments = [*proj.segments[:idx], seg, *proj.segments[idx + 1:]]
@@ -1592,10 +1619,11 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 skip = len(second) - len(second.lstrip())
                 anns = seg.get("annotations") or []
                 a = {**seg, "text": first.strip(), "break": "forced", "pause_after": None, "audio": None,
+                     "word_clarity": [], "pitch": None, "post": None,
                      "annotations": [{"index": x["index"] - lead, "zhuyin": x["zhuyin"]}
                                      for x in anns if x["index"] <= i]}
                 b = {**_new_segment(second.strip(), seg["break"]), "pause_after": seg.get("pause_after"),
-                     "speed": seg.get("speed"),
+                     "speed": seg.get("speed"), "connect": seg.get("connect"), "clarity": seg.get("clarity"),
                      "annotations": [{"index": x["index"] - (i + 1) - skip, "zhuyin": x["zhuyin"]}
                                      for x in anns if x["index"] > i]}
                 new_segments[idx:idx + 1] = [a, b]
@@ -1607,6 +1635,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 shift = len(seg["text"])
                 merged = {**seg, "text": seg["text"] + nxt["text"], "break": nxt["break"],
                           "pause_after": nxt.get("pause_after"), "audio": None,
+                          "word_clarity": [], "pitch": None, "post": None,
                           "annotations": (seg.get("annotations") or []) + [
                               {"index": x["index"] + shift, "zhuyin": x["zhuyin"]}
                               for x in nxt.get("annotations") or []]}
@@ -1723,8 +1752,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                     audio = ev.get("audio") if isinstance(ev.get("audio"), dict) else (seg or {}).get("audio")
                     if seg is not None and isinstance(audio, dict) and isinstance(audio.get("id"), str) \
                             and pj.ID_RE.fullmatch(audio["id"]):
+                        post = ev.get("post") if isinstance(ev.get("post"), dict) else None
                         with live_guard:   # 該句立即可在專案檢視、時間軸與 media 端點取用(不存檔)
-                            live_audio.setdefault(key, {})[sid] = (pj.tts_text(seg), dict(audio))
+                            live_audio.setdefault(key, {})[sid] = (pj.tts_text(seg), dict(audio), post)
                 run.emit(ev)
 
             status, result = "error", {"synthesized": [], "cached": []}
@@ -1732,6 +1762,11 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 with plock(name):
                     snapshot = pj.load(name)
                 result = synth_fn(snapshot, emit) or result
+                done = set(done_ids)
+                stale = [s["id"] for s in snapshot.segments if s["id"] in done and s.get("audio")
+                         and not _external(s.get("audio")) and not pj.is_post_fresh(s)]
+                if stale:   # (CHG-20261029-01 D20)非預設參數的片段接著後製(不進 heavy_lock)
+                    post_fn(snapshot, stale, run.emit)
                 status = "ok"
             except (tts_service.SynthError, pj.ProjectError) as e:
                 run.emit({"type": "error", "message": str(e)})
@@ -1754,6 +1789,39 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                          daemon=True).start()
         return {"run_id": run.id, "events": f"/api/run/{run.id}/events"}
 
+    def _post_for(cur: dict, done: dict):
+        """合成 / 後製結果的 post 只在「目前片段」的後製鍵相符時才寫回(期間改了參數就保持過期)。"""
+        post = done.get("post")
+        if not post:
+            return cur.get("post")
+        probe = {**cur, "audio": done["audio"], "post": post}
+        return dict(post) if pj.is_post_fresh(probe) else cur.get("post")
+
+    def merge_post(name: str, snapshot, ids) -> int:
+        """把後製結果(snapshot 的 post)寫回目前專案:只更新同 id、同音檔、後製鍵仍相符的片段;沒有變化不存檔。"""
+        wanted = set(ids)
+        by_id = {s["id"]: s for s in snapshot.segments if s["id"] in wanted and s.get("post")}
+        if not by_id:
+            return 0
+
+        def change(cur, created):
+            n = 0
+            for s in cur.segments:
+                w = by_id.get(s["id"])
+                if w is None or _external(s.get("audio")) or s.get("audio") != w.get("audio"):
+                    continue
+                post = _post_for(s, w)
+                if post != s.get("post"):
+                    s["post"] = post
+                    n += 1
+            if not n:
+                raise _NoChange()
+            return {"n": n}
+        try:
+            return mutate(name, change)["n"]
+        except _NoChange:
+            return 0
+
     def merge_audio(name: str, snapshot, ids: list) -> int:
         """把合成結果寫回目前的專案:只更新同 id 且合成文字未變的片段;合成期間改成自錄音檔的不覆蓋。"""
         if snapshot is None or not ids:
@@ -1765,11 +1833,15 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             n = 0
             for s in cur.segments:
                 w = by_id.get(s["id"])
-                if w is None or _external(s.get("audio")) or s.get("audio") == w["audio"]:
+                if w is None or _external(s.get("audio")):
                     continue
                 if pj.tts_text(s) != pj.tts_text(w):
                     continue
+                post = _post_for(s, w)
+                if s.get("audio") == w["audio"] and s.get("post") == post:
+                    continue
                 s["audio"] = dict(w["audio"])
+                s["post"] = post
                 n += 1
             if n:
                 pj.save(cur)
@@ -1795,6 +1867,10 @@ def create_app(runner: Callable | None = None, token: str | None = None,
 
         def work():
             try:
+                stale = [s["id"] for s in tts_service.stale_post(proj)]
+                if stale:   # (CHG-20261029-01 D20)匯出前自動補做過期的後製
+                    post_fn(proj, stale, run.emit)
+                    merge_post(name, proj, stale)
                 with heavy_lock.heavy_lock(on_wait=lambda: run.emit({"type": "waiting"})):
                     run.emit({"type": "render", "status": "started"})
                     mp4, srt = render_fn(proj)
@@ -1802,6 +1878,8 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                           "srt": _out_relative(srt)})
             except media.RenderError as e:
                 run.emit({"type": "error", "message": str(e), "segments": list(e.segments)})
+            except tts_service.SynthError as e:
+                run.emit({"type": "error", "message": str(e)})
             except Exception as e:
                 print(f"studio_server:匯出錯誤 {type(e).__name__}", file=sys.stderr)
                 run.emit({"type": "error", "message": "✗ 影片匯出失敗"})
@@ -1809,6 +1887,46 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         threading.Thread(target=_job_thread, args=(work, run, end_job), name=f"render-{run.id}",
                          daemon=True).start()
         return {"run_id": run.id, "events": f"/api/run/{run.id}/events"}
+
+    @app.post("/api/projects/{p}/post")
+    @_guard
+    async def api_post(p: str, request: Request):
+        """(CHG-20261029-01 T4)只重做後製(裁切、連音、清晰度、語調),不重新合成;同步完成後回專案檢視。
+
+        body {"segments": [片段 id…]};省略或 {} = 全部後製過期的片段;自錄音檔片段略過。與 synth / render /
+        run / annotate 共用「執行中」旗標(忙碌 409),不進 heavy_lock。"""
+        name = _pname(p)
+        data = await _json(request, allow_empty=True)
+        _only_keys(data, ("segments",))
+        ids = data.get("segments")
+        if ids is not None:
+            if not isinstance(ids, list) or len(ids) > MAX_POST_IDS:
+                raise ApiError(422, f"segments 必須是最多 {MAX_POST_IDS} 個片段 id 的陣列")
+            ids = [_check_item_id(i, "片段") for i in ids]
+        proj = await run_in_threadpool(pj.load, name)
+        if ids is not None:
+            known = {s["id"] for s in proj.segments}
+            if any(i not in known for i in ids):
+                raise ApiError(404, "找不到這個片段")
+            ext = {s["id"] for s in proj.segments if _external(s.get("audio"))}
+            ids = [i for i in ids if i not in ext]
+        else:
+            ids = [s["id"] for s in tts_service.stale_post(proj)]
+        run = start_job(name)
+
+        def work():
+            try:
+                out = post_fn(proj, ids, run.emit) if ids else {"processed": [], "cached": []}
+            except tts_service.SynthError as e:
+                raise ApiError(500, str(e)) from None
+            merge_post(name, proj, ids)
+            return {**_view(overlay(name, pj.load(name))), "post": out}
+        try:
+            result = await run_in_threadpool(work)
+            run.emit({"type": "finished", "status": "ok"})
+        finally:
+            end_job(run)
+        return result
 
     @app.post("/api/annotate")
     @_guard
