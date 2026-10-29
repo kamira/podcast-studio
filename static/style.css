@@ -594,10 +594,27 @@ tr.diff-del td:first-child { text-decoration: none; }
 .fusion-popup { width: 300px; }
 .fusion-options { display: grid; gap: 2px; font-size: 13px; }
 .fusion-input { width: 160px; }
-.fusion-hint {
-  position: absolute; z-index: 40; display: flex; gap: 8px; align-items: center; padding: 4px 8px;
-  background: #fff; border: 1px solid var(--accent); border-radius: 6px; box-shadow: 0 2px 8px rgba(0, 0, 0, .15); font-size: 12px;
+.fusion-wrap { position: relative; }
+.fusion-mirror { position: absolute; pointer-events: none; overflow: hidden; color: transparent; background: transparent; margin: 0; }
+.fusion-mirror .mk { text-decoration-line: underline; text-decoration-style: wavy; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.mk.mark-pending { text-decoration-color: #e0b000; }
+.mk.mark-on { text-decoration-color: #2e9e5b; }
+.mk.mark-off { text-decoration-color: #c93c37; }
+.fusion-pill {
+  position: absolute; z-index: 2; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  background: #e3f5ea; border: 1px solid #2e9e5b; border-radius: 5px; color: #1e6b3e; font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .15); overflow: hidden; white-space: nowrap;
 }
-.fusion-hint-enable { display: flex; gap: 2px; align-items: center; }
-.fusion-mirror { position: absolute; left: -9999px; top: 0; visibility: hidden; white-space: pre-wrap; overflow-wrap: break-word; }
+.fusion-pop {
+  position: absolute; z-index: 50; background: #fff; border: 1px solid #b7cdf3; border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .16); padding: 8px 10px; display: grid; gap: 6px; min-width: 180px;
+}
+.fusion-pop[hidden] { display: none; }
+.fusion-pop-row { display: flex; gap: 6px; }
+.fusion-pop .b-on { border-color: #2e9e5b; color: #1e6b3e; }
+.fusion-pop .b-off { border-color: #c93c37; color: #a12e2a; }
+@media (prefers-color-scheme: dark) {
+  .fusion-pill { background: #1f3b2b; color: #a8f0c6; }
+}
 .tl-badge { position: absolute; right: 4px; bottom: 3px; font-size: 10px; padding: 0 4px; border-radius: 3px; background: rgba(0, 0, 0, .35); }
+.fusion-diff td { white-space: pre-line; }   /* 顯示字差異在合音注音格第二行 */

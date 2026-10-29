@@ -144,3 +144,12 @@ podcast-studio/
 - 〔觀察〕產品程式的測試放 `tests/test_<模組>.py`(pytest,CHG-20261022-01);CI 與部署腳本的測試放 `tests/ci/`(unittest,CHG-20261022-03)。
 - 〔觀察〕開發流程腳本放 `scripts/`,其中 CI 檢查放 `scripts/ci/`、對應測試放 `tests/ci/`;治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/review_decision.py`、`scripts/deploy_local.sh`)的 PR 另需擁有者 `infra-approved` 留言(DIR-2 第 3 條)。
 - 〔觀察〕`.ai-sdlc/` 只能整批重新複製上游(見 `.ai-sdlc/README.md`「更新方式」),不得逐檔修改。
+
+## CHG-20261029-01 新增
+
+| 路徑 | 用途 |
+|------|------|
+| `fusion.py` | 合音規則、比對與標示(純函式,只用標準庫) |
+| `features/prosody_trim.feature` | 片段靜音裁切、連音、清晰度、語調折線、合音與合音詞庫的行為規格 |
+| `tests/test_fusion.py` | 合音規則與 `/api/fusion/suggest` 的測試 |
+| `tests/integration/test_shape_real.py`、`tests/integration/shape_metrics.py` | `breezy_worker shape` 的真 venv 整合測試與量測輔助(不列入 `check.sh`) |

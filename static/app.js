@@ -1637,7 +1637,6 @@
   // 被拒詞條以類別「拒絕」列出(灰底、沒有保留勾選框),原因只列在 #fusion-reject-reasons。
   // 跳出訊息只有三類:匯入失敗(409 / 寫入失敗)、格式錯誤(422)、超過上限(413,沿用伺服器訊息)。
 
-  const FUSION_HOMOPHONES = { "這樣": "醬", "那樣": "釀", "知道": "造", "什麼": "啥", "我們": "穩" };
   const FUSION_KIND_LABEL = { add: "新增", update: "修改", disable: "停用", delete: "刪除", reject: "拒絕" };
 
   // 差異表的一列(純函式):回傳 {kind, word, keepable, keepDefault, cells: [{text, cls}](合音注音、啟用)}
@@ -1659,6 +1658,10 @@
     } else {
       z = cell(o.zhuyin, n.zhuyin, "diff-upd");
       en = cell(onOff(o.enabled), onOff(n.enabled), change.kind === "disable" ? "diff-dis" : "diff-upd");
+      const od = o.display || "", nd = n.display || "";
+      if (change.kind === "update" && od !== nd) {   // 只差顯示字也屬修改:合音注音格第二行(D43)
+        z = { text: z.text + "\n顯示字 " + (od || "(無)") + " → " + (nd || "(無)"), cls: "diff-upd" };
+      }
     }
     return { kind: change.kind, word: change.word, keepable: true,
              keepDefault: change.kind === "delete" || change.kind === "disable", cells: [z, en] };
@@ -1749,12 +1752,12 @@
       const z = document.createElement("input");
       z.type = "text";
       z.className = "fusion-zhuyin";
-      z.maxLength = 6;
+      z.maxLength = 24;
       z.value = w.zhuyin;
       z.setAttribute("aria-label", "「" + w.word + "」的合音注音");
       ztd.appendChild(z);
       tr.appendChild(ztd);
-      tr.appendChild(el("td", "muted", FUSION_HOMOPHONES[w.word] || "—"));
+      tr.appendChild(el("td", "muted", w.display || "—"));   // D43:浮層顯示字(同音字參考)
       tr.appendChild(el("td", "", w.source === "default" ? "預設" : "自訂"));
       const etd = el("td");
       const en = document.createElement("input");

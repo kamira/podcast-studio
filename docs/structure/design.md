@@ -324,3 +324,15 @@ classDiagram
 - 〔觀察〕**檔案存取經目錄 fd**(CHG-20261022-04 DIR-5 修正 4):本程式自己對專案資料、`outputs/`、`static/`、`workflows/`、`config/` 的讀寫刪搬一律經 `safe_fs`(dir_fd 逐層 `O_NOFOLLOW`),回應與複製讀同一個 fd;`project.subdir()` 回傳的路徑只交給外部程式(worker、ffmpeg)。外部程式只能以路徑存取的位置(BreezyVoice worker 的 `--out`、mflux 輸出、匯出時 ffmpeg 的暫存與輸出、SQLite 資料庫)列為殘餘風險,見 CHG-20261022-04 修訂 4 補記 20。outputs/ 佔位檔以 `media.open_reserved()` / `save_image()` 經目錄 fd 寫入,匯出與生圖的暫存目錄以 `media._mkdtemp_out()` 建立並保留 fd(修正 5,補記 22)。
 - 〔觀察〕**外部引擎一律子程序或 HTTP**,不在行程內載入模型——讓記憶體可由卸載控制。
 - 〔觀察〕~~**重複**:mflux 指令在 `taiwan_ai.image()` 與 `media.generate_image()` 各一份~~——`taiwan_ai.image()` 隨 CLI 移除(CHG-20261022-01 T2),只剩 `media.generate_image()`。
+
+## CHG-20261029-01:後製管線、shape worker、合音與合音詞庫
+
+〔觀察〕程式為準;實測依據見 CHG-20261029-01「先實測後製方案」。
+
+- **`breezy_worker.py shape --jobs <json> --out <dir>`**(BreezyVoice venv):jobs `[{id, input, chars, connect, clarity, word_clarity, pitch}]`;輸入檔名限 `--out` 目錄內的一般檔;預設參數原樣複製(不 import numpy);其餘只用 venv 已有的 numpy / scipy / librosa / soundfile,不載入模型、不連網。順序:連音(縮短 30–120 ms 字間空隙 + 估計字界交叉淡化)→ 清晰度 v2(子音弱化 c×24 dB → 頻譜時間平滑 c×120 ms → 共振峰中性化 c×0.3 → 音節對比 c×0.3 → p < 25% 時 2 階低通 → RMS 對齊)→ 字詞清晰度(20 ms 交叉淡化)→ 語調(TD-PSOLA,pyin 70–400 Hz;折線圓弧以二次貝茲)。結束碼 2 / 3 / 4。
+- **`tts_service`**:`trim()`(ffmpeg `silenceremove` + `areverse`、10 ms 淡入淡出,濾鏡只含程式常數)、`post_process(project, ids, emit)`(快取命中、預設參數不啟動 shape、其餘一次 shape worker;逾時 30 + 5 × 句數 秒;不進 heavy_lock)、`ensure_post()`、`stale_post()`;`synth()` 每句完成即裁切;`apply_speed()` 以後製檔為來源;`_run_worker` 抽出 `_run_proc`(synth 與 shape 共用)。
+- **`timeline.layout()`**:片段長度 = 後製有效時 `post.seconds` ÷ 語速,否則 `audio.seconds` ÷ 語速(預覽、匯出唯一來源)。
+- **API**:`PATCH /api/projects/{p}/segments/{id}` 新增 `connect`、`clarity`、`word_clarity`、`pitch`、`fusions`、`fusion_off`(自錄音檔設韻律回 422);`POST /api/projects/{p}/post`(`{"segments": [...]}` 或省略 = 全部過期;共用執行中旗標,忙碌 409;回專案檢視);專案檢視多 `post_stale`;media 端點可送後製檔;匯出前補做過期後製;合成後接著後製非預設參數的片段。
+- **`fusion.py`**(純函式):`split_zhuyin`、`fuse` / `explain`(D24 規則 + D25 合法化表)、`suggest`(4 → 3 → 2 字最長匹配不重疊)、`marks`(on / off / pending)、`pair_options` / `default_option` / `combine`(3~4 字選一對,D37)、`is_syllable`;`POST /api/fusion/suggest`(`text`、`zhuyin`、`index`、`length`、`exclude`)。`project.tts_text()`:n 字合成 k 音節時前 k 字依序帶 `[:音節]`、刪除其餘字。
+- **合音詞庫端點**:`GET /api/settings/fusions`、`PUT` / `DELETE /api/settings/fusions/{word}`(PUT `{"restore": true}` 還原預設詞)、`GET /api/settings/fusions/export?format=json|csv`、`POST /api/settings/fusions/import/preview`(multipart,只在記憶體解析;請求本體上限 = 設定值 + 16 KB,超過即 413)、`POST /api/settings/fusions/import/apply`(預覽代號 128 位元、單次、10 分鐘;交易內比對詞庫版本 SHA-256,不符 409)、`GET` / `PUT /api/settings/fusions/limits`。
+- **前端**:屬性面板「韻律」「語調」百分比拉桿(放開才送出,PATCH 後 `POST /post`)、聲調區「念法 / 清晰度 / 合音」模式;時間軸語調折線 SVG(菱形關鍵點、圓弧 Q 指令)、合音徽章;文稿框以「textarea + 上方標記層」畫三色波浪底線、點擊浮動窗啟用 / 停用、啟用處常駐浮層(D42);設定頁「合音詞庫」子頁(差異預覽五欄表、拒絕原因區塊、上限設定)。
