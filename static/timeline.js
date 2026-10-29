@@ -360,7 +360,7 @@
         return;
       }
       const speed = Store.speedOf(seg);
-      this.audio.src = Store.mediaUrl(seg.audio.id);
+      this.audio.src = Store.mediaUrl(Store.audioId(seg));   // CHG-20261029-01 D18:播放後製檔
       this.audio.playbackRate = speed;
       this.audio.currentTime = Math.max(0, (this.t - ls.start) * speed);
       this.audio.play().catch(function () { /* 換片段時中斷前一個 play() 屬正常 */ });
@@ -422,8 +422,13 @@
       this.row(box, "文字", seg.text).classList.add("prop-text");
 
       const a = seg.audio;
-      this.row(box, "狀態", !a ? "尚未合成"
-        : (("key" in a) ? "✓ 已合成 " : "✓ 自錄 ") + (Number(a.seconds) / Store.speedOf(seg)).toFixed(1) + " 秒");
+      const fresh = Store.postFresh(seg);
+      const running = S.Edit && S.Edit.Post.running.has(seg.id);
+      let status = !a ? "尚未合成"
+        : (("key" in a) ? "✓ 已合成 " : "✓ 自錄 ") + (Store.seconds(seg) / Store.speedOf(seg)).toFixed(1) + " 秒";
+      if (fresh && seg.post.trim > 0) status += "(已裁掉前後低音量 " + Number(seg.post.trim).toFixed(2) + " 秒)";
+      if (running) status = "⏳ 後製中";
+      this.row(box, "狀態", status).classList.add("prop-status");
       this.row(box, "語速", typeof seg.speed === "number" ? seg.speed.toFixed(2) + "×"
         : "預設(" + Store.speedOf(seg).toFixed(2) + "×)", "speed");
 
@@ -433,7 +438,17 @@
       this.row(box, "之後", typeof seg.pause_after === "number" ? seg.pause_after.toFixed(1) + " 秒"
         : Number(dflt).toFixed(1) + " 秒(預設)", "pause");
 
-      box.appendChild(el("h4", "prop-section", "聲調"));
+      // (CHG-20261029-01 T5)韻律、語調小節:edit.js 以 data-hook 掛上拉桿
+      box.appendChild(el("h4", "prop-section", "韻律"));
+      const prosody = el("div", "prop-block");
+      prosody.dataset.hook = "prosody";
+      box.appendChild(prosody);
+      box.appendChild(el("h4", "prop-section", "語調"));
+      const pitchBox = el("div", "prop-block");
+      pitchBox.dataset.hook = "pitch-props";
+      box.appendChild(pitchBox);
+
+      box.appendChild(el("h4", "prop-section", "聲調與字詞清晰度"));
       const tone = el("div", "tone-chars");
       tone.dataset.hook = "tone";
       const ann = {};

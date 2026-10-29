@@ -523,3 +523,20 @@ body {
 .tone-choice, .tone-light, .tone-custom { display: flex; align-items: center; gap: 4px; font-size: 13px; }
 .tone-input { width: 90px; font: inherit; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; }
 .tone-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+/* CHG-20261029-01 T5:韻律、語調拉桿與字詞清晰度 */
+.pct-row { display: flex; gap: 8px; align-items: center; }
+.pct-slider { display: flex; gap: 6px; align-items: center; flex: 1; }
+.pct-input { flex: 1; min-width: 90px; accent-color: var(--accent); }
+.pct-output { min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+.pct-hint { margin: 0 0 4px 56px; font-size: 11px; }
+.pitch-info { margin: 2px 0; font-size: 12px; }
+.tone-modes { display: flex; gap: 4px; margin: 2px 0 4px; }
+.tone-mode.is-active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tone-char { position: relative; }
+.tone-chars.is-clarity-mode .tone-char { padding-bottom: 6px; user-select: none; }
+.tone-char.is-selectable { cursor: text; }
+.tone-char.is-range { background: #efe6fb; outline: 1px solid #8a4fd1; }
+.clarity-bar { position: absolute; left: 2px; bottom: 1px; height: 3px; max-width: calc(100% - 4px); background: #9aa3ad; border-radius: 2px; }
+.clarity-bar.is-own { background: #8a4fd1; }
+.word-popup { width: 260px; }
