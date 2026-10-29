@@ -22,7 +22,8 @@
 - `canvas`(CHG-20261022-01):節點畫布、檔案拖放、設定頁;截圖 canvas.png、dnd.png、settings.png。
 - `editor`(CHG-20261022-04 T9):首頁雙卡片、精靈 ①~⑤、完整模式、剪輯互動、免責頁、
   畫布刪除封面步驟後的精靈步驟;截圖 home.png、wizard.png、full.png、editor.png、tone.png、disclaimer.png。
-  (CHG-20261029-01 T5)屬性面板的連音、清晰度拉桿與字詞清晰度;截圖 prosody.png。後製的 shape worker
+  (CHG-20261029-01 T5)屬性面板的連音、清晰度拉桿與字詞清晰度;截圖 prosody.png。
+  (CHG-20261029-01 T6)時間軸語調折線(新增、拖曳、刪除關鍵點、圓弧)與預覽播放後製檔;截圖 pitch.png。後製的 shape worker
   以本機 Python 替身代替(輸入照抄成輸出,只用標準庫)。
 不帶參數兩組都跑(先 canvas 再 editor);`--only editor` 只跑 editor。
 
@@ -423,7 +424,8 @@ SCRIPT_EDITED = SCRIPT.replace("四十年", "五十年")
 SYNTH_SECONDS = 1.6          # 替身 worker 每句的長度
 OWN_WAV_SECONDS = 1.2        # 自錄音檔長度
 VOICE_TEXT = "這是聲線逐字稿(UI 檢查替身)。"
-EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "disclaimer.png")
+EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "pitch.png",
+                "disclaimer.png")
 CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png")
 STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ"}
 
@@ -1011,6 +1013,90 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
             expect(page.locator(f'#props-body input[aria-label="{lab}(百分比)"]')).to_be_disabled()
         expect(page.locator('#props-body [data-hook="prosody"]')).to_contain_text("自錄音檔不做後製")
         page.locator('#props-body .tone-mode[data-mode="tone"]').click()
+
+        # CHG-20261029-01 T6:語調折線
+        seg0 = f'#tl-voice .tl-seg[data-segment="{seg_ids[0]}"]'
+        keys = page.locator(f"{seg0} svg.tl-pitch .tl-pitch-key")
+
+        def pitch_pts():
+            p = proj().segments[0]["pitch"]
+            return p["points"] if p else None
+
+        def dbl_at(fx, fy):
+            box = page.locator(f"{seg0} svg.tl-pitch.is-editable").bounding_box()
+            page.mouse.dblclick(box["x"] + box["width"] * fx, box["y"] + box["height"] * fy)
+
+        begin("時間軸:選取第 1 句,點兩下新增關鍵點(菱形),只重做後製")
+        n_calls = len(calls())
+        page.locator("#tl-zoom-in").click()                     # 放大時間軸,片段夠寬才好點選關鍵點
+        page.locator("#tl-zoom-in").click()
+        page.locator("#tl-zoom-in").click()
+        page.locator(seg0).click()
+        expect(page.locator(f"{seg0} svg.tl-pitch.is-editable")).to_have_count(1)
+        check(page.locator("#tl-voice").bounding_box()["height"] >= 77, "語音軌高度應為 78 px")
+        dbl_at(0.3, 0.25)
+        wait_until(lambda: pitch_pts() is not None and len(pitch_pts()) == 3, f"第一次點兩下應建立 3 點,實際 {pitch_pts()}")
+        expect(keys).to_have_count(3)
+        dbl_at(0.7, 0.75)
+        wait_until(lambda: pitch_pts() is not None and len(pitch_pts()) == 4, f"再點兩下應為 4 點,實際 {pitch_pts()}")
+        expect(keys).to_have_count(4)
+        check(pitch_pts()[1]["semi"] > 0 and pitch_pts()[2]["semi"] < 0, f"點的高度應對應音高,實際 {pitch_pts()}")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "新增關鍵點後應完成後製")
+        check(len(calls()) == n_calls, "新增關鍵點不應呼叫合成 worker")
+
+        begin("時間軸:把第 3 個關鍵點往上拖(位置不越過相鄰點),屬性面板顯示選取中與半音")
+        before = pitch_pts()
+        k = keys.nth(2)
+        kb = k.bounding_box()
+        x, y = kb["x"] + kb["width"] / 2, kb["y"] + kb["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x - 600, y - 20, steps=6)
+        page.mouse.move(x - 600, y - 40, steps=6)
+        page.mouse.up()
+        wait_until(lambda: pitch_pts()[2]["semi"] > 0, f"往上拖後第 3 點半音應 > 0,實際 {pitch_pts()}")
+        got = pitch_pts()
+        check(got[1]["pos"] < got[2]["pos"] < got[3]["pos"] and got[2]["pos"] >= before[1]["pos"] + 0.01,
+              f"拖曳不應越過相鄰點,實際 {got}")
+        expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("選取中:#3")
+        expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("半音")
+        check(len(calls()) == n_calls, "拖曳關鍵點不應呼叫合成 worker")
+
+        begin("屬性面板:圓弧 0% 與 100% 的折線不同(100% 含 Q 指令)")
+        rnd = page.locator('#props-body input[aria-label="圓弧(百分比)"]')
+        rnd.fill("0")
+        wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == 0, "圓弧應存成 0")
+        expect(page.locator('#props-body input[aria-label="圓弧(百分比)"]')).to_have_value("0")
+        d0 = page.locator(f"{seg0} svg.tl-pitch .tl-pitch-line").get_attribute("d")
+        page.locator('#props-body input[aria-label="圓弧(百分比)"]').fill("100")
+        wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == 100, "圓弧應存成 100")
+        expect(page.locator('#props-body input[aria-label="圓弧(百分比)"]')).to_have_value("100")
+        d100 = page.locator(f"{seg0} svg.tl-pitch .tl-pitch-line").get_attribute("d")
+        check(d0 != d100 and "Q" in d100 and "Q" not in d0, f"圓弧 0% / 100% 的 path 應不同且 100% 含 Q:{d0} / {d100}")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "改圓弧後應完成後製")
+        shot("pitch.png")
+
+        begin("預覽:第 1 句播放的 <audio> 來源是後製檔")
+        post_id = proj().segments[0]["post"]["id"]
+        page.locator("#preview-start").click()
+        page.locator("#preview-play").click()
+        wait_until(lambda: post_id in (page.evaluate("window.Studio.Preview.audio.src") or ""),
+                   "預覽第 1 句時 <audio> 應播放後製檔")
+        page.locator("#preview-play").click()
+        expect(page.locator("#preview-play")).to_have_attribute("aria-label", "播放")
+
+        begin("時間軸:選取關鍵點後按 Delete 刪除;剩 2 點時再刪即清除語調")
+        page.locator(seg0).click()
+        for want in (3, 2):
+            keys.nth(1).click()
+            page.keyboard.press("Delete")
+            wait_until(lambda: pitch_pts() is not None and len(pitch_pts()) == want, f"刪除後應剩 {want} 點,實際 {pitch_pts()}")
+            expect(keys).to_have_count(want)
+        keys.nth(0).click()
+        page.keyboard.press("Delete")
+        wait_until(lambda: pitch_pts() is None, "剩 2 點時再刪應清除語調(pitch 為 null)")
+        expect(keys).to_have_count(0)
+        check(len(calls()) == n_calls, "編輯語調不應呼叫合成 worker")
 
         # 4. 免責說明與授權
         begin("回首頁點底部「免責說明與授權」連結")

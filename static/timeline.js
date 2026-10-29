@@ -10,6 +10,7 @@
 // T8 的編輯互動(拖空隙改停頓、注音彈出框、語速選單、拖圖片邊緣)以 Studio.hook 接在這裡畫出的元素上:
 //   .tl-gap[data-after=<片段 id>](片段之後的空隙)、.tl-img .tl-edge[data-edge=start|end]、
 //   屬性面板的 [data-hook=speed|pause|tone|image-range]。本檔只負責顯示與選取。
+// (CHG-20261029-01 T6)預覽播放後製檔(Store.audioId);選取的語音片段上疊語調折線(PitchEdit)。
 "use strict";
 
 (function () {
@@ -50,6 +51,235 @@
   }
   // 預覽排程結束
 
+  // ---------- 語調折線(CHG-20261029-01 T6) ----------
+  //
+  // 選取的語音片段上疊一層 SVG:水平虛線為原音高(0 半音)、上下界 ±6 半音;菱形為關鍵點,點與點之間以線段
+  // 相連,中間點的轉角依「圓弧」以二次貝茲(Q)圓滑化(D10);第一點之前、最後一點之後維持端點值(D9)。
+  // 另畫估計字界刻度(依漢字數均分,僅供參考)與字詞清晰度斜線區段。未選取的片段只顯示細線。
+  // 操作(D17):點兩下新增、拖曳改位置與音高(不越過相鄰點)、選取後按 Delete / Backspace 刪除
+  // (剩 2 點時再刪即清除語調)。放開後 PATCH pitch,再只重做這一句的後製(edit.js 的 patchAndPost)。
+
+  // SVG 命名空間(只是 XML 命名空間識別字,不會發出任何請求);分段組字串,避免靜態檢查把它當成外部位址
+  const SVG_NS = ["http:", "/", "/www.w3.org/2000/svg"].join("");
+  const PITCH_SEMI = 6;
+  const PITCH_PAD = 6;
+  const PITCH_MAX_POINTS = 16;
+
+  function semiToY(semi, h) {
+    return h / 2 - (semi / PITCH_SEMI) * (h / 2 - PITCH_PAD);
+  }
+
+  function yToSemi(y, h) {
+    const v = ((h / 2 - y) / (h / 2 - PITCH_PAD)) * PITCH_SEMI;
+    return Math.max(-PITCH_SEMI, Math.min(PITCH_SEMI, Math.round(v * 10) / 10));
+  }
+
+  // 折線 + 圓弧 → SVG path 的 d(純函式;tests/test_static.py 以 JS 執行環境實跑)。
+  // points [{pos 0–1, semi}]、roundness 0–100(null = 50)、w × h 像素
+  function pitchPath(points, roundness, w, h) {
+    const r = (roundness === null || roundness === undefined ? 50 : roundness) / 100;
+    const P = points.map(function (p) { return [p.pos * w, semiToY(p.semi, h)]; });
+    const f = function (q) { return q[0].toFixed(1) + " " + q[1].toFixed(1); };
+    let d = "M 0.0 " + P[0][1].toFixed(1) + " L " + f(P[0]);
+    for (let i = 1; i < P.length - 1; i++) {
+      const p0 = P[i - 1], p1 = P[i], p2 = P[i + 1];
+      if (r > 0) {
+        const a = [p1[0] + (p0[0] - p1[0]) * r / 2, p1[1] + (p0[1] - p1[1]) * r / 2];
+        const b = [p1[0] + (p2[0] - p1[0]) * r / 2, p1[1] + (p2[1] - p1[1]) * r / 2];
+        d += " L " + f(a) + " Q " + f(p1) + " " + f(b);
+      } else {
+        d += " L " + f(p1);
+      }
+    }
+    const last = P[P.length - 1];
+    d += " L " + f(last) + " L " + w.toFixed(1) + " " + last[1].toFixed(1);
+    return d;
+  }
+
+  function svgEl(tag, attrs) {
+    const e = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, String(attrs[k])); });
+    return e;
+  }
+
+  function isHanziChar(ch) {
+    const c = String(ch).codePointAt(0);
+    return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0xF900 && c <= 0xFAFF)
+      || (c >= 0x20000 && c <= 0x323AF);
+  }
+
+  const PitchEdit = {
+    sel: null,     // {seg: 片段 id, index: 關鍵點索引}
+
+    selected(segId) {
+      return this.sel && this.sel.seg === segId ? this.sel.index : -1;
+    },
+
+    // 重畫所有語音片段上的折線(選取改變或時間軸重畫時呼叫)
+    refresh() {
+      document.querySelectorAll("#tl-voice .tl-pitch").forEach(function (e) { e.remove(); });
+      const tsel = Timeline.sel;
+      document.querySelectorAll("#tl-voice .tl-seg[data-segment]:not(.is-pending)").forEach((b) => {
+        const seg = Store.segment(b.dataset.segment);
+        if (!seg) return;
+        const on = !!tsel && tsel.type === "segment" && tsel.id === seg.id;
+        if (on && seg.audio && ("key" in seg.audio)) this.draw(b, seg, true);
+        else if (seg.pitch) this.draw(b, seg, false);
+      });
+      if (this.sel && !(tsel && tsel.type === "segment" && tsel.id === this.sel.seg)) this.sel = null;
+    },
+
+    draw(block, seg, editable) {
+      const w = block.clientWidth;
+      const h = block.clientHeight;
+      if (w < 4 || h < 4) return;
+      const svg = svgEl("svg", { class: "tl-pitch" + (editable ? " is-editable" : ""), width: w, height: h,
+        viewBox: "0 0 " + w + " " + h, "aria-hidden": editable ? "false" : "true" });
+      if (editable) {
+        svg.setAttribute("role", "group");
+        svg.setAttribute("aria-label", "語調折線(點兩下新增關鍵點)");
+        svg.appendChild(svgEl("line", { class: "tl-pitch-zero", x1: 0, y1: h / 2, x2: w, y2: h / 2 }));
+        const chars = Array.from(seg.text);
+        const units = [];
+        chars.forEach(function (ch, i) { if (isHanziChar(ch)) units.push(i); });
+        for (let k = 1; k < units.length; k++) {
+          const x = (k / units.length) * w;
+          svg.appendChild(svgEl("line", { class: "tl-pitch-tick", x1: x, y1: h - 8, x2: x, y2: h }));
+        }
+        (seg.word_clarity || []).forEach(function (wc) {
+          const a = units.indexOf(wc.start);
+          const b = units.indexOf(wc.end - 1);
+          if (a < 0 || b < 0 || !units.length) return;
+          const x0 = (a / units.length) * w;
+          const x1 = ((b + 1) / units.length) * w;
+          const g = svgEl("g", { class: "tl-word-clarity" });
+          g.appendChild(svgEl("rect", { x: x0, y: 0, width: Math.max(1, x1 - x0), height: h }));
+          const t = svgEl("text", { x: x0 + 2, y: h - 10 });
+          t.textContent = chars.slice(wc.start, wc.end).join("") + " " + wc.value + "%";
+          g.appendChild(t);
+          svg.appendChild(g);
+        });
+      }
+      if (seg.pitch) {
+        svg.appendChild(svgEl("path", { class: "tl-pitch-line", d: pitchPath(seg.pitch.points, seg.pitch.roundness, w, h) }));
+      }
+      block.appendChild(svg);
+      if (!editable) return;
+      (seg.pitch ? seg.pitch.points : []).forEach((p, i) => {
+        const x = p.pos * w;
+        const y = semiToY(p.semi, h);
+        const d = svgEl("rect", { class: "tl-pitch-key" + (this.selected(seg.id) === i ? " is-active" : ""),
+          x: x - 5, y: y - 5, width: 10, height: 10, transform: "rotate(45 " + x + " " + y + ")" });
+        d.dataset.index = String(i);
+        d.setAttribute("aria-label", "關鍵點 #" + (i + 1));
+        d.addEventListener("pointerdown", (e) => this.dragKey(e, seg, i, svg, d, w, h));
+        svg.appendChild(d);
+      });
+      if (this.sel && this.sel.seg === seg.id) {
+        const p = seg.pitch && seg.pitch.points[this.sel.index];
+        if (p) {
+          const t = svgEl("text", { class: "tl-pitch-label", x: Math.min(w - 120, Math.max(2, p.pos * w + 8)), y: 12 });
+          t.textContent = "#" + (this.sel.index + 1) + " · " + Math.round(p.pos * 100) + "% · "
+            + (S.Edit ? S.Edit.semiText(p.semi) : p.semi);
+          svg.appendChild(t);
+        }
+      }
+      svg.addEventListener("dblclick", (e) => {
+        if (e.target && e.target.classList && e.target.classList.contains("tl-pitch-key")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const r = svg.getBoundingClientRect();
+        this.add(seg, Math.round(((e.clientX - r.left) / w) * 100) / 100, yToSemi(e.clientY - r.top, h));
+      });
+    },
+
+    commit(seg, points, okText) {
+      const roundness = seg.pitch ? seg.pitch.roundness : null;
+      const body = { pitch: points === null ? null : { points: points, roundness: roundness } };
+      if (S.Edit) return S.Edit.patchAndPost(seg, body, okText);
+      return Store.patchSegment(seg.id, body);
+    },
+
+    add(seg, pos, semi) {
+      pos = Math.max(0, Math.min(1, pos));
+      const pts = seg.pitch ? seg.pitch.points.map(function (p) { return { pos: p.pos, semi: p.semi }; })
+        : [{ pos: 0, semi: 0 }, { pos: 1, semi: 0 }];
+      if (pts.some(function (p) { return Math.abs(p.pos - pos) < 0.005; })) {
+        S.toast("這個位置已經有關鍵點", true);
+        return;
+      }
+      if (pts.length >= PITCH_MAX_POINTS) {
+        S.toast("每句最多 " + PITCH_MAX_POINTS + " 個關鍵點", true);
+        return;
+      }
+      pts.push({ pos: pos, semi: semi });
+      pts.sort(function (a, b) { return a.pos - b.pos; });
+      this.sel = { seg: seg.id, index: pts.findIndex(function (p) { return p.pos === pos; }) };
+      this.commit(seg, pts, "已新增關鍵點");
+    },
+
+    remove(seg, index) {
+      const pts = seg.pitch.points.filter(function (_, i) { return i !== index; });
+      this.sel = null;
+      this.commit(seg, pts.length < 2 ? null : pts, pts.length < 2 ? "已清除語調" : "已刪除關鍵點");
+    },
+
+    dragKey(e, seg, i, svg, key, w, h) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const pts = seg.pitch.points.map(function (p) { return { pos: p.pos, semi: p.semi }; });
+      const lo = i > 0 ? pts[i - 1].pos + 0.01 : 0;
+      const hi = i < pts.length - 1 ? pts[i + 1].pos - 0.01 : 1;
+      const r = svg.getBoundingClientRect();
+      const x0 = e.clientX;
+      const y0 = e.clientY;
+      let moved = false;
+      key.setPointerCapture(e.pointerId);
+      this.sel = { seg: seg.id, index: i };
+      const line = svg.querySelector(".tl-pitch-line");
+      const move = (ev) => {
+        if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) >= 3) moved = true;
+        if (!moved) return;
+        const pos = Math.round(Math.max(lo, Math.min(hi, (ev.clientX - r.left) / w)) * 100) / 100;
+        pts[i] = { pos: Math.max(lo, Math.min(hi, pos)), semi: yToSemi(ev.clientY - r.top, h) };
+        const x = pts[i].pos * w;
+        const y = semiToY(pts[i].semi, h);
+        key.setAttribute("x", String(x - 5));
+        key.setAttribute("y", String(y - 5));
+        key.setAttribute("transform", "rotate(45 " + x + " " + y + ")");
+        if (line) line.setAttribute("d", pitchPath(pts, seg.pitch.roundness, w, h));
+      };
+      const up = (ev) => {
+        key.removeEventListener("pointermove", move);
+        key.removeEventListener("pointerup", up);
+        key.removeEventListener("pointercancel", up);
+        if (key.hasPointerCapture(ev.pointerId)) key.releasePointerCapture(ev.pointerId);
+        if (moved && ev.type === "pointerup") {
+          this.commit(seg, pts, "關鍵點 #" + (i + 1) + " 改為 " + (S.Edit ? S.Edit.semiText(pts[i].semi) : ""));
+        } else {
+          this.refresh();
+          Props.render();
+        }
+      };
+      key.addEventListener("pointermove", move);
+      key.addEventListener("pointerup", up);
+      key.addEventListener("pointercancel", up);
+    },
+
+    onKey(e) {
+      if (!this.sel || (e.key !== "Delete" && e.key !== "Backspace")) return;
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      const seg = Store.segment(this.sel.seg);
+      if (!seg || !seg.pitch || !seg.pitch.points[this.sel.index]) return;
+      e.preventDefault();
+      this.remove(seg, this.sel.index);
+    },
+  };
+
+  document.addEventListener("keydown", function (e) { PitchEdit.onKey(e); });
+
   // ---------- 時間軸 ----------
 
   const Timeline = {
@@ -88,6 +318,7 @@
           : '.tl-img[data-image="' + sel.id + '"]';
         document.querySelectorAll(sels).forEach(function (e) { e.classList.add("is-selected"); });
       }
+      PitchEdit.refresh();
       Props.render();
     },
 
@@ -96,6 +327,9 @@
       if (!t || !t.closest) return;
       const seg = t.closest("[data-segment]");
       if (seg && !t.closest(".tl-gap")) {
+        // 已選取的語音片段再點一下不重畫(語調折線的點兩下需要同一個 SVG 收到兩次點擊)
+        if (this.sel && this.sel.type === "segment" && this.sel.id === seg.dataset.segment
+            && t.closest(".tl-pitch")) return;
         this.select({ type: "segment", id: seg.dataset.segment });
         return;
       }
@@ -562,6 +796,8 @@
   };
 
   S.Timeline = Timeline;
+  S.PitchEdit = PitchEdit;
+  S.pitchPath = pitchPath;
   S.Preview = Preview;
   S.Props = Props;
   S.Library = Library;
