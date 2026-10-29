@@ -1104,3 +1104,28 @@ def test_開啟舊專案時回報需補做的片段(client, shaped):
     r = post(client)
     assert r.status_code == 200 and r.json()["post_stale"] == []
     assert sorted(r.json()["post"]["cached"]) == sorted(v["post_stale"])          # 裁切檔已在快取
+
+
+# ---------- CHG-20261029-01 T7:合音狀態隨文字改動位移(D41) ----------
+
+def test_改文字時合音狀態依位移調整_重疊者清除(client, env):
+    view = create(client, script="我也不知道，是這樣啊。")
+    sid = view["project"]["segments"][0]["id"]
+    body = {"fusions": [{"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}],
+            "fusion_off": [{"index": 6, "length": 3}]}
+    assert patch_segment(client, sid, body).status_code == 200
+    r = patch_segment(client, sid, {"text": "嗯我也不知道，是這樣啊。"})
+    s = r.json()["project"]["segments"][0]
+    assert s["fusions"][0]["index"] == 3 and s["fusion_off"] == [{"index": 7, "length": 3}]
+    r = patch_segment(client, sid, {"text": "嗯我也不道，是這樣啊。"})
+    s = r.json()["project"]["segments"][0]
+    assert s["fusions"] == [] and s["fusion_off"] == [{"index": 6, "length": 3}]
+
+
+def test_文稿改寫時改過的句子沿用同位置的合音狀態(client, env):
+    view = create(client, script="我也不知道。是這樣啊。")
+    sid = view["project"]["segments"][0]["id"]
+    patch_segment(client, sid, {"fusions": [{"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}]})
+    r = client.put(f"/api/projects/{NAME}", json={"script": "嗯,我也不知道。是這樣啊。"}, headers=auth())
+    s = r.json()["project"]["segments"][0]
+    assert s["text"] == "嗯,我也不知道。" and s["fusions"][0]["index"] == 4

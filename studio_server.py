@@ -711,7 +711,7 @@ WAV_ONLY = "取代語音只接受 WAV 音檔"
 BUSY = "已有語音合成、匯出、注音標註或流程在執行中,請等它結束"
 SEGMENT_PATCH_KEYS = ("text", "pause_after", "speed", "annotations", "split_at", "merge_next",
                       "audio_file", "audio", "connect", "clarity", "word_clarity", "pitch", "fusions",
-                      "fusion_dismissed")
+                      "fusion_off")
 PROSODY_KEYS = ("connect", "clarity", "word_clarity", "pitch")   # CHG-20261029-01:改了只重做後製,不重新合成
 NO_POST_EXTERNAL = "自錄音檔不做後製(連音、清晰度、字詞清晰度、語調只適用於合成的語音)"
 MAX_POST_IDS = 2000
@@ -836,23 +836,33 @@ def _view(proj) -> dict:
 def _new_segment(text: str, brk: str) -> dict:
     return {"id": pj.new_id(), "text": text, "break": brk, "pause_after": None, "speed": None,
             "annotations": [], "audio": None, "connect": None, "clarity": None, "word_clarity": [],
-            "pitch": None, "post": None, "fusions": [], "fusion_dismissed": []}
+            "pitch": None, "post": None, "fusions": [], "fusion_off": []}
 
 
 def _resplit(proj, script, forced) -> None:
-    """文稿改寫後重新分句;文字相同的片段(依序配對)沿用 id、停頓、語速、標註與音檔,只有新句沒有音檔。"""
+    """文稿改寫後重新分句;文字相同的片段(依序配對)沿用 id、停頓、語速、標註與音檔,只有新句沒有音檔。
+
+    (CHG-20261029-01 D41)句數不變時,改過文字的句子沿用同一位置舊句的合音狀態(依位移調整、
+    與改動範圍重疊者清除);音檔、標註與其他設定不沿用。"""
     pieces = pj.split_segments(script, forced)
     pool: dict[str, list] = {}
     for s in proj.segments:
         pool.setdefault(s["text"], []).append(s)
+    same_count = len(pieces) == len(proj.segments)
+    used = set()
     segs = []
-    for p in pieces:
+    for k, p in enumerate(pieces):
         olds = pool.get(p["text"])
         if olds:
             s = dict(olds.pop(0))
             s["break"] = p["break"]
+            used.add(s["id"])
         else:
             s = _new_segment(p["text"], p["break"])
+            old = proj.segments[k] if same_count else None
+            if old is not None and old["id"] not in used and (old.get("fusions") or old.get("fusion_off")):
+                moved = pj.shift_marks(old, old["text"], p["text"])
+                s["fusions"], s["fusion_off"] = moved["fusions"], moved["fusion_off"]
         segs.append(s)
     proj.script = script
     proj.segments = segs
@@ -1633,13 +1643,13 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             if "text" in data and seg["text"] != proj.segments[idx]["text"]:
                 if "word_clarity" not in data:
                     seg["word_clarity"] = []   # 字詞清晰度以字元索引記錄,文字改了即清除(同注音標註)
+                moved = pj.shift_marks(seg, proj.segments[idx]["text"], seg["text"])   # D41:依位移調整
                 if "fusions" not in data:
-                    seg["fusions"] = []        # 合音同理(CHG-20261029-01 T7)
-                if "fusion_dismissed" not in data:   # 關閉紀錄依位移調整(D41)
-                    seg["fusion_dismissed"] = pj.shift_dismissed(proj.segments[idx]["text"], seg["text"],
-                                                                 seg.get("fusion_dismissed"))
-            if "fusion_dismissed" in data:
-                seg["fusion_dismissed"] = data["fusion_dismissed"]
+                    seg["fusions"] = moved["fusions"]
+                if "fusion_off" not in data:
+                    seg["fusion_off"] = moved["fusion_off"]
+            if "fusion_off" in data:
+                seg["fusion_off"] = data["fusion_off"]
             if "fusions" in data:   # 合音改變送模型的文字:該句變髒、走既有 synth(D28)
                 if seg.get("fusions") != data["fusions"] and _external(seg.get("audio")) \
                         and "audio_file" not in data:
@@ -1664,7 +1674,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 skip = len(second) - len(second.lstrip())
                 anns = seg.get("annotations") or []
                 a = {**seg, "text": first.strip(), "break": "forced", "pause_after": None, "audio": None,
-                     "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_dismissed": [],
+                     "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_off": [],
                      "annotations": [{"index": x["index"] - lead, "zhuyin": x["zhuyin"]}
                                      for x in anns if x["index"] <= i]}
                 b = {**_new_segment(second.strip(), seg["break"]), "pause_after": seg.get("pause_after"),
@@ -1680,7 +1690,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 shift = len(seg["text"])
                 merged = {**seg, "text": seg["text"] + nxt["text"], "break": nxt["break"],
                           "pause_after": nxt.get("pause_after"), "audio": None,
-                          "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_dismissed": [],
+                          "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_off": [],
                           "annotations": (seg.get("annotations") or []) + [
                               {"index": x["index"] + shift, "zhuyin": x["zhuyin"]}
                               for x in nxt.get("annotations") or []]}
@@ -2024,9 +2034,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             _only_keys(data, ("restore",))
             await run_in_threadpool(fusion_call, settings.restore_fusion, word)
         else:
-            _only_keys(data, ("zhuyin", "enabled"))
+            _only_keys(data, ("zhuyin", "enabled", "display"))
             await run_in_threadpool(fusion_call, settings.save_fusion, word, data.get("zhuyin"),
-                                    data.get("enabled"))
+                                    data.get("enabled"), data.get("display"))
         return fusions_view()
 
     @app.delete("/api/settings/fusions/{word}")

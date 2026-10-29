@@ -37,7 +37,8 @@ voice_defaults = {"speed", "pause_comma", "pause_sentence", "pause_paragraph"}(�
   roles(role TEXT PRIMARY KEY, config TEXT NOT NULL)      config 為該角色鍵值的 JSON
   review_seats(seat TEXT PRIMARY KEY, model TEXT NOT NULL)
   voice_defaults(key TEXT PRIMARY KEY, value REAL NOT NULL)   (v2 新增)語速與三種停頓預設
-  fusion_words(word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, enabled INTEGER NOT NULL, source TEXT NOT NULL)
+  fusion_words(word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, display TEXT NOT NULL DEFAULT '',
+               enabled INTEGER NOT NULL, source TEXT NOT NULL)
                                                          (v3 新增)合音詞庫;source ∈ default / custom
   fusion_settings(key TEXT PRIMARY KEY, value INTEGER NOT NULL)
                                                          (v3 新增,D36)import_max_kb、import_max_rows
@@ -373,7 +374,7 @@ _NEW = "new"      # 沒有任何資料表的資料庫(剛由本模組建立,或�
 
 _VOICE_TABLE = "CREATE TABLE IF NOT EXISTS voice_defaults (key TEXT PRIMARY KEY, value REAL NOT NULL)"
 _FUSION_TABLE = ("CREATE TABLE IF NOT EXISTS fusion_words (word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, "
-                 "enabled INTEGER NOT NULL, source TEXT NOT NULL)")
+                 "display TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL, source TEXT NOT NULL)")
 _FUSION_SETTINGS_TABLE = "CREATE TABLE IF NOT EXISTS fusion_settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -1010,7 +1011,7 @@ def save(cfg) -> None:
 
 # ---- 合音詞庫(CHG-20261029-01 T8;D29~D31) ----
 #
-# 表 fusion_words(word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, enabled INTEGER NOT NULL, source TEXT NOT NULL)
+# 表 fusion_words(word, zhuyin, display, enabled, source)
 # source ∈ default(程式常數 FUSION_DEFAULTS,可編輯 / 停用 / 還原,不可刪除)/ custom(可刪除)。
 # 寫入一律經 _fusion_txn():與 save() 相同的路徑檢查;資料庫不存在或仍是舊版時在初始化鎖內建立 / 升級,
 # 與本次寫入在同一個 BEGIN IMMEDIATE 交易內;任何例外 rollback。
@@ -1018,20 +1019,22 @@ def save(cfg) -> None:
 # 匯入(D30,差異預覽 + 逐項保留):preview_import(檔案位元組) 只讀不寫;apply_import(...) 在交易內
 # 重算詞庫版本(SHA-256(依 word 排序的全部列之 JSON)),與預覽時不同即丟 FusionsChanged。
 
+# (詞, 合音注音, 浮層顯示 display(D43), 預設啟用)
 FUSION_DEFAULTS = (
-    ("這樣", "ㄐㄧㄤˋ", True),
-    ("那樣", "ㄋㄧㄤˋ", True),
-    ("知道", "ㄗㄠˋ", True),
-    ("什麼", "ㄕㄚˊ", True),
-    ("我們", "ㄨㄣˇ", True),
-    ("不要", "ㄅㄧㄠˋ", False),
-    # 3 字(合音字數放寬為 2~4 字後新增,D35;需使用者覆核)
-    ("不知道", "ㄅㄨˋ ㄗㄠˋ", True),
-    ("是這樣", "ㄕˋ ㄐㄧㄤˋ", True),
-    ("這樣子", "ㄐㄧㄤˋ ˙ㄗ", True),
-    ("為什麼", "ㄨㄟˋ ㄕㄚˊ", True),
-    ("怎麼樣", "ㄗㄣˇ ㄧㄤˋ", True),
+    ("這樣", "ㄐㄧㄤˋ", "醬", True),
+    ("那樣", "ㄋㄧㄤˋ", "釀", True),
+    ("知道", "ㄗㄠˋ", "造", True),
+    ("什麼", "ㄕㄚˊ", "啥", True),
+    ("我們", "ㄨㄣˇ", "穩", True),
+    ("不要", "ㄅㄧㄠˋ", "", False),
+    # 3 字(合音字數放寬為 2~4 字後新增,D35)
+    ("不知道", "ㄅㄨˋ ㄗㄠˋ", "不造", True),
+    ("是這樣", "ㄕˋ ㄐㄧㄤˋ", "是醬", True),
+    ("這樣子", "ㄐㄧㄤˋ ˙ㄗ", "醬子", True),
+    ("為什麼", "ㄨㄟˋ ㄕㄚˊ", "為啥", True),
+    ("怎麼樣", "ㄗㄣˇ ㄧㄤˋ", "怎樣", True),
 )
+_DEFAULT_WORDS = {w: (z, d, e) for w, z, d, e in FUSION_DEFAULTS}
 FUSION_FORMAT = "podcast-studio-fusions"
 FUSION_FORMAT_VERSION = 1
 # 匯入上限(D36):後台設定 fusion_settings 的 import_max_kb、import_max_rows;允許範圍與程式內硬上限
@@ -1041,7 +1044,7 @@ FUSION_ROWS_RANGE = (10, 10000)
 FUSION_HARD_MAX_KB = 4096
 FUSION_HARD_MAX_ROWS = 10000
 _LIMIT_KEYS = {"max_kb": "import_max_kb", "max_rows": "import_max_rows"}
-FUSION_CSV_HEADER = ("word", "zhuyin", "enabled", "source")
+FUSION_CSV_HEADER = ("word", "zhuyin", "display", "enabled", "source")   # D43:五欄
 WARN_FUSION_FALLBACK = "設定資料庫無法使用,合音詞庫暫用程式內預設詞"
 
 
@@ -1061,14 +1064,15 @@ class FusionsChanged(FusionError):
 
 
 def _fusion_default_rows() -> list[dict]:
-    return sorted(({"word": w, "zhuyin": z, "enabled": e, "source": "default"} for w, z, e in FUSION_DEFAULTS),
+    return sorted(({"word": w, "zhuyin": z, "display": d, "enabled": e, "source": "default"}
+                   for w, z, d, e in FUSION_DEFAULTS),
                   key=lambda r: r["word"])
 
 
 def _write_fusion_defaults(con: sqlite3.Connection) -> None:
     con.execute(_FUSION_TABLE)
-    con.executemany("INSERT OR IGNORE INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
-                    [(w, z, 1 if e else 0, "default") for w, z, e in FUSION_DEFAULTS])
+    con.executemany("INSERT OR IGNORE INTO fusion_words (word, zhuyin, display, enabled, source) "
+                    "VALUES (?, ?, ?, ?, ?)", [(w, z, d, 1 if e else 0, "default") for w, z, d, e in FUSION_DEFAULTS])
     con.execute(_FUSION_SETTINGS_TABLE)
     con.executemany("INSERT OR IGNORE INTO fusion_settings (key, value) VALUES (?, ?)",
                     [(_LIMIT_KEYS[k], v) for k, v in FUSION_LIMIT_DEFAULTS.items()])
@@ -1128,12 +1132,13 @@ def rows_limit_message(max_rows: int) -> str:
 
 
 def _fusion_rows(con: sqlite3.Connection) -> list[dict]:
-    rows = con.execute("SELECT word, zhuyin, enabled, source FROM fusion_words ORDER BY word").fetchall()
-    return [{"word": w, "zhuyin": z, "enabled": bool(e), "source": s} for w, z, e, s in rows]
+    rows = con.execute("SELECT word, zhuyin, display, enabled, source FROM fusion_words ORDER BY word").fetchall()
+    return [{"word": w, "zhuyin": z, "display": d, "enabled": bool(e), "source": s} for w, z, d, e, s in rows]
 
 
 def _version_of(rows: list[dict]) -> str:
-    data = [[r["word"], r["zhuyin"], bool(r["enabled"]), r["source"]] for r in sorted(rows, key=lambda r: r["word"])]
+    data = [[r["word"], r["zhuyin"], r.get("display", ""), bool(r["enabled"]), r["source"]]
+            for r in sorted(rows, key=lambda r: r["word"])]
     return hashlib.sha256(json.dumps(data, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -1143,7 +1148,7 @@ def _hanzi(ch: str) -> bool:
             or 0x20000 <= cp <= 0x323AF)
 
 
-def check_fusion_word(word, zhuyin, enabled) -> str | None:
+def check_fusion_word(word, zhuyin, enabled, display="") -> str | None:
     """D31 詞條驗證(2~4 字;合音注音 1~字數−1 個音節,半形空白分隔);合格回 None,否則回繁中原因。"""
     import fusion
     if not isinstance(word, str) or not 2 <= len(word) <= 4 or not all(_hanzi(c) for c in word):
@@ -1153,6 +1158,8 @@ def check_fusion_word(word, zhuyin, enabled) -> str | None:
         return "注音不是合法音節(多個音節以半形空白分隔)"
     if len(parts) >= len(word):
         return "合音注音的音節數必須少於字數"
+    if not isinstance(display, str) or len(display) > 4 or not all(_hanzi(c) for c in display):
+        return "顯示字須為空白或 1~4 個漢字"
     if not isinstance(enabled, bool):
         return "啟用必須是 true 或 false"
     return None
@@ -1202,6 +1209,12 @@ def fusion_lexicon() -> dict:
     return {r["word"]: r["zhuyin"] for r in load_fusions()["words"] if r["enabled"]}
 
 
+def fusion_entries() -> dict:
+    """啟用中的合音詞與浮層顯示字:{詞: {"zhuyin", "display"}}(D40、D43)。"""
+    return {r["word"]: {"zhuyin": r["zhuyin"], "display": r.get("display", "")}
+            for r in load_fusions()["words"] if r["enabled"]}
+
+
 def fusions_version() -> str:
     return load_fusions()["version"]
 
@@ -1244,18 +1257,19 @@ def _fusion_txn(op):
     return out.get("v")
 
 
-def save_fusion(word, zhuyin, enabled) -> dict:
+def save_fusion(word, zhuyin, enabled, display=None) -> dict:
     """新增或修改一個詞(已存在者保留來源;新詞來源為 custom)。不合格丟 FusionError(422)。"""
-    reason = check_fusion_word(word, zhuyin, enabled)
+    reason = check_fusion_word(word, zhuyin, enabled, display or "")
     if reason:
         raise FusionError(f"「{word if isinstance(word, str) else ''}」:{reason}")
 
     def op(con):
-        row = con.execute("SELECT source FROM fusion_words WHERE word = ?", (word,)).fetchone()
-        source = row[0] if row else ("default" if word in {w for w, _, _ in FUSION_DEFAULTS} else "custom")
-        con.execute("INSERT OR REPLACE INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
-                    (word, zhuyin, 1 if enabled else 0, source))
-        return {"word": word, "zhuyin": zhuyin, "enabled": enabled, "source": source}
+        row = con.execute("SELECT source, display FROM fusion_words WHERE word = ?", (word,)).fetchone()
+        source = row[0] if row else ("default" if word in _DEFAULT_WORDS else "custom")
+        disp = display if display is not None else (row[1] if row else "")   # None = 沿用原顯示字
+        con.execute("INSERT OR REPLACE INTO fusion_words (word, zhuyin, display, enabled, source) "
+                    "VALUES (?, ?, ?, ?, ?)", (word, zhuyin, disp, 1 if enabled else 0, source))
+        return {"word": word, "zhuyin": zhuyin, "display": disp, "enabled": enabled, "source": source}
     return _fusion_txn(op)
 
 
@@ -1273,15 +1287,14 @@ def delete_fusion(word) -> None:
 
 def restore_fusion(word) -> dict:
     """把預設詞還原為程式常數值;自訂詞或不存在丟 FusionError。"""
-    defaults = {w: (z, e) for w, z, e in FUSION_DEFAULTS}
-    if word not in defaults:
+    if word not in _DEFAULT_WORDS:
         raise FusionError("只有預設詞可以還原")
-    z, e = defaults[word]
+    z, d, e = _DEFAULT_WORDS[word]
 
     def op(con):
-        con.execute("INSERT OR REPLACE INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
-                    (word, z, 1 if e else 0, "default"))
-        return {"word": word, "zhuyin": z, "enabled": e, "source": "default"}
+        con.execute("INSERT OR REPLACE INTO fusion_words (word, zhuyin, display, enabled, source) "
+                    "VALUES (?, ?, ?, ?, ?)", (word, z, d, 1 if e else 0, "default"))
+        return {"word": word, "zhuyin": z, "display": d, "enabled": e, "source": "default"}
     return _fusion_txn(op)
 
 
@@ -1290,12 +1303,14 @@ def export_fusions(fmt: str) -> bytes:
     rows = load_fusions()["words"]
     if fmt == "json":
         body = {"format": FUSION_FORMAT, "version": FUSION_FORMAT_VERSION,
-                "words": [{"word": r["word"], "zhuyin": r["zhuyin"], "enabled": r["enabled"], "source": r["source"]}
+                "words": [{"word": r["word"], "zhuyin": r["zhuyin"], "display": r["display"], "enabled": r["enabled"],
+                           "source": r["source"]}
                           for r in rows]}
         return (json.dumps(body, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
     if fmt == "csv":
         lines = [",".join(FUSION_CSV_HEADER)]
-        lines += [f"{r['word']},{r['zhuyin']},{'true' if r['enabled'] else 'false'},{r['source']}" for r in rows]
+        lines += [f"{r['word']},{r['zhuyin']},{r['display']},{'true' if r['enabled'] else 'false'},{r['source']}"
+                  for r in rows]
         return ("\r\n".join(lines) + "\r\n").encode("utf-8")
     raise FusionError("匯出格式只能是 json 或 csv")
 
@@ -1348,7 +1363,8 @@ def parse_fusion_file(raw: bytes, limits: dict | None = None) -> list[dict]:
                     or not set(it) <= set(FUSION_CSV_HEADER) \
                     or any(isinstance(v, (dict, list)) for v in it.values()):
                 raise FusionError(f"JSON 結構不符(第 {n} 筆)")
-            out.append({"row": n, "word": it["word"], "zhuyin": it["zhuyin"], "enabled": it["enabled"]})
+            out.append({"row": n, "word": it["word"], "zhuyin": it["zhuyin"], "display": it.get("display", ""),
+                        "enabled": it["enabled"]})
         return out
     try:
         rows = list(csv.reader(io.StringIO(text, newline="")))
@@ -1356,14 +1372,15 @@ def parse_fusion_file(raw: bytes, limits: dict | None = None) -> list[dict]:
         raise FusionError("CSV 格式錯誤") from None
     rows = [r for r in rows if r]
     if not rows or [c.strip() for c in rows[0]] != list(FUSION_CSV_HEADER):
-        raise FusionError("CSV 表頭必須是 word,zhuyin,enabled,source")
+        raise FusionError("CSV 表頭必須是 word,zhuyin,display,enabled,source")
     if len(rows) - 1 > max_rows:
         raise FusionError(rows_limit_message(max_rows), 413)
     for n, r in enumerate(rows[1:], 1):
-        if len(r) != 4:
-            raise FusionError(f"CSV 第 {n} 筆不是四個欄位")
-        b = _parse_bool(r[2])
-        out.append({"row": n, "word": r[0].strip(), "zhuyin": r[1].strip(), "enabled": b if b is not None else r[2]})
+        if len(r) != 5:
+            raise FusionError(f"CSV 第 {n} 筆不是五個欄位")
+        b = _parse_bool(r[3])
+        out.append({"row": n, "word": r[0].strip(), "zhuyin": r[1].strip(), "display": r[2].strip(),
+                    "enabled": b if b is not None else r[3]})
     return out
 
 
@@ -1379,7 +1396,7 @@ def preview_import(raw: bytes, limits: dict | None = None) -> dict:
     rejected, seen, valid = [], set(), {}
     for it in items:
         word = it["word"] if isinstance(it["word"], str) else ""
-        reason = check_fusion_word(it["word"], it["zhuyin"], it["enabled"])
+        reason = check_fusion_word(it["word"], it["zhuyin"], it["enabled"], it["display"])
         if reason is None and word in seen:
             reason = "同一個詞重複出現"
         if reason:
@@ -1388,26 +1405,27 @@ def preview_import(raw: bytes, limits: dict | None = None) -> dict:
             valid.pop(word, None)
             continue
         seen.add(word)
-        valid[word] = {"zhuyin": it["zhuyin"], "enabled": it["enabled"]}
+        valid[word] = {"zhuyin": it["zhuyin"], "display": it["display"], "enabled": it["enabled"]}
     changes, unchanged = [], 0
     for word, new in valid.items():
         old = have.get(word)
         if old is None:
             changes.append({"id": word, "word": word, "kind": "add", "old": None, "new": new})
-        elif old["zhuyin"] != new["zhuyin"] or old["enabled"] != new["enabled"]:
+        elif old["zhuyin"] != new["zhuyin"] or old["enabled"] != new["enabled"] or old["display"] != new["display"]:
             changes.append({"id": word, "word": word, "kind": "update",
-                            "old": {"zhuyin": old["zhuyin"], "enabled": old["enabled"]}, "new": new})
+                            "old": {"zhuyin": old["zhuyin"], "display": old["display"], "enabled": old["enabled"]},
+                            "new": new})
         else:
             unchanged += 1
     for word, old in have.items():
         if word in seen:
             continue   # 檔案內(含被拒絕的詞):不產生刪除 / 停用
-        o = {"zhuyin": old["zhuyin"], "enabled": old["enabled"]}
+        o = {"zhuyin": old["zhuyin"], "display": old["display"], "enabled": old["enabled"]}
         if old["source"] == "custom":
             changes.append({"id": word, "word": word, "kind": "delete", "old": o, "new": None})
         elif old["enabled"]:
             changes.append({"id": word, "word": word, "kind": "disable", "old": o,
-                            "new": {"zhuyin": old["zhuyin"], "enabled": False}})
+                            "new": {**o, "enabled": False}})
         else:
             unchanged += 1
     order = {"add": 0, "update": 1, "disable": 2, "delete": 3}
@@ -1426,7 +1444,7 @@ def apply_import(changes: list, base_version: str, apply_all: bool, keep=()) -> 
         if fusions_version() != base_version:
             raise FusionsChanged()
         return {"applied": [], "kept": kept}
-    defaults = {w for w, _, _ in FUSION_DEFAULTS}
+    defaults = set(_DEFAULT_WORDS)
 
     def op(con):
         if _version_of(_fusion_rows(con)) != base_version:
@@ -1434,11 +1452,12 @@ def apply_import(changes: list, base_version: str, apply_all: bool, keep=()) -> 
         for c in todo:
             w, kind, new = c["word"], c["kind"], c["new"]
             if kind == "add":
-                con.execute("INSERT INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
-                            (w, new["zhuyin"], 1 if new["enabled"] else 0, "default" if w in defaults else "custom"))
+                con.execute("INSERT INTO fusion_words (word, zhuyin, display, enabled, source) VALUES (?, ?, ?, ?, ?)",
+                            (w, new["zhuyin"], new.get("display", ""), 1 if new["enabled"] else 0,
+                             "default" if w in defaults else "custom"))
             elif kind in ("update", "disable"):
-                con.execute("UPDATE fusion_words SET zhuyin = ?, enabled = ? WHERE word = ?",
-                            (new["zhuyin"], 1 if new["enabled"] else 0, w))
+                con.execute("UPDATE fusion_words SET zhuyin = ?, display = ?, enabled = ? WHERE word = ?",
+                            (new["zhuyin"], new.get("display", ""), 1 if new["enabled"] else 0, w))
             elif kind == "delete":
                 con.execute("DELETE FROM fusion_words WHERE word = ? AND source = ?", (w, "custom"))
         return {"applied": [c["word"] for c in todo], "kept": kept}
