@@ -33,9 +33,11 @@
                     post         null 或 {"id": 後製檔 id, "key": 64 碼後製鍵, "seconds": 後製後長度(變速前),
                                  "trim": 裁掉的前後低音量秒數}(伺服器產生;PATCH 不接受)
                     fusions      [{"index": 起點字元索引, "length": 2~4, "zhuyin": 1~(length − 1) 個音節(半形空白分隔),
-                                  "source": rule|lexicon|manual}]
+                                  "source": rule|lexicon|manual, "display"?: 空字串或 1~4 個漢字}]
                                  (CHG-20261029-01 T7,D27)範圍內都是漢字、互不重疊、每句 ≤ MAX_FUSIONS 組;
-                                 合音範圍內不得有聲調標註;字詞清晰度區段必須完整包含或完全不含合音範圍
+                                 合音範圍內不得有聲調標註;字詞清晰度區段必須完整包含或完全不含合音範圍;
+                                 (修訂 1 R1-4)display 為選填的顯示字(由詞庫套用時寫入),缺少視同空字串、
+                                 載入時不補;不是空字串時合成以顯示字取代合音範圍
   images          畫面軌(≤ MAX_ASSETS 個):{"id", "asset": 圖片素材 id, "start": 秒, "end": null(到結尾)或秒}
   assets          素材(≤ MAX_ASSETS 個、合計 ≤ MAX_ASSET_BYTES):
                     {"id", "kind": image|audio|text, "ext": 白名單副檔名, "bytes": 位元組數, "label"?: 顯示名稱}
@@ -53,7 +55,11 @@
   escape_text(text) / tts_text(segment) -> str
                                原文 `[` `]` 轉全形;標註以 `字[:注音]` 插入(注音格式同 breezy_worker,聲調符號);
                                (T7)合音:第一字帶 `[:合音注音]`、刪除第二字(例 `是這[:ㄐㄧㄤˋ]啊`)
-  fused_out(segment) -> set    合音刪去的第二字索引(送模型時不念的字;字界估計以送模型的字數為準)
+                               (修訂 1 R1-4)合音帶顯示字時整段換成顯示字、不加注音(例 `是醬啊`)
+  fused_out(segment) -> set    合音範圍內不送模型的原字索引(注音路線為刪去的字;顯示字路線為整個範圍)
+  model_units(segment) -> list[int]
+                               (修訂 1 R1-5)送模型的每個漢字對應的原文索引(顯示字對應到合音範圍內的字);
+                               字界估計與字詞清晰度換算以此為準
   load(name) -> Project / save(project) -> 版本 id 或 None / list_history(name) / trash(name, confirm=True)
   (T6 補)create(name, script, defaults) / list_projects() / load_version(name, 版本 id) / restore(name, 版本 id)
   (T8 補)update(name, change) -> (Project, 版本 id, change 的回傳值)
@@ -141,6 +147,7 @@ MAX_WORD_CLARITY = 32
 MAX_FUSIONS = 16
 FUSION_MIN, FUSION_MAX = 2, 4     # 合音字數(使用者 2026-10-29:不超過四字)
 MAX_FUSION_OFF = 32                # fusion_off 每句上限(D41)
+FUSION_DISPLAY_MAX = 4             # 合音顯示字上限(D43、R1-4;同詞庫 display)
 FUSION_SOURCES = ("rule", "lexicon", "manual")
 POST_VERSION = 1
 # 修訂 1(R1-11):後製演算法標記。清晰度改方案 C、語調改 PCHIP 混合後,用到的部分附加於後製鍵,
@@ -452,7 +459,8 @@ def is_post_fresh(segment: dict) -> bool:
 
 def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> list[dict]:
     """合音(D27):範圍 [index, index + length) 為 2~4 個漢字;zhuyin 為 1~(length − 1) 個音節(半形空白分隔);
-    各組不重疊;範圍內沒有聲調標註;字詞清晰度完整包含或完全不含合音範圍。"""
+    各組不重疊;範圍內沒有聲調標註;字詞清晰度完整包含或完全不含合音範圍。
+    (修訂 1 R1-4)選填 display:空字串或 1~4 個漢字;有給才輸出(舊專案檔不補欄位、內容不變)。"""
     if items is None:
         return []
     if not isinstance(items, list):
@@ -461,8 +469,9 @@ def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> l
         raise ProjectError(f"{where}.fusions 每句最多 {MAX_FUSIONS} 組")
     out = []
     for f in items:
-        if not isinstance(f, dict) or set(f) != {"index", "length", "zhuyin", "source"}:
-            raise ProjectError(f"{where}.fusions 每項必須恰為 index、length、zhuyin、source 四個欄位")
+        if not isinstance(f, dict) or set(f) - {"display"} != {"index", "length", "zhuyin", "source"}:
+            raise ProjectError(f"{where}.fusions 每項必須恰為 index、length、zhuyin、source 四個欄位"
+                               "(另可選填 display)")
         i, n = f["index"], f["length"]
         if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX:
             raise ProjectError(f"{where}.fusions 的字數必須是 {FUSION_MIN} 到 {FUSION_MAX}")
@@ -481,7 +490,13 @@ def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> l
                 check_zhuyin(part)
             except ProjectError as e:
                 raise ProjectError(f"{where}:合音{e.errors[0]}") from None
-        out.append({"index": i, "length": n, "zhuyin": z, "source": f["source"]})
+        item = {"index": i, "length": n, "zhuyin": z, "source": f["source"]}
+        if "display" in f:
+            d = f["display"]
+            if not isinstance(d, str) or len(d) > FUSION_DISPLAY_MAX or not all(_is_hanzi(c) for c in d):
+                raise ProjectError(f"{where}:合音的顯示字必須是空字串或 1 到 {FUSION_DISPLAY_MAX} 個漢字")
+            item["display"] = d
+        out.append(item)
     out.sort(key=lambda x: x["index"])
     if any(b["index"] < a["index"] + a["length"] for a, b in zip(out, out[1:])):
         raise ProjectError(f"{where}.fusions 的範圍不可重疊")
@@ -548,11 +563,29 @@ def shift_marks(segment: dict, old_text: str, new_text: str) -> dict:
 
 
 def fused_out(segment) -> set:
-    """合音刪去的字索引(送模型時不念;n 字合成 k 個音節時刪去後 n − k 字)。"""
+    """合音範圍內不送模型的原字索引:注音路線(D26)n 字合成 k 個音節時為後 n − k 字;
+    帶顯示字(修訂 1 R1-4)時整個範圍都換成顯示字,範圍內每個原字都不送。"""
     out = set()
     for f in segment.get("fusions") or []:
-        k = len(f["zhuyin"].split(" "))
+        k = 0 if f.get("display") else len(f["zhuyin"].split(" "))
         out |= set(range(f["index"] + k, f["index"] + f["length"]))
+    return out
+
+
+def model_units(segment) -> list[int]:
+    """(修訂 1 R1-5)送模型的每個漢字依序對應的原文索引:合音範圍外的原字、注音路線留下的前 k 字,
+    以及顯示字(第 j 個顯示字對應到合音範圍內第 min(j, length − 1) 個字;顯示字比範圍長時末字重複對應)。
+    字詞清晰度必須完整包含或完全不含合音範圍(D27),因此換算後涵蓋顯示字的全部字。"""
+    text = segment["text"]
+    shown = {f["index"]: f for f in segment.get("fusions") or [] if f.get("display")}
+    skip = fused_out(segment)
+    out = []
+    for i, ch in enumerate(text):
+        if i in shown:
+            f = shown[i]
+            out += [i + min(j, f["length"] - 1) for j in range(len(f["display"]))]
+        if _is_hanzi(ch) and i not in skip:
+            out.append(i)
     return out
 
 
@@ -621,7 +654,8 @@ def escape_text(text: str) -> str:
 
 
 def tts_text(segment) -> str:
-    """合成文字:原文跳脫後,在每個標註的字後插入 `[:注音]`(聲調符號格式,worker 再轉數字聲調)。"""
+    """合成文字:原文跳脫後,在每個標註的字後插入 `[:注音]`(聲調符號格式,worker 再轉數字聲調)。
+    合音(D26):前 k 字依序帶 `[:音節]`、刪除其餘字;(修訂 1 R1-4)帶顯示字時整段換成顯示字、不加注音。"""
     if not isinstance(segment, dict):
         raise ProjectError("片段格式不正確")
     text = segment.get("text")
@@ -630,8 +664,13 @@ def tts_text(segment) -> str:
     checked = _check_annotations(text, segment.get("annotations"), "片段")
     anns = {a["index"]: a["zhuyin"] for a in checked}
     fus = {}   # 字元索引 → 該字帶的合音音節;合音範圍內其餘字不送模型(D26)
+    shown = {}   # 合音起點 → 顯示字(R1-4:取代整個範圍)
     skip = set()
     for f in _check_fusions(text, segment.get("fusions"), checked, segment.get("word_clarity"), "片段"):
+        if f.get("display"):
+            shown[f["index"]] = f["display"]
+            skip |= set(range(f["index"], f["index"] + f["length"]))
+            continue
         parts = f["zhuyin"].split(" ")
         for j in range(f["length"]):
             if j < len(parts):
@@ -640,6 +679,8 @@ def tts_text(segment) -> str:
                 skip.add(f["index"] + j)
     out = []
     for i, ch in enumerate(escape_text(text)):
+        if i in shown:
+            out.append(escape_text(shown[i]))
         if i in skip:
             continue
         out.append(ch)

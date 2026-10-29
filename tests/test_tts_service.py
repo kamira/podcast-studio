@@ -899,3 +899,47 @@ def test_沒有語調的句子回傳非null的pitch_points也算失敗(shaped):
     with pytest.raises(tts.SynthError):
         tts.post_process(p, None, shaped.emit)
     assert p.segments[0]["post"] is None or not pj.is_post_fresh(p.segments[0])
+
+
+# ---------- CHG-20261029-01 修訂 1 T12:合音送顯示字(R1-4、R1-5) ----------
+
+def _fz(index, zhuyin, length, display=None):
+    f = {"index": index, "length": length, "zhuyin": zhuyin, "source": "lexicon"}
+    return f if display is None else {**f, "display": display}
+
+
+def test_合音帶顯示字_worker收到顯示字且不加注音(env):
+    p = make_project(("是這樣啊，我也不知道。",))
+    p.segments[0]["fusions"] = [_fz(1, "ㄐㄧㄤˋ", 2, "醬"), _fz(7, "ㄅㄨˋ ㄗㄠˋ", 3, "不造")]
+    tts.synth(p, env.emit)
+    assert worker_jobs(env) == [["是醬啊，我也不造。"]]
+    pj.save(p)
+    assert pj.load("夜市的味道").segments[0]["fusions"][1]["display"] == "不造"
+
+
+def test_既有合音補上顯示字_該句變髒_重新合成(env):
+    p = make_project(("是這樣啊，我也不知道。", "今天天氣真好。"))
+    p.segments[0]["fusions"] = [_fz(1, "ㄐㄧㄤˋ", 2), _fz(7, "ㄅㄨˋ ㄗㄠˋ", 3)]
+    tts.synth(p, env.emit)
+    assert worker_jobs(env) == [["是這[:ㄐㄧㄤˋ]啊，我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]。", "今天天氣真好。"]]
+    assert tts.dirty_segments(p) == []
+    old = dict(p.segments[0]["audio"])
+    p.segments[0]["fusions"] = [_fz(1, "ㄐㄧㄤˋ", 2, "醬"), _fz(7, "ㄅㄨˋ ㄗㄠˋ", 3, "不造")]
+    assert [s["id"] for s in tts.dirty_segments(p)] == [p.segments[0]["id"]]
+    tts.synth(p, env.emit)
+    assert worker_jobs(env)[1:] == [["是醬啊，我也不造。"]]
+    assert p.segments[0]["audio"]["key"] != old["key"]
+
+
+def test_顯示字合音的shape工作以送模型的字換算(shaped):
+    p = padded_project(shaped, n=1)
+    s = p.segments[0]
+    s["text"] = "我也不知道。"
+    # 注音只有 1 個音節(注音路線會念 3 字)、顯示字 2 字:換算必須依顯示字
+    s["fusions"] = [_fz(2, "ㄗㄠˋ", 3, "不造")]
+    s["word_clarity"] = [{"start": 2, "end": 5, "value": 30}]
+    tts.post_process(p, [s["id"]], shaped.emit)
+    [job] = shape_calls(shaped)[0]["jobs"]
+    assert job["chars"] == 4 and job["word_clarity"] == [{"start": 2, "end": 4, "value": 30}]
+    s["fusions"] = [_fz(2, "ㄗㄠˋ", 3)]                         # 沒有顯示字:沿用注音路線(念「我也不」)
+    assert tts.shape_job(s, "c" * 32, "d" * 32)["chars"] == 3
