@@ -600,7 +600,7 @@ SYNTH_SECONDS = 1.6          # 替身 worker 每句的長度
 OWN_WAV_SECONDS = 1.2        # 自錄音檔長度
 VOICE_TEXT = "這是聲線逐字稿(UI 檢查替身)。"
 EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "clarity-warn.png",
-                "pitch.png", "pitch-auto.png", "fusion-typing.png", "fusion.png", "disclaimer.png")
+                "pitch.png", "pitch-auto.png", "fusion-typing.png", "fusion.png", "fusion-rows.png", "disclaimer.png")
 CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png", "settings-fusion.png")
 STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ",
                # CHG-20261029-01 T9:合音規則推導需要的字
@@ -972,9 +972,13 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(fpop.locator(".fusion-derive")).to_contain_text("ㄓ + ㄧㄤˋ")
     expect(fpop.locator(".fusion-derive")).to_contain_text("顎化")
     expect(fpop.locator(".fusion-input")).to_have_value("ㄐㄧㄤˋ")
+    # T14:彈出框維持原樣,不含「送模型」「字幕」兩列(兩列在屬性面板「已套用」下方)
+    expect(fpop.locator(".fusion-sent")).to_have_count(0)
+    expect(fpop.locator(".fusion-subtitle")).to_have_count(0)
     n = len(calls())
     fpop.get_by_role("button", name="套用").click()
     wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
+    check(calls()[-1][0]["text"] == "是這[:ㄐㄧㄤˋ]啊，你不知道嗎。", f"送模型的文字不符:{calls()[-1][0]['text']}")
     check(seg_with("是這樣啊，你不知道嗎。")["fusions"] == [{"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "rule",
                                                           "display": ""}],
           f"fusions 不符:{seg_with('是這樣啊，你不知道嗎。')['fusions']}")
@@ -997,6 +1001,17 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
           f"fusions 不符:{seg_with('那裡很好。')['fusions']}")
     sent = calls()[-1][0]["text"]
     check("那[:ㄋㄧˇ]" in sent and "裡" not in sent, f"送模型的文字不符:{sent}")
+    begin("T14 屬性面板合音模式:規則推導的「那裡」套用後「已套用」下方送模型列為 那[:ㄋㄧˇ]很好。(與 worker 相同)、字幕列為原文")
+    select_seg(s5["id"])
+    psent, psub = page.locator("#props-body .fusion-sent"), page.locator("#props-body .fusion-subtitle")
+    expect(psent).to_have_text(sent)
+    check(sent == "那[:ㄋㄧˇ]很好。", f"送模型的文字不符:{sent}")
+    expect(psub).to_have_text("那裡很好。(原文不變)")
+    check(psent.evaluate("e => e.children.length") == 0, "送模型列應只含文字(textContent)")
+    check(page.evaluate("""() => { const l = document.querySelector('#props-body .fusion-list');
+        const a = l && l.nextElementSibling; const b = a && a.nextElementSibling;
+        return !!(a && b && a.querySelector('.fusion-sent') && b.querySelector('.fusion-subtitle')); }"""),
+          "兩列應緊接在「已套用」列表下方,依序為送模型、字幕")
     expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s5["id"]}"]').first).to_contain_text("那裡很好")
 
     begin("合音模式:詞庫有停用的「攤販」時按「存入合音詞庫」先確認覆寫;取消不變、接受才寫入")
@@ -1034,6 +1049,9 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     drag_chars(6, 8)
     expect(fpop.locator(".fusion-input")).to_have_value("ㄅㄨˋ ㄗㄠˋ")
     expect(fpop.locator(".fusion-derive")).to_contain_text("詞庫")
+    pb = fpop.bounding_box()
+    vw = page.evaluate("document.documentElement.clientWidth")
+    check(pb["x"] >= 0 and pb["x"] + pb["width"] <= vw, f"T14:彈出框應在視窗內(不超出右緣):{pb},視窗寬 {vw}")
     n = len(calls())
     fpop.get_by_role("button", name="套用").click()
     wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成")
@@ -1046,6 +1064,10 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(page.locator(f'#tl-voice [data-segment="{s1["id"]}"] .tl-badge')).to_have_text("⟲ 合音 2")
     select_seg(s1["id"])
     shot("fusion.png")
+    begin("T14 屬性面板合音模式:詞庫「不知道」套用後送模型列為顯示字「不造」(含已套用的「這樣」,與 worker 相同)、字幕列為原文")
+    expect(psent).to_have_text(sent)
+    expect(psub).to_have_text("是這樣啊，你不知道嗎。(原文不變)")
+    page.locator("#props-body").screenshot(path=str(SHOT_DIR / "fusion-rows.png"))
 
     begin("合音模式:「就是」顯示不合音原因、套用停用;選五字時套用停用")
     s2 = seg_with("就是這家攤販。")
@@ -1087,6 +1109,19 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
           f"fusions 不符:{seg_with('就是這樣。')['fusions']}")
     sent = calls()[-1][0]["text"]
     check(sent == "就是醬。", f"送模型的文字不符:{sent}")
+    begin("T14 屬性面板合音模式:詞庫「這樣」套用後送模型列為「就是醬。」(與 worker 相同);按 ✕ 移除後兩列即時更新")
+    select_seg(s3["id"])
+    expect(psent).to_have_text(sent)
+    expect(psub).to_have_text("就是這樣。(原文不變)")
+    n = len(calls())
+    page.locator("#props-body .fusion-item button").first.click()
+    expect(psent).to_have_text("就是這樣。")
+    expect(psub).to_have_text("就是這樣。(原文不變)")
+    wait_until(lambda: seg_with("就是這樣。")["fusions"] == [] and seg_with("就是這樣。")["audio"]
+               and not page.evaluate("window.Studio.Voice.running"), "移除後應回到原文的音檔")
+    # 原文「就是這樣。」先前已合成過,移除後命中合成快取、不一定再呼叫 worker;有呼叫時文字須與送模型列相同
+    check(len(calls()) == n or calls()[-1][0]["text"] == "就是這樣。", f"移除後送模型的文字不符:{calls()[n:]}")
+    expect(psent).to_have_text("就是這樣。")
     expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s3["id"]}"]').first).to_contain_text("就是這樣")
 
     begin("屬性面板句子文字:「不知道」顯示黃色波浪底線,點擊開同一個浮動窗;停用變紅、再點選啟用變綠")

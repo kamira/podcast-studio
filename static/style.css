@@ -594,6 +594,11 @@ tr.diff-del td:first-child { text-decoration: none; }
 .fusion-popup { width: 300px; }
 .fusion-options { display: grid; gap: 2px; font-size: 13px; }
 .fusion-input { width: 160px; }
+/* CHG-20261029-01 T14:合音模式彈出框「送模型」「字幕」兩列 */
+.fusion-row { font-size: 13px; }
+.fusion-sent { padding: 1px 6px; border-radius: 4px; background: var(--line); word-break: break-all; }
+.fusion-subtitle { word-break: break-all; }
+.fusion-row > :last-child { flex: 1; min-width: 0; }
 .fusion-wrap { position: relative; }
 .fusion-mirror { position: absolute; pointer-events: none; overflow: hidden; color: transparent; background: transparent; margin: 0; }
 .fusion-mirror .mk, .prop-text .mk { text-decoration-line: underline; text-decoration-style: wavy; text-decoration-thickness: 2px; text-underline-offset: 4px; }

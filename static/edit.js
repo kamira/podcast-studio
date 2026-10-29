@@ -1049,6 +1049,39 @@
     return out;
   }
 
+  // 這一句送給模型的文字(同 project.tts_text():`[`、`]` 換全形;合音帶顯示字時整段換成顯示字、不加注音;
+  // 沒有顯示字時前 k 字帶 `[:音節]`、刪除其餘字(D26);範圍外的聲調標註帶 `[:注音]`)(純函式;T14 前端試算,
+  // 只供屬性面板合音模式「送模型」列顯示,實際送出仍以伺服器為準)
+  function ttsText(seg) {
+    const esc = function (t) { return String(t).replace(/\[/g, "［").replace(/\]/g, "］"); };
+    const anns = {};
+    (seg.annotations || []).forEach(function (a) { anns[a.index] = a.zhuyin; });
+    const fus = {};
+    const shown = {};
+    const skip = new Set();
+    (seg.fusions || []).forEach(function (f) {
+      if (f.display) {
+        shown[f.index] = f.display;
+        for (let j = 0; j < f.length; j++) skip.add(f.index + j);
+        return;
+      }
+      const parts = String(f.zhuyin || "").split(" ");
+      for (let j = 0; j < f.length; j++) {
+        if (j < parts.length) fus[f.index + j] = parts[j];
+        else skip.add(f.index + j);
+      }
+    });
+    const out = [];
+    Array.from(esc(seg.text || "")).forEach(function (ch, i) {
+      if (Object.prototype.hasOwnProperty.call(shown, i)) out.push(esc(shown[i]));
+      if (skip.has(i)) return;
+      out.push(ch);
+      if (Object.prototype.hasOwnProperty.call(fus, i)) out.push("[:" + fus[i] + "]");
+      else if (Object.prototype.hasOwnProperty.call(anns, i)) out.push("[:" + anns[i] + "]");
+    });
+    return out.join("");
+  }
+
   // 詞庫詞比對(同 fusion.suggest:4 → 3 → 2 字、每層由左至右、不重疊;exclude 為不提示的字元索引)(純函式)
   function matchLexicon(text, lexicon, exclude) {
     const chars = Array.from(text || "");
@@ -1211,7 +1244,9 @@
       this.error.textContent = "";
       this.box.hidden = false;
       const r = anchor ? anchor.getBoundingClientRect() : { left: 100, bottom: 100 };
-      this.box.style.left = Math.max(8, r.left + window.scrollX) + "px";
+      // 不超出視窗右緣(T14:原本片段靠右時彈出框超出視窗、內容被切掉)
+      const maxLeft = document.documentElement.clientWidth - this.box.offsetWidth - 8;
+      this.box.style.left = Math.max(8, Math.min(r.left, maxLeft) + window.scrollX) + "px";
       this.box.style.top = Math.max(8, r.bottom + window.scrollY + 6) + "px";
       if (n > FUSION_MAX || !chars.slice(start, end).every(isHanzi) || n < 2) {
         this.derive.textContent = n < 2 ? "合音需要相鄰 2 個以上的漢字" : "合音最多 " + FUSION_MAX + " 個漢字(不可含標點)";
@@ -1369,7 +1404,13 @@
       li.appendChild(x);
       list.appendChild(li);
     });
-    holder.after(list);
+    // T14:「已套用」下方的「送模型」(依已套用的合音算出整句送出的文字,有顯示字時為顯示字,R1-4)
+    // 與「字幕」(原文)兩列,照已核准的 after-fusion.png;一律以 textContent 寫入
+    const sentRow = el("div", "prop-row fusion-row");
+    sentRow.append(el("span", "prop-label", "送模型"), el("code", "fusion-sent", ttsText(seg)));
+    const subRow = el("div", "prop-row fusion-row");
+    subRow.append(el("span", "prop-label", "字幕"), el("span", "fusion-subtitle", seg.text + "(原文不變)"));
+    holder.after(list, sentRow, subRow);
     if (isExternal(seg)) return;
     let sel = null;
     const mark = function () {
@@ -1821,6 +1862,6 @@
     gapBox: gapBox, GAP_HIT: GAP_HIT, Post: Post, patchAndPost: patchAndPost, ToneMode: ToneMode,
     WordPopup: WordPopup, withWordClarity: withWordClarity, charClarity: charClarity, semiText: semiText,
     PROSODY_DEFAULTS: PROSODY_DEFAULTS, FusionPopup: FusionPopup, ScriptMarks: ScriptMarks, shiftDecided: shiftDecided, Lexicon: Lexicon,
-    matchLexicon: matchLexicon, withFusion: withFusion, fusionZhuyinOk: fusionZhuyinOk,
+    matchLexicon: matchLexicon, withFusion: withFusion, ttsText: ttsText, fusionZhuyinOk: fusionZhuyinOk,
     CLARITY_WARN_BELOW: CLARITY_WARN_BELOW, CLARITY_WARN_TEXT: CLARITY_WARN_TEXT };
 })();
