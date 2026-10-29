@@ -536,8 +536,10 @@ def _synthesized(segment: dict) -> bool:
 
 
 def _model_units(segment: dict) -> list[int]:
-    """送模型時會念出的字(漢字)在原文中的索引;估計字界與字詞清晰度的時間換算以此為準(D8、D28)。"""
-    return [i for i, ch in enumerate(segment["text"]) if pj._is_hanzi(ch)]
+    """送模型時會念出的字(漢字)在原文中的索引;估計字界與字詞清晰度的時間換算以此為準(D8、D28)。
+    合音刪去的第二字不念,不算一個字。"""
+    skip = pj.fused_out(segment)
+    return [i for i, ch in enumerate(segment["text"]) if pj._is_hanzi(ch) and i not in skip]
 
 
 def shape_job(segment: dict, out_id: str, input_id: str) -> dict:
