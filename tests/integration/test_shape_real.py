@@ -125,21 +125,34 @@ def _speech_inputs(work):
     return items
 
 
-def test_清晰度0與50(work):
+def test_清晰度方案C_0_25_50(work):
+    """修訂 1 T10(R1-1):方案 C。0% 子音 ≥ 3 kHz 降 ≥ 18 dB、離散度降 ≥ 20%、RMS 差 ≤ 0.5 dB;25% 與 0% 不悶
+    (母音「低−中高」≤ +1.0 dB)、不削高頻(非子音幀 ≥ 4 kHz 變化 ≥ −2 dB);50% 子音降 ≥ 8 dB;不含低通。"""
     for label, src, chars in _speech_inputs(work):
         rows = shape(work, [job("cccc0000", input=src.name, chars=chars, clarity=0),
+                            job("cccc0025", input=src.name, chars=chars, clarity=25),
                             job("cccc0050", input=src.name, chars=chars, clarity=50)])
-        assert len(rows) == 2
-        m0 = metric("clar", orig=str(src), proc=str(work / "cccc0000.wav"))
-        m50 = metric("clar", orig=str(src), proc=str(work / "cccc0050.wav"))
-        print(f"\n[清晰度 {label}] 0%:{m0};50%:{m50}")
-        assert m0["consonant_db"] <= -18
-        assert m0["dispersion_pct"] <= -25
-        assert abs(m0["rms_db"]) <= 0.5
-        assert m50["consonant_db"] <= -8
-        assert abs(m50["rms_db"]) <= 0.5
-        assert metric("lowpass_calls", path=str(src), p=50)["calls"] == 0     # 50% 不含低通
-        assert metric("lowpass_calls", path=str(src), p=0)["calls"] >= 1
+        assert len(rows) == 3
+        m = {p: metric("clar", orig=str(src), proc=str(work / f"cccc00{p:02d}.wav")) for p in (0, 25, 50)}
+        print(f"\n[清晰度 {label}] " + ";".join(f"{p}%:{m[p]}" for p in (50, 25, 0)))
+        assert m[0]["consonant_db"] <= -18
+        assert m[0]["dispersion_pct"] <= -20
+        for p in (0, 25, 50):
+            assert abs(m[p]["rms_db"]) <= 0.5, p
+        for p in (0, 25):
+            assert m[p]["vowel_lowmid_db"] <= 1.0, p                         # 不悶
+            assert m[p]["nonconsonant_4k_db"] >= -2.0, p                     # 不削高頻
+        assert m[50]["consonant_db"] <= -8
+        for p in (0, 25, 50):
+            assert metric("lowpass_calls", path=str(src), p=p)["calls"] == 0, p  # 方案 C 不用低通
+
+
+def test_清晰度100逐樣本等於輸入_每句處理半秒內(work):
+    for label, src, _ in _speech_inputs(work):
+        assert metric("identity", path=str(src))["same"], label
+        t = metric("timing", path=str(src), ps=[0, 25, 50, 75])
+        print(f"\n[清晰度耗時 {label}] {t}")
+        assert max(t["seconds"].values()) <= 0.5
 
 
 def test_字詞清晰度只影響區段(work):

@@ -5,6 +5,10 @@
 引數與結果一律為 JSON。不寫 repo、不連網。指標定義同 CHG「先實測後製方案」:
   子音能量 = 原音判定為子音的幀(非靜音且 3 kHz 以上能量比為前 25%)在 3 kHz 以上的總能量變化(dB)
   包絡離散度 = 各幀倒頻譜包絡到全句平均包絡的距離平均(變化 %,負值 = 往中性靠)
+(修訂 1 T10)另以 CHG「修訂 1 實測 (a)」的定義(幀分類同 worker:非靜音且 3 kHz 以上能量比為前 35% 為子音幀,
+其餘非靜音幀為母音幀):
+  母音「低−中高」= 母音幀在 125 / 250 / 500 Hz 八度帶的能量變化平均 − 1 k / 2 kHz 八度帶的能量變化平均(dB;正 = 悶)
+  非子音幀 ≥ 4 kHz = 母音幀 4 kHz 以上的總能量變化(dB;大幅負值 = 高頻被削)
 
 用法:python shape_metrics.py <命令> '<JSON 引數>'
 """
@@ -132,8 +136,43 @@ def clar(args):
     disp_o = np.mean(np.sqrt(((eo - eo[:, active].mean(1, keepdims=True))[:, act] ** 2).mean(0)))
     disp_z = np.mean(np.sqrt(((ez - ez[:, active].mean(1, keepdims=True))[:, act] ** 2).mean(0)))
     rms = 20 * np.log10(np.sqrt(np.mean(z ** 2)) / np.sqrt(np.mean(y ** 2)))
+    # 修訂 1:母音幀(原音分類,子音 = 前 35%)的「低−中高」與 4 kHz 以上變化
+    vow = act & ~(active & (hf >= np.percentile(hf[active], 100 - 35)))
+
+    def octs(S):
+        lv = (S[:, vow] ** 2).mean(1)
+        return np.array([10 * np.log10(lv[(freqs >= c / np.sqrt(2)) & (freqs < c * np.sqrt(2))].mean() + 1e-20)
+                         for c in (125, 250, 500, 1000, 2000)])
+
+    def v4k(S):
+        return 10 * np.log10((S[freqs >= 4000][:, vow] ** 2).sum() + 1e-20)
+
+    d = octs(Sz) - octs(So)
     return {"consonant_db": float(hf_db(Sz) - hf_db(So)), "dispersion_pct": float(100 * (disp_z / disp_o - 1)),
-            "rms_db": float(rms), "frames": int(mask.sum())}
+            "rms_db": float(rms), "frames": int(mask.sum()),
+            "vowel_lowmid_db": float(d[:3].mean() - d[3:].mean()), "nonconsonant_4k_db": float(v4k(Sz) - v4k(So))}
+
+
+def identity(args):
+    """clarity(y, sr, 100) 是否逐樣本等於輸入(修訂 1 T10)。"""
+    y, sr = _load(args["path"])
+    bw._load_numpy()
+    z = bw.clarity(y, sr, 100)
+    return {"same": bool(len(z) == len(y) and np.array_equal(z, y))}
+
+
+def timing(args):
+    """以 clarity(p) 處理整句的耗時(秒;不含 import,先暖機一次)。"""
+    import time
+    y, sr = _load(args["path"])
+    bw._load_numpy()
+    bw.clarity(y, sr, 50)
+    out = {}
+    for p in args["ps"]:
+        t = time.perf_counter()
+        bw.clarity(y, sr, p)
+        out[str(p)] = time.perf_counter() - t
+    return {"seconds": out, "len": len(y) / sr}
 
 
 def lowpass_calls(args):
@@ -197,4 +236,5 @@ def pitch(args):
 if __name__ == "__main__":
     cmd, arg = sys.argv[1], json.loads(sys.argv[2])
     print(json.dumps({"make": make, "silences": silences, "clar": clar, "lowpass_calls": lowpass_calls,
-                      "bounds": bounds, "same_outside": same_outside, "pitch": pitch}[cmd](arg)))
+                      "bounds": bounds, "same_outside": same_outside, "pitch": pitch, "identity": identity,
+                      "timing": timing}[cmd](arg)))

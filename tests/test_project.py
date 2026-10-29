@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -967,6 +968,66 @@ def test_is_post_fresh():
     assert not pj.is_post_fresh(pj.validate(data(segments=[seg()]))["segments"][0])
     with pytest.raises(pj.ProjectError):
         pj.post_key(ext["segments"][0])
+
+
+# ---------- CHG-20261029-01 修訂 1 T10:後製鍵演算法標記(R1-11) ----------
+
+# 以修訂前的公式(SHA-256(JSON 陣列 [audio.id, POST_VERSION, 裁切參數, connect, clarity, word_clarity,
+# pitch]),不附演算法標記)對下列片段算出的固定值;只有裁切、只有連音的片段修訂後必須仍是這個鍵。
+OLD_KEYS = {
+    "trim": "a5b2f459ffc3121aac89c686a3457996dea02d342f48af0170bfafa55fb331eb",
+    "connect50": "9ea0ec0dbbdf0067580762b11d4a3f5549948ce3f2d70f2d3db1fd46f75bcc96",
+    "clarity50": "e3084a4d56a48ee60d9b24dcf4f34269ad555d6bdbdee5deeb8b45fafcfdeffd",
+    "wc": "b821890912bbd68300bc293b7cd12f7163a28db8f29a10d102b8383b31264a4e",
+    "pitch": "1900fad4a3651feff3e23e72e326129316c6c5ee80760a6c9861f6da47d2243b",
+}
+
+
+def rev1_cases():
+    return {"trim": synth_seg(), "connect50": synth_seg(connect=50), "clarity50": synth_seg(clarity=50),
+            "wc": synth_seg(word_clarity=[wc(8, 10, 40)]), "pitch": synth_seg(pitch=pitch([(0, 0), (1, 1)]))}
+
+
+def test_演算法標記常數():
+    assert pj.POST_VERSION == 1
+    assert pj.POST_ALGO == {"clarity": 2, "pitch": 2}
+
+
+def test_只有裁切或連音的片段鍵與修訂前相同():
+    c = rev1_cases()
+    assert pj.post_key(c["trim"]) == OLD_KEYS["trim"]
+    assert pj.post_key(c["connect50"]) == OLD_KEYS["connect50"]
+    assert pj.post_key(synth_seg(connect=50, speed=1.5)) == OLD_KEYS["connect50"]     # 改語速仍不改鍵
+
+
+def test_有清晰度字詞清晰度或語調的片段鍵改變_修訂前的post過期():
+    for name in ("clarity50", "wc", "pitch"):
+        s = rev1_cases()[name]
+        k = pj.post_key(s)
+        assert k != OLD_KEYS[name], name
+        assert pj.KEY_RE.fullmatch(k)
+        old = OLD_KEYS[name]
+        stale = {**s, "post": {"id": old[:32], "key": old, "seconds": 2.0, "trim": 0.5}}
+        assert not pj.is_post_fresh(stale), name                         # 修訂前寫入的 post 失效
+        assert pj.is_post_fresh({**s, "post": {"id": k[:32], "key": k, "seconds": 2.0, "trim": 0.5}})
+    # 改語速仍不改鍵
+    assert pj.post_key(synth_seg(clarity=50, speed=1.5)) == pj.post_key(rev1_cases()["clarity50"])
+    assert pj.post_key(synth_seg(pitch=pitch([(0, 0), (1, 1)]), speed=0.8)) == pj.post_key(rev1_cases()["pitch"])
+
+
+def test_演算法標記只附用到的部分():
+    def key(parts):
+        return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    a = KEY_A[:32]
+    trim = dict(pj.TRIM_PARAMS)
+    pts = {"points": [[0.0, 0.0], [1.0, 1.0]], "roundness": 50}
+    assert pj.post_key(synth_seg(clarity=50)) == key([a, 1, trim, 0, 50, [], None, {"clarity": 2}])
+    assert pj.post_key(synth_seg(word_clarity=[wc(8, 10, 40)])) == key(
+        [a, 1, trim, 0, 100, [[8, 10, 40]], None, {"clarity": 2}])
+    assert pj.post_key(synth_seg(pitch=pitch([(0, 0), (1, 1)]))) == key([a, 1, trim, 0, 100, [], pts, {"pitch": 2}])
+    assert pj.post_key(synth_seg(clarity=50, pitch=pitch([(0, 0), (1, 1)]))) == key(
+        [a, 1, trim, 0, 50, [], pts, {"clarity": 2, "pitch": 2}])
+    assert pj.post_key(synth_seg(connect=30)) == key([a, 1, trim, 30, 100, [], None])
 
 
 # ---------- CHG-20261029-01 T7:片段合音 ----------
