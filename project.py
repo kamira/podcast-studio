@@ -32,8 +32,9 @@
                                  "roundness": null(= 50%)或 0~100 整數};2~16 點,pos 嚴格遞增
                     post         null 或 {"id": 後製檔 id, "key": 64 碼後製鍵, "seconds": 後製後長度(變速前),
                                  "trim": 裁掉的前後低音量秒數}(伺服器產生;PATCH 不接受)
-                    fusions      [{"index": 第一字索引, "zhuyin": 合音注音, "source": rule|lexicon|manual}]
-                                 (CHG-20261029-01 T7,D27)兩字都必須是漢字、互不重疊、每句 ≤ MAX_FUSIONS 組;
+                    fusions      [{"index": 起點字元索引, "length": 2~4, "zhuyin": 1~(length − 1) 個音節(半形空白分隔),
+                                  "source": rule|lexicon|manual}]
+                                 (CHG-20261029-01 T7,D27)範圍內都是漢字、互不重疊、每句 ≤ MAX_FUSIONS 組;
                                  合音範圍內不得有聲調標註;字詞清晰度區段必須完整包含或完全不含合音範圍
   images          畫面軌(≤ MAX_ASSETS 個):{"id", "asset": 圖片素材 id, "start": 秒, "end": null(到結尾)或秒}
   assets          素材(≤ MAX_ASSETS 個、合計 ≤ MAX_ASSET_BYTES):
@@ -129,6 +130,8 @@ SEMI_MIN, SEMI_MAX, SEMI_STEP = Decimal("-6"), Decimal("6"), Decimal("0.1")
 POS_STEP = Decimal("0.01")
 MAX_WORD_CLARITY = 32
 MAX_FUSIONS = 16
+FUSION_MIN, FUSION_MAX = 2, 4     # 合音字數(使用者 2026-10-29:不超過四字)
+MAX_DISMISSED = 32                # fusion_dismissed 每句上限(D41)
 FUSION_SOURCES = ("rule", "lexicon", "manual")
 POST_VERSION = 1
 # 裁切參數(D2):-40 dBFS 樣本峰值門檻、前後各留 30 ms、10 ms 淡入淡出
@@ -155,7 +158,8 @@ LINK_TRIES = 16
 
 TOP_KEYS = ("schema_version", "name", "script", "defaults", "segments", "images", "assets")
 SEGMENT_KEYS_V1 = ("id", "text", "break", "pause_after", "speed", "annotations", "audio")
-SEGMENT_KEYS = (*SEGMENT_KEYS_V1, "connect", "clarity", "word_clarity", "pitch", "post", "fusions")
+SEGMENT_KEYS = (*SEGMENT_KEYS_V1, "connect", "clarity", "word_clarity", "pitch", "post", "fusions",
+                "fusion_dismissed")
 POST_KEYS = ("id", "key", "seconds", "trim")
 IMAGE_KEYS = ("id", "asset", "start", "end")
 ASSET_KEYS = ("id", "kind", "ext", "bytes", "label")
@@ -401,7 +405,8 @@ def is_post_fresh(segment: dict) -> bool:
 
 
 def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> list[dict]:
-    """合音(D27):第一字索引 i、第二字 i + 1 都是漢字;不重疊;範圍內沒有聲調標註;字詞清晰度不切過。"""
+    """合音(D27):範圍 [index, index + length) 為 2~4 個漢字;zhuyin 為 1~(length − 1) 個音節(半形空白分隔);
+    各組不重疊;範圍內沒有聲調標註;字詞清晰度完整包含或完全不含合音範圍。"""
     if items is None:
         return []
     if not isinstance(items, list):
@@ -410,38 +415,88 @@ def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> l
         raise ProjectError(f"{where}.fusions 每句最多 {MAX_FUSIONS} 組")
     out = []
     for f in items:
-        if not isinstance(f, dict) or set(f) != {"index", "zhuyin", "source"}:
-            raise ProjectError(f"{where}.fusions 每項必須恰為 index、zhuyin、source 三個欄位")
-        i = f["index"]
-        if not _is_int(i) or not 0 <= i < len(text) - 1:
-            raise ProjectError(f"{where}.fusions 的位置超出句子範圍(合音需要相鄰兩字)")
-        if not (_is_hanzi(text[i]) and _is_hanzi(text[i + 1])):
-            raise ProjectError(f"{where}.fusions 只能合併相鄰的兩個漢字")
+        if not isinstance(f, dict) or set(f) != {"index", "length", "zhuyin", "source"}:
+            raise ProjectError(f"{where}.fusions 每項必須恰為 index、length、zhuyin、source 四個欄位")
+        i, n = f["index"], f["length"]
+        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX:
+            raise ProjectError(f"{where}.fusions 的字數必須是 {FUSION_MIN} 到 {FUSION_MAX}")
+        if not _is_int(i) or not 0 <= i or i + n > len(text):
+            raise ProjectError(f"{where}.fusions 的位置超出句子範圍")
+        if not all(_is_hanzi(c) for c in text[i:i + n]):
+            raise ProjectError(f"{where}.fusions 只能合併相鄰的漢字")
         if f["source"] not in FUSION_SOURCES:
             raise ProjectError(f"{where}.fusions 的來源只能是 rule、lexicon、manual")
-        try:
-            z = check_zhuyin(f["zhuyin"])
-        except ProjectError as e:
-            raise ProjectError(f"{where}:合音{e.errors[0]}") from None
-        out.append({"index": i, "zhuyin": z, "source": f["source"]})
+        z = f["zhuyin"]
+        parts = z.split(" ") if isinstance(z, str) else []
+        if not 1 <= len(parts) <= n - 1:
+            raise ProjectError(f"{where}:合音注音的音節數必須少於字數(1 到 {n - 1} 個,以半形空白分隔)")
+        for part in parts:
+            try:
+                check_zhuyin(part)
+            except ProjectError as e:
+                raise ProjectError(f"{where}:合音{e.errors[0]}") from None
+        out.append({"index": i, "length": n, "zhuyin": z, "source": f["source"]})
     out.sort(key=lambda x: x["index"])
-    if any(b["index"] <= a["index"] + 1 for a, b in zip(out, out[1:])):
+    if any(b["index"] < a["index"] + a["length"] for a, b in zip(out, out[1:])):
         raise ProjectError(f"{where}.fusions 的範圍不可重疊")
     marked = {a["index"] for a in annotations or []}
     for f in out:
-        span = {f["index"], f["index"] + 1}
+        span = set(range(f["index"], f["index"] + f["length"]))
         if span & marked:
             raise ProjectError(f"{where}:合音範圍內有聲調標註,請先清除該字的念法")
         for w in word_clarity or []:
             inside = [w["start"] <= k < w["end"] for k in span]
             if any(inside) and not all(inside):
-                raise ProjectError(f"{where}:字詞清晰度的範圍必須完整包含或完全不含合音的兩個字")
+                raise ProjectError(f"{where}:字詞清晰度的範圍必須完整包含或完全不含合音的字")
+    return out
+
+
+def _check_dismissed(text: str, items, where: str) -> list[dict]:
+    """關閉合音提示的位置(D41):[{"index", "length": 2~4}],範圍在句內,每句 ≤ MAX_DISMISSED 筆。"""
+    if items is None:
+        return []
+    if not isinstance(items, list) or len(items) > MAX_DISMISSED:
+        raise ProjectError(f"{where}.fusion_dismissed 必須是最多 {MAX_DISMISSED} 筆的陣列")
+    out = []
+    for d in items:
+        if not isinstance(d, dict) or set(d) != {"index", "length"}:
+            raise ProjectError(f"{where}.fusion_dismissed 每項必須恰為 index、length 兩個欄位")
+        i, n = d["index"], d["length"]
+        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX or not _is_int(i) or i < 0 or i + n > len(text):
+            raise ProjectError(f"{where}.fusion_dismissed 的範圍超出句子")
+        if {"index": i, "length": n} not in out:
+            out.append({"index": i, "length": n})
+    return sorted(out, key=lambda x: (x["index"], x["length"]))
+
+
+def shift_dismissed(old: str, new: str, items) -> list[dict]:
+    """句子文字由 old 改成 new 時調整關閉紀錄(D41):改動範圍之前的保留、之後的依位移調整、
+    與改動範圍重疊者刪除。改動範圍以共同前綴與共同後綴求出。"""
+    p = 0
+    while p < min(len(old), len(new)) and old[p] == new[p]:
+        p += 1
+    q = 0
+    while q < min(len(old), len(new)) - p and old[len(old) - 1 - q] == new[len(new) - 1 - q]:
+        q += 1
+    a, b = p, len(old) - q          # 舊文字中被改動的範圍 [a, b)
+    delta = len(new) - len(old)
+    out = []
+    for d in items or []:
+        i, n = d["index"], d["length"]
+        if i + n <= a:
+            out.append({"index": i, "length": n})
+        elif i >= b and (a < b or i >= a):
+            out.append({"index": i + delta, "length": n})
     return out
 
 
 def fused_out(segment) -> set:
-    """合音刪去的第二字索引(送模型時不念)。"""
-    return {f["index"] + 1 for f in segment.get("fusions") or []}
+    """合音刪去的字索引(送模型時不念;n 字合成 k 個音節時刪去後 n − k 字)。"""
+    out = set()
+    for f in segment.get("fusions") or []:
+        k = len(f["zhuyin"].split(" "))
+        out |= set(range(f["index"] + k, f["index"] + f["length"]))
+    return out
 
 
 # ---------- 分句與合成文字 ----------
@@ -517,13 +572,19 @@ def tts_text(segment) -> str:
         raise ProjectError("片段文字是空的")
     checked = _check_annotations(text, segment.get("annotations"), "片段")
     anns = {a["index"]: a["zhuyin"] for a in checked}
-    fus = {f["index"]: f["zhuyin"] for f in _check_fusions(text, segment.get("fusions"), checked,
-                                                          segment.get("word_clarity"), "片段")}
-    skip = {i + 1 for i in fus}
+    fus = {}   # 字元索引 → 該字帶的合音音節;合音範圍內其餘字不送模型(D26)
+    skip = set()
+    for f in _check_fusions(text, segment.get("fusions"), checked, segment.get("word_clarity"), "片段"):
+        parts = f["zhuyin"].split(" ")
+        for j in range(f["length"]):
+            if j < len(parts):
+                fus[f["index"] + j] = parts[j]
+            else:
+                skip.add(f["index"] + j)
     out = []
     for i, ch in enumerate(escape_text(text)):
         if i in skip:
-            continue   # 合音的第二字不送模型(D26)
+            continue
         out.append(ch)
         if i in fus:
             out.append(f"[:{fus[i]}]")
@@ -644,6 +705,7 @@ def _validate_segment(s, where, errors, seen, version: int = SCHEMA_VERSION) -> 
                               out["word_clarity"], where)
     else:
         out["fusions"] = []
+    out["fusion_dismissed"] = _try(errors, _check_dismissed, text, s.get("fusion_dismissed"), where)
     if len(errors) != n_err:
         ok = False
     return out if ok else None
@@ -1162,7 +1224,7 @@ def create(name, script: str = "", defaults: dict | None = None) -> Project:
                    segments=[{"id": new_id(), "text": p["text"], "break": p["break"], "pause_after": None,
                               "speed": None, "annotations": [], "audio": None, "connect": None,
                               "clarity": None, "word_clarity": [], "pitch": None, "post": None,
-                              "fusions": []}
+                              "fusions": [], "fusion_dismissed": []}
                              for p in pieces])
     proj = Project.from_dict(proj.to_dict())
     with safe_fs.closing(_root_fd(create=True)) as rfd:

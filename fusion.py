@@ -9,9 +9,15 @@
   join_zhuyin(聲母, 介音, 韻母, 聲調) -> str      輕聲寫在前(˙ㄇㄣ,同 G2PW 輸出)
   fuse(a, b) -> (zhuyin | None, reason)        依 D24 規則與 D25 合法化表;不合音時 zhuyin 為 None、reason 為原因
   explain(a, b) -> {"zhuyin", "reason", "raw"}  另附合法化前的音節(彈出框顯示推導)
-  suggest(text, zhuyins, lexicon) -> [{"index", "zhuyin", "source": "lexicon"}]
-                                               句中出現在詞庫(啟用者)的相鄰兩字(由左到右、不重疊);
-                                               zhuyins(逐字注音,可為 None)中任一字沒有注音的位置略過
+  suggest(text, zhuyins, lexicon, exclude=()) -> [{"index", "length", "zhuyin", "source": "lexicon"}]
+                                               句中出現在詞庫(啟用者)的 2~4 字詞;依「字數多到字數少」
+                                               (4 字 → 3 字 → 2 字)、每層由左至右、不重疊(D24、D38);
+                                               exclude 為不再提示的字元索引(已套用合音、聲調標註、關閉紀錄)
+  pair_options(chars, zhuyins, lexicon) -> [{"offset", "length", "zhuyin", "source", "reason"}]
+                                               3~4 字選取不在詞庫時的候選(D37):4 字選取先列其中的 3 字詞庫詞,
+                                               再列每一對相鄰兩字(詞庫值優先,其次規則結果,不合法者 zhuyin 為 None)
+  combine(zhuyins, option) -> str               選取範圍的合音注音:其餘字維持原讀音,option 範圍換成它的音節
+  syllables(z) / is_fusion_zhuyin(z, n)        合音注音以半形空白分隔多個音節;n 字的合音必須是 1~n−1 個音節
   is_syllable(z) -> bool                        單一合法音節(聲母與介音組合依合法化表檢查;聲調組合不檢查)
 
 規則(D24):聲母取 A(A 零聲母則無);介音取 B,A 零聲母且 B 無介音時取 A;韻母取 B;聲調取 B,B 為輕聲時取 A。
@@ -133,17 +139,79 @@ def fuse(a, b) -> tuple[str | None, str]:
     return r["zhuyin"], r["reason"]
 
 
-def suggest(text: str, zhuyins, lexicon: dict) -> list[dict]:
-    """句中出現在詞庫的相鄰兩字(由左到右、不重疊);lexicon 為 {兩字詞: 合音注音}(只含啟用者)。"""
-    out, i = [], 0
+MIN_CHARS, MAX_CHARS = 2, 4
+
+
+def syllables(z) -> list[str]:
+    return z.split(" ") if isinstance(z, str) and z else []
+
+
+def is_fusion_zhuyin(z, n: int) -> bool:
+    """n 字合音的注音:1~n−1 個以單一半形空白分隔的合法音節(D31)。"""
+    parts = syllables(z)
+    return 1 <= len(parts) <= n - 1 and all(is_syllable(p) for p in parts)
+
+
+def suggest(text: str, zhuyins, lexicon: dict, exclude=()) -> list[dict]:
+    """句中出現在詞庫(啟用者)的 2~4 字詞:4 字 → 3 字 → 2 字,每層由左至右、不重疊(D24、D38)。
+
+    lexicon 為 {詞: 合音注音};zhuyins(逐字注音,可為 None)中有字沒有注音的範圍略過;exclude 為不提示的字元索引。"""
     chars = list(text or "")
-    while i < len(chars) - 1:
-        word = chars[i] + chars[i + 1]
-        z = (lexicon or {}).get(word)
-        known = zhuyins is None or (i + 1 < len(zhuyins) and zhuyins[i] and zhuyins[i + 1])
-        if z and is_hanzi(chars[i]) and is_hanzi(chars[i + 1]) and known:
-            out.append({"index": i, "zhuyin": z, "source": "lexicon"})
-            i += 2
+    used = set(exclude or ())
+    out = []
+    for n in range(MAX_CHARS, MIN_CHARS - 1, -1):
+        i = 0
+        while i <= len(chars) - n:
+            span = range(i, i + n)
+            word = "".join(chars[i:i + n])
+            z = (lexicon or {}).get(word)
+            known = zhuyins is None or all(k < len(zhuyins) and zhuyins[k] for k in span)
+            if z and known and all(is_hanzi(chars[k]) for k in span) and not used & set(span):
+                out.append({"index": i, "length": n, "zhuyin": z, "source": "lexicon"})
+                used |= set(span)
+                i += n
+                continue
+            i += 1
+    return sorted(out, key=lambda x: x["index"])
+
+
+def pair_options(chars, zhuyins, lexicon: dict) -> list[dict]:
+    """3~4 字選取的候選(D37):4 字時先列其中的 3 字詞庫詞,再列每一對相鄰兩字。
+
+    每項 {"offset", "length", "zhuyin": 該範圍的合音注音或 None, "source": lexicon | rule | None, "reason"}。"""
+    chars = list(chars)
+    lex = lexicon or {}
+    out = []
+    if len(chars) == 4:
+        for o in (0, 1):
+            z = lex.get("".join(chars[o:o + 3]))
+            if z:
+                out.append({"offset": o, "length": 3, "zhuyin": z, "source": "lexicon", "reason": "詞庫"})
+    for o in range(len(chars) - 1):
+        z = lex.get("".join(chars[o:o + 2]))
+        if z:
+            out.append({"offset": o, "length": 2, "zhuyin": z, "source": "lexicon", "reason": "詞庫"})
             continue
-        i += 1
+        a = zhuyins[o] if zhuyins and o < len(zhuyins) else None
+        b = zhuyins[o + 1] if zhuyins and o + 1 < len(zhuyins) else None
+        r = explain(a, b) if a and b else {"zhuyin": None, "reason": "缺少這兩個字的注音"}
+        out.append({"offset": o, "length": 2, "zhuyin": r["zhuyin"], "source": "rule" if r["zhuyin"] else None,
+                    "reason": r["reason"]})
     return out
+
+
+def default_option(options: list) -> int | None:
+    """D37 預設:3 字詞庫詞 → 兩字詞庫值 → 第一對合法的規則結果;都沒有回 None。"""
+    for pick in (lambda o: o["length"] == 3, lambda o: o["source"] == "lexicon", lambda o: o["zhuyin"]):
+        for k, o in enumerate(options):
+            if o["zhuyin"] and pick(o):
+                return k
+    return None
+
+
+def combine(zhuyins, option: dict) -> str | None:
+    """選取範圍的合音注音:option 範圍換成它的音節,其餘字維持原讀音;有字沒有注音回 None。"""
+    o, m = option["offset"], option["length"]
+    if not option.get("zhuyin") or any(not z for k, z in enumerate(zhuyins) if not o <= k < o + m):
+        return None
+    return " ".join([*zhuyins[:o], *syllables(option["zhuyin"]), *zhuyins[o + m:]])
