@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合音輸入原型</title>
+<style>
+/* CHG-20261029-01 合音輸入原型:純 HTML / CSS / JS,不引外部資源。只用於驗證可行性,不是產品程式。 */
+:root { --fg:#1f2328; --muted:#5d6673; --line:#d0d5dd; --bg:#f6f7f9; --panel:#fff; --accent:#2f6fdd;
+  --pending:#e0b000; --on:#2e9e5b; --off:#c93c37; }
+* { box-sizing:border-box; }
+body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif; font-size:14px; }
+h1 { font-size:18px; margin:0 0 4px; }
+p.note { margin:0 0 12px; color:var(--muted); }
+.cols { display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:16px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; display:grid; gap:8px; align-content:start; }
+.card h2 { font-size:15px; margin:0; }
+.legend { font-size:12px; color:var(--muted); display:flex; flex-wrap:wrap; gap:12px; line-height:2.2; margin-bottom:8px; }
+.legend .lg { font-size:14px; }
+.lg { text-decoration-line:underline; text-decoration-style:wavy; text-decoration-thickness:2px; text-underline-offset:4px; color:var(--fg); }
+.lg.pending { text-decoration-color:var(--pending); } .lg.on { text-decoration-color:var(--on); } .lg.off { text-decoration-color:var(--off); }
+.status { font-size:12px; color:var(--muted); min-height:1.4em; }
+/* 兩個編輯器共用的文字排版 */
+.ed-text { font-family:inherit; font-size:16px; line-height:1.9; padding:8px 10px; border:1px solid var(--line); border-radius:6px;
+  white-space:pre-wrap; overflow-wrap:break-word; word-break:normal; letter-spacing:0; tab-size:4; }
+/* (A) textarea + 上方標記層 */
+.wrap { position:relative; }
+.wrap textarea { display:block; width:100%; height:180px; resize:vertical; margin:0; background:var(--panel); color:var(--fg); outline:none; overflow-y:auto; }
+.wrap textarea:focus { border-color:var(--accent); }
+.mirror { position:absolute; top:0; left:0; pointer-events:none; overflow:hidden; color:transparent; border-color:transparent; background:transparent; }
+.mirror .mk { text-decoration-line:underline; text-decoration-style:wavy; text-decoration-thickness:2px; text-underline-offset:4px; }
+.mk.pending { text-decoration-color:var(--pending); } .mk.on { text-decoration-color:var(--on); } .mk.off { text-decoration-color:var(--off); }
+/* (B) contenteditable + 疊加層 */
+.ce { min-height:180px; max-height:180px; overflow-y:auto; outline:none; background:var(--panel); }
+.ce:focus { border-color:var(--accent); }
+.overlay { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.uline { position:absolute; height:5px; background-repeat:repeat-x; background-size:8px 5px; }
+.uline.pending { background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 3.5 Q2 0.5 4 3.5 T8 3.5' fill='none' stroke='%23e0b000' stroke-width='1.6'/%3E%3C/svg%3E"); }
+.uline.on { background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 3.5 Q2 0.5 4 3.5 T8 3.5' fill='none' stroke='%232e9e5b' stroke-width='1.6'/%3E%3C/svg%3E"); }
+.uline.off { background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 3.5 Q2 0.5 4 3.5 T8 3.5' fill='none' stroke='%23c93c37' stroke-width='1.6'/%3E%3C/svg%3E"); }
+/* 啟用後的常駐浮層(兩種做法共用) */
+.pill { position:absolute; pointer-events:auto; cursor:pointer; display:flex; align-items:center; justify-content:center;
+  background:#e3f5ea; border:1px solid var(--on); border-radius:5px; color:#1e6b3e; font-weight:600; font-size:15px;
+  box-shadow:0 1px 3px rgba(0,0,0,.15); overflow:hidden; white-space:nowrap; z-index:2; }
+/* 浮動窗 */
+.pop { position:absolute; z-index:5; background:var(--panel); border:1px solid #b7cdf3; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.16);
+  padding:8px 10px; display:grid; gap:6px; min-width:180px; }
+.pop[hidden] { display:none; }
+.pop .row { display:flex; gap:6px; }
+.pop button { font:inherit; font-size:12px; padding:2px 10px; border-radius:6px; border:1px solid var(--line); background:var(--panel); cursor:pointer; }
+.pop .b-on { border-color:var(--on); color:#1e6b3e; } .pop .b-off { border-color:var(--off); color:#a12e2a; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg:#e6e8eb; --muted:#a2a9b3; --line:#3b424c; --bg:#16191d; --panel:#1f2328; --accent:#6ea0ff; --pending:#ffd23f; --on:#4cd08a; --off:#ff6b62; }
+  .pill { background:#1f3b2b; color:#a8f0c6; }
+  .pop { border-color:#3b5b8f; }
+}
+</style>
+</head>
+<body>
+<h1>合音輸入原型(兩種做法並排)</h1>
+<p class="note">在框內輸入含「這樣」「不知道」「是這樣」「什麼」的文字:可合音的字詞下方出現黃色波浪底線;點擊該詞開啟浮動窗,選「啟用」變綠色並以浮層顯示合音詞遮住原詞(點浮層可再改),選「停用」變紅色。比對由字數多到字數少、不重疊。</p>
+<div class="legend"><span class="lg pending">黃色</span>可合音(未決定) <span class="lg on">綠色</span>已啟用 <span class="lg off">紅色</span>已停用</div>
+<div class="cols">
+  <section class="card" id="card-a">
+    <h2>做法 A:textarea + 上方標記層</h2>
+    <div class="wrap" id="wrap-a">
+      <textarea id="ta" class="ed-text" spellcheck="false" aria-label="做法 A 文稿"></textarea>
+      <div class="mirror ed-text" id="mirror" aria-hidden="true"></div>
+    </div>
+    <div class="status" id="status-a"></div>
+  </section>
+  <section class="card" id="card-b">
+    <h2>做法 B:contenteditable + 疊加層</h2>
+    <div class="wrap" id="wrap-b">
+      <div id="ce" class="ce ed-text" contenteditable="plaintext-only" spellcheck="false" role="textbox" aria-multiline="true" aria-label="做法 B 文稿"></div>
+      <div class="overlay" id="overlay-b" aria-hidden="true"></div>
+    </div>
+    <div class="status" id="status-b"></div>
+  </section>
+</div>
+<div class="pop" id="pop" hidden>
+  <div id="pop-title"></div>
+  <div class="row"><button type="button" class="b-on" id="pop-on">啟用</button><button type="button" class="b-off" id="pop-off">停用</button></div>
+</div>
+<script>
+"use strict";
+// ---------- 共用:詞庫、比對、狀態位移 ----------
+const LEXICON = {
+  "這樣": { z: "ㄐㄧㄤˋ", d: "醬" },
+  "知道": { z: "ㄗㄠˋ", d: "造" },
+  "什麼": { z: "ㄕㄚˊ", d: "啥" },
+  "不知道": { z: "ㄅㄨˋ ㄗㄠˋ", d: "不造" },
+  "是這樣": { z: "ㄕˋ ㄐㄧㄤˋ", d: "是醬" },
+};
+const HAN = /^[㐀-䶿一-鿿]+$/;
+
+/** 字數多優先(4 → 3 → 2)、每層由左至右最長匹配、不重疊。回傳 [{start, len, word}] 依起點排序。 */
+function findMatches(text) {
+  const used = new Uint8Array(text.length);
+  const out = [];
+  for (let len = 4; len >= 2; len--) {
+    for (let i = 0; i + len <= text.length; i++) {
+      const w = text.slice(i, i + len);
+      if (!LEXICON[w] || !HAN.test(w)) continue;
+      let free = true;
+      for (let k = i; k < i + len; k++) if (used[k]) { free = false; break; }
+      if (!free) continue;
+      for (let k = i; k < i + len; k++) used[k] = 1;
+      out.push({ start: i, len: len, word: w });
+      i += len - 1;
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+/** 文字改變時調整已決定的狀態:改動範圍之前不動、之後位移、重疊者清除。 */
+function shiftDecided(decided, oldText, newText) {
+  let p = 0;
+  const minLen = Math.min(oldText.length, newText.length);
+  while (p < minLen && oldText[p] === newText[p]) p++;
+  let s = 0;
+  while (s < minLen - p && oldText[oldText.length - 1 - s] === newText[newText.length - 1 - s]) s++;
+  const oldEnd = oldText.length - s, delta = newText.length - oldText.length;
+  const out = [];
+  for (const d of decided) {
+    const end = d.start + d.len;
+    if (end <= p) out.push(d);
+    else if (d.start >= oldEnd) out.push({ start: d.start + delta, len: d.len, state: d.state });
+    // 其餘與改動範圍重疊:清除(回到未決定)
+  }
+  return out;
+}
+
+class FusionModel {
+  constructor() { this.text = ""; this.decided = []; this.recomputes = 0; }
+  update(newText) {
+    this.decided = shiftDecided(this.decided, this.text, newText);
+    this.text = newText;
+    this.recomputes++;
+  }
+  marks() {
+    const m = findMatches(this.text);
+    return m.map((x) => {
+      const d = this.decided.find((y) => y.start === x.start && y.len === x.len);
+      return { start: x.start, len: x.len, word: x.word, state: d ? d.state : "pending",
+               zhuyin: LEXICON[x.word].z, display: LEXICON[x.word].d };
+    });
+  }
+  set(start, len, state) {
+    this.decided = this.decided.filter((d) => !(d.start === start && d.len === len));
+    this.decided.push({ start: start, len: len, state: state });
+  }
+  at(pos) { return this.marks().find((m) => pos >= m.start && pos <= m.start + m.len) || null; }
+}
+
+const pop = document.getElementById("pop");
+let popTarget = null;
+function openPop(editor, mark, rect) {
+  popTarget = { editor: editor, mark: mark };
+  document.getElementById("pop-title").textContent = mark.word + " → " + mark.zhuyin;
+  pop.hidden = false;
+  pop.style.left = (rect.left + window.scrollX) + "px";
+  pop.style.top = (rect.bottom + window.scrollY + 8) + "px";
+}
+function closePop() { pop.hidden = true; popTarget = null; }
+document.getElementById("pop-on").addEventListener("click", () => {
+  if (!popTarget) return;
+  popTarget.editor.model.set(popTarget.mark.start, popTarget.mark.len, "on");
+  const ed = popTarget.editor; closePop(); ed.render();
+});
+document.getElementById("pop-off").addEventListener("click", () => {
+  if (!popTarget) return;
+  popTarget.editor.model.set(popTarget.mark.start, popTarget.mark.len, "off");
+  const ed = popTarget.editor; closePop(); ed.render();
+});
+document.addEventListener("mousedown", (e) => {
+  if (!pop.hidden && !pop.contains(e.target) && !(e.target.classList && e.target.classList.contains("pill"))) closePop();
+});
+
+function makePill(container, rect, base, mark, editor) {
+  const pill = document.createElement("div");
+  pill.className = "pill";
+  pill.textContent = mark.display;
+  pill.dataset.start = String(mark.start);
+  pill.style.left = (rect.left - base.left - 2) + "px";
+  pill.style.top = (rect.top - base.top - 1) + "px";
+  pill.style.width = (rect.width + 4) + "px";
+  pill.style.height = (rect.height + 2) + "px";
+  pill.addEventListener("mousedown", (e) => e.preventDefault());   // 不搶文字框的游標
+  pill.addEventListener("click", (e) => { e.stopPropagation(); openPop(editor, mark, pill.getBoundingClientRect()); });
+  container.appendChild(pill);
+  return pill;
+}
+
+function statusText(model) {
+  const m = model.marks();
+  const c = { pending: 0, on: 0, off: 0 };
+  m.forEach((x) => c[x.state]++);
+  return "黃 " + c.pending + "、綠 " + c.on + "、紅 " + c.off + "(重算 " + model.recomputes + " 次)";
+}
+
+// ---------- 做法 A:textarea + 上方標記層 ----------
+const editorA = {
+  model: new FusionModel(),
+  ta: document.getElementById("ta"),
+  mirror: document.getElementById("mirror"),
+  composing: false,
+  init() {
+    const ta = this.ta;
+    ta.addEventListener("compositionstart", () => { this.composing = true; });
+    ta.addEventListener("compositionend", () => { this.composing = false; this.sync(); });
+    ta.addEventListener("input", () => { if (!this.composing) this.sync(); });
+    ta.addEventListener("scroll", () => { this.mirror.scrollTop = ta.scrollTop; this.mirror.scrollLeft = ta.scrollLeft; });
+    ta.addEventListener("click", () => {
+      if (ta.selectionStart !== ta.selectionEnd) return;
+      const mark = this.model.at(ta.selectionStart);
+      if (!mark || mark.state === "on") return;
+      const span = this.mirror.querySelector('.mk[data-start="' + mark.start + '"]');
+      if (span) openPop(this, mark, span.getBoundingClientRect());
+    });
+    new ResizeObserver(() => this.render()).observe(ta);
+    this.sync();
+  },
+  sync() { this.model.update(this.ta.value); this.render(); },
+  render() {
+    const ta = this.ta, mirror = this.mirror, text = this.model.text;
+    // 鏡像層與 textarea 同寬(扣掉捲軸),同捲動
+    mirror.style.width = (ta.clientWidth + ta.clientLeft * 2) + "px";   // 扣掉捲軸寬度,換行寬度才會一致
+    mirror.style.height = ta.offsetHeight + "px";
+    mirror.textContent = "";
+    let pos = 0;
+    const marks = this.model.marks();
+    for (const m of marks) {
+      if (m.start > pos) mirror.appendChild(document.createTextNode(text.slice(pos, m.start)));
+      const sp = document.createElement("span");
+      sp.className = "mk " + m.state;
+      sp.dataset.start = String(m.start);
+      sp.textContent = text.slice(m.start, m.start + m.len);
+      mirror.appendChild(sp);
+      pos = m.start + m.len;
+    }
+    mirror.appendChild(document.createTextNode(text.slice(pos) + "\n"));
+    mirror.scrollTop = ta.scrollTop;
+    // 浮層:放在 wrap 內、textarea 上方
+    const wrap = document.getElementById("wrap-a");
+    wrap.querySelectorAll(".pill").forEach((p) => p.remove());
+    const base = wrap.getBoundingClientRect();
+    const taRect = ta.getBoundingClientRect();
+    for (const m of marks) {
+      if (m.state !== "on") continue;
+      const span = mirror.querySelector('.mk[data-start="' + m.start + '"]');
+      const rects = span.getClientRects();
+      if (!rects.length) continue;
+      const r = rects[0];
+      if (r.bottom < taRect.top || r.top > taRect.bottom) continue;   // 捲出可視範圍則不顯示
+      makePill(wrap, r, base, m, this);
+    }
+    document.getElementById("status-a").textContent = statusText(this.model);
+  },
+  markRect(start) {
+    const span = this.mirror.querySelector('.mk[data-start="' + start + '"]');
+    return span ? span.getBoundingClientRect().toJSON() : null;
+  },
+};
+
+// ---------- 做法 B:contenteditable + 疊加層 ----------
+const editorB = {
+  model: new FusionModel(),
+  ce: document.getElementById("ce"),
+  overlay: document.getElementById("overlay-b"),
+  composing: false,
+  init() {
+    const ce = this.ce;
+    ce.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); document.execCommand("insertText", false, "\n"); }
+    });
+    ce.addEventListener("compositionstart", () => { this.composing = true; });
+    ce.addEventListener("compositionend", () => { this.composing = false; this.sync(); });
+    ce.addEventListener("input", () => { if (!this.composing) this.sync(); });
+    ce.addEventListener("scroll", () => this.render());
+    ce.addEventListener("click", () => {
+      const off = this.caretOffset();
+      if (off === null) return;
+      const mark = this.model.at(off);
+      if (!mark || mark.state === "on") return;
+      const r = this.rangeFor(mark.start, mark.len);
+      if (r) openPop(this, mark, r.getBoundingClientRect());
+    });
+    new ResizeObserver(() => this.render()).observe(ce);
+    this.sync();
+  },
+  // 瀏覽器在 contenteditable 內可能產生文字節點、<br> 或每行一個 <div>;
+  // pieces() 把 DOM 攤平成「文字片段 / 虛擬換行」序列,text() 與 locate() 共用同一套計數。
+  pieces() {
+    const out = [];
+    let last = "";
+    const push = (p) => { out.push(p); if (p.text) last = p.text; };
+    const walk = (n) => {
+      for (const c of n.childNodes) {
+        if (c.nodeType === 3) push({ node: c, text: c.data });
+        else if (c.nodeName === "BR") push({ node: null, text: "\n", br: c });
+        else {
+          if (c.nodeName === "DIV" && out.length && !last.endsWith("\n")) push({ node: null, text: "\n", before: c });
+          walk(c);
+        }
+      }
+    };
+    walk(this.ce);
+    return out;
+  },
+  text() { return this.pieces().map((p) => p.text).join(""); },
+  locate(offset) {
+    let remain = offset;
+    const ps = this.pieces();
+    for (let i = 0; i < ps.length; i++) {
+      const p = ps[i];
+      if (p.node) {
+        if (remain <= p.text.length) return { node: p.node, offset: remain };
+        remain -= p.text.length;
+      } else {
+        if (remain === 0) {
+          // 位置在虛擬換行之前:落在下一個文字節點開頭或該元素之前
+          const next = ps.slice(i + 1).find((q) => q.node);
+          if (next && !p.br) return { node: next.node, offset: 0 };
+          const el = p.br || p.before;
+          return { node: el.parentNode, offset: Array.prototype.indexOf.call(el.parentNode.childNodes, el) };
+        }
+        remain -= 1;
+      }
+    }
+    if (remain === 0) return { node: this.ce, offset: this.ce.childNodes.length };
+    return null;
+  },
+  rangeFor(start, len) {
+    const a = this.locate(start), b = this.locate(start + len);
+    if (!a || !b) return null;
+    const r = document.createRange();
+    r.setStart(a.node, a.offset); r.setEnd(b.node, b.offset);
+    return r;
+  },
+  caretOffset() {
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !sel.isCollapsed || !this.ce.contains(sel.anchorNode)) return null;
+    const an = sel.anchorNode, ao = sel.anchorOffset;
+    const at = document.createRange();
+    at.setStart(an, ao); at.collapse(true);
+    let n = 0;
+    for (const p of this.pieces()) {
+      if (p.node === an) return n + ao;
+      const el = p.node || p.br || p.before;
+      if (at.comparePoint(el, 0) > 0) return n;   // 游標在這一片之前
+      n += p.text.length;
+    }
+    return n;
+  },
+  sync() { this.model.update(this.text()); this.render(); },
+  render() {
+    const ov = this.overlay, wrap = document.getElementById("wrap-b");
+    ov.textContent = "";
+    wrap.querySelectorAll(".pill").forEach((p) => p.remove());
+    const base = wrap.getBoundingClientRect(), ceRect = this.ce.getBoundingClientRect();
+    for (const m of this.model.marks()) {
+      const r = this.rangeFor(m.start, m.len);
+      if (!r) continue;
+      const rects = Array.from(r.getClientRects()).filter((x) => x.width > 0);
+      for (const x of rects) {
+        if (x.bottom < ceRect.top || x.top > ceRect.bottom) continue;
+        const u = document.createElement("div");
+        u.className = "uline " + m.state;
+        u.dataset.start = String(m.start);
+        u.style.left = (x.left - base.left) + "px";
+        u.style.top = (x.bottom - base.top - 1) + "px";
+        u.style.width = x.width + "px";
+        ov.appendChild(u);
+      }
+      if (m.state === "on" && rects.length) {
+        const x = rects[0];
+        if (!(x.bottom < ceRect.top || x.top > ceRect.bottom)) makePill(wrap, x, base, m, this);
+      }
+    }
+    document.getElementById("status-b").textContent = statusText(this.model);
+  },
+  markRect(start) {
+    const m = this.model.marks().find((x) => x.start === start);
+    if (!m) return null;
+    const r = this.rangeFor(m.start, m.len);
+    return r ? r.getBoundingClientRect().toJSON() : null;
+  },
+};
+
+editorA.init();
+editorB.init();
+window.proto = { A: editorA, B: editorB, findMatches: findMatches, shiftDecided: shiftDecided };
+</script>
+</body>
+</html>
