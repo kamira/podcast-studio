@@ -138,6 +138,7 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 .license-table th { background:var(--bg); }
 .import-box { border:1px dashed var(--accent); border-radius:8px; padding:10px 12px; display:grid; gap:6px; background:#f7faff; }
 .import-box p { margin:0; }
+.diff-upd .plain { font-weight:normal; }
 .limit-row { display:flex; gap:16px; align-items:center; padding:6px 10px; border:1px solid var(--line); border-radius:6px; }
 .limit-row label { display:flex; gap:6px; align-items:center; }
 .reject-box { border:1px solid #7a828c; border-left:4px solid #7a828c; background:rgba(120,128,140,.12); border-radius:6px; padding:6px 10px; display:grid; gap:2px; }
@@ -251,7 +252,7 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
     <h4 class="prop-section">聲調、字詞清晰度與合音</h4>
     <div class="seg-toggle"><button class="btn tiny">念法</button><button class="btn tiny">清晰度</button><button class="btn tiny is-on">合音</button></div>
     <div class="tone-chars"><span class="tone-char is-clickable"><span class="tone-glyph">我</span><span class="tone-zhuyin">ㄨㄛˇ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">也</span><span class="tone-zhuyin">ㄧㄝˇ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">不</span><span class="tone-zhuyin">ㄅㄨˋ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">知</span><span class="tone-zhuyin">ㄓ</span></span><span class="tone-char is-clickable is-fused"><span class="tone-glyph">道</span><span class="tone-zhuyin">ㄉㄠˋ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">，</span><span class="tone-zhuyin"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">反</span><span class="tone-zhuyin">ㄈㄢˇ</span></span><span class="tone-char is-clickable"><span class="tone-glyph">正</span><span class="tone-zhuyin">ㄓㄥˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">就</span><span class="tone-zhuyin">ㄐㄧㄡˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">是</span><span class="tone-zhuyin">ㄕˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">這</span><span class="tone-zhuyin">ㄓㄜˋ</span></span><span class="tone-char is-clickable is-picked"><span class="tone-glyph">樣</span><span class="tone-zhuyin">ㄧㄤˋ</span></span></div>
-    <p class="prop-hint">合音模式:拖曳選取相鄰 2~4 字;詞庫有該詞用詞庫值,兩字無詞庫時依「第一字聲母 + 第二字韻母與聲調」合成,3~4 字時選一對相鄰兩字合併;另外在輸入文字時,含詞庫合音詞會跳出浮動窗提示(見輸入示意)</p>
+    <p class="prop-hint">合音模式:拖曳選取相鄰 2~4 字;詞庫有該詞用詞庫值,兩字無詞庫時依「第一字聲母 + 第二字韻母與聲調」合成,3~4 字時選一對相鄰兩字合併;另外在文稿編輯時,可合音的詞下方有黃色波浪底線,點擊後在浮動窗選啟用或停用(見輸入示意)</p>
     <div class="prop-row"><span class="prop-label">已套用</span><span class="chip">不知道 → ㄅㄨˋ ㄗㄠˋ(詞庫)✕</span></div>
     <div class="prop-row"><span class="prop-label">送模型</span><code>我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]，反正就是這樣</code></div>
     <div class="prop-row"><span class="prop-label">字幕</span><span>我也不知道，反正就是這樣(原文不變)</span></div>
@@ -297,21 +298,22 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
         <button class="btn tiny">儲存上限</button></div>
       <div class="import-box">
         <strong>匯入預覽:fusions-2026-10-29.json(3.1 KB)</strong>
-        <p class="warn">⚠ 匯入檔與現有詞庫<b>不一致</b>:6 項會更動(新增 2、修改 2、停用 1、刪除 1)· 不變 4 · 拒絕 1</p>
+        <p class="warn">⚠ 匯入檔與現有詞庫<b>不一致</b>:7 項會更動(新增 2、修改 3、停用 1、刪除 1)· 不變 4 · 拒絕 1</p>
         <div class="diff-legend">圖例:<span class="lg lg-add">新增(整列綠底)</span><span class="lg lg-upd">修改(變動的儲存格黃底,原值 → 新值)</span><span class="lg lg-dis">停用(「啟用」欄橙底)</span><span class="lg lg-del">刪除(整列紅底、刪除線)</span><span class="lg lg-rej">拒絕(灰底,不寫入)</span><span class="lg lg-same">不變(無底色)</span></div>
         <table class="diff-table"><thead><tr><th>保留</th><th>類別</th><th>詞</th><th>合音注音</th><th>啟用</th></tr></thead><tbody>
           <tr class="diff-add"><td>☐</td><td>新增</td><td>不會</td><td>ㄅㄟˋ</td><td>啟用</td></tr>
           <tr class="diff-add"><td>☐</td><td>新增</td><td>所以</td><td>ㄒㄧˇ</td><td>啟用</td></tr>
           <tr><td>☐</td><td>修改</td><td>知道</td><td class="diff-upd">ㄗㄠˋ → ㄓㄠˋ</td><td>啟用</td></tr>
           <tr><td>☐</td><td>修改</td><td>那樣</td><td>ㄋㄧㄤˋ</td><td class="diff-upd">啟用 → 停用</td></tr>
+          <tr><td>☐</td><td>修改</td><td>這樣子</td><td class="diff-upd"><span class="plain">ㄐㄧㄤˋ ˙ㄗ</span><br>顯示字 醬子 → 醬紫</td><td>啟用</td></tr>
           <tr><td>☑ 不更新</td><td>停用</td><td>我們</td><td>ㄨㄣˇ</td><td class="diff-dis">啟用 → 停用</td></tr>
           <tr class="diff-del"><td>☑ 不更新</td><td>刪除</td><td><s>然後</s></td><td><s>ㄖㄡˋ</s></td><td><s>啟用</s></td></tr>
-          <tr class="diff-rej"><td>—</td><td>拒絕</td><td>怎麼樣</td><td>ㄗㄤˇ</td><td>啟用</td></tr>
+          <tr class="diff-rej"><td>—</td><td>拒絕</td><td>我也不知道</td><td>ㄨㄛˇ ㄅㄨˋ ㄗㄠˋ</td><td>啟用</td></tr>
         </tbody></table>
-        <div class="reject-box" id="fusion-reject-reasons"><strong>拒絕原因</strong><div>怎麼樣:詞須為兩個漢字</div></div>
-        <label>○ 全部覆蓋(套用全部 6 項,含刪除 1 項、停用 1 項)</label>
+        <div class="reject-box" id="fusion-reject-reasons"><strong>拒絕原因</strong><div>我也不知道:詞須為 2~4 個漢字</div></div>
+        <label>○ 全部覆蓋(套用全部 7 項,含刪除 1 項、停用 1 項)</label>
         <label>● 自訂(勾選「保留」的項目維持現值、不被更新;刪除與停用預設勾保留)</label>
-        <div class="tone-actions"><button class="btn tiny">取消</button><button class="btn tiny primary">確認匯入(將更動 4 項)</button></div>
+        <div class="tone-actions"><button class="btn tiny">取消</button><button class="btn tiny primary">確認匯入(將更動 5 項)</button></div>
       </div>
     </div>
   </div>
