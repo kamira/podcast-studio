@@ -13,6 +13,8 @@
 
 規則:
   - 片段長度 = 合成長度(audio.seconds,變速前)÷ 實際語速(`project.effective_speed`),即變速後長度。
+    (CHG-20261029-01 T3)後製有效(`project.is_post_fresh`)時改取後製後長度 post.seconds;
+    post 過期時退回 audio.seconds。預覽與匯出共用(唯一來源)。
   - 片段起點 = 前一個有音檔片段的終點 + 該片段之後的停頓(`project.effective_pause`)。
   - 總長 = 最後一個有音檔片段的終點;最後一段之後的停頓不計入(片尾不留靜音)。
   - 沒有音檔的片段(尚未合成)長度為 0、放在目前位置,本身的停頓不計、不產生字幕;
@@ -85,6 +87,13 @@ def _cues(seg_id: str, text: str, start: int, end: int) -> list[dict]:
     return out
 
 
+def segment_seconds(seg: dict) -> float:
+    """片段長度(變速前):後製有效時取後製後長度(CHG-20261029-01 D18),否則退回合成 / 自錄長度。"""
+    if pj.is_post_fresh(seg):
+        return seg["post"]["seconds"]
+    return seg["audio"]["seconds"]
+
+
 def layout(project) -> dict:
     """依專案算出片段、字幕 cue、畫面軌與總長(規則見模組說明)。"""
     segments, cues = [], []
@@ -96,7 +105,7 @@ def layout(project) -> dict:
         if not audio:
             segments.append({"id": seg["id"], "start": _sec(start), "end": _sec(start)})
             continue
-        end = start + _ms(audio["seconds"] / pj.effective_speed(project, seg))
+        end = start + _ms(segment_seconds(seg) / pj.effective_speed(project, seg))
         segments.append({"id": seg["id"], "start": _sec(start), "end": _sec(end)})
         cues.extend(_cues(seg["id"], seg["text"], start, end))
         cursor, pending = end, _ms(pj.effective_pause(project, seg))

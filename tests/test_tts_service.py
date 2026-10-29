@@ -228,7 +228,8 @@ def test_改回原文字_快取命中_零次合成(env):
     assert out == {"synthesized": [], "cached": [p.segments[1]["id"]]}
     assert p.segments[1]["audio"] == original
     assert env.segment_emits() == [{"type": "segment", "id": p.segments[1]["id"],
-                                    "seconds": original["seconds"], "cached": True, "audio": original}]
+                                    "seconds": original["seconds"], "cached": True, "audio": original,
+                                    "post": p.segments[1]["post"]}]
 
 
 def test_相同文字的兩句_只合成一次(env):
@@ -452,7 +453,7 @@ def test_語速1_直接用原音檔(env, monkeypatch):
     p.segments[0]["speed"] = 1.0
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("不應呼叫 ffmpeg"))
     path = tts.apply_speed(p.segments[0], p)
-    assert path.name == f"{p.segments[0]['audio']['id']}.wav"
+    assert path.name == f"{p.segments[0]['post']['id']}.wav"     # CHG-20261029-01:來源為後製檔
 
 
 def test_未合成_不能變速(env):
@@ -490,7 +491,7 @@ def test_變速來源在檢查後被換成連結_拒絕且不讀外部(env, tmp_
     p.segments[0]["speed"] = 1.3
     outside = tmp_path / "outside.wav"
     write_sine(outside, 0.5)
-    src = pj.subdir("夜市的味道", "audio") / f"{p.segments[0]['audio']['id']}.wav"
+    src = pj.subdir("夜市的味道", "audio") / f"{p.segments[0]['post']['id']}.wav"   # 變速來源 = 後製檔
     real = tts._regular_in
 
     def swapping(dirfd, name):
@@ -522,7 +523,8 @@ def test_合成產物移入時audio目錄已被換成連結_不寫到外部(env,
     tts.synth(p, env.emit)
     assert list(outside.iterdir()) == []
     moved = pj._top() / "projects" / "夜市的味道" / "audio-moved"
-    assert [x.name for x in moved.iterdir()] == [f"{p.segments[0]['audio']['id']}.wav"]
+    assert sorted(x.name for x in moved.iterdir()) == sorted(
+        {f"{p.segments[0]['audio']['id']}.wav", f"{p.segments[0]['post']['id']}.wav"})   # 合成檔 + 裁切檔
 
 
 # ---------- DIR-5 修正 5:tmp/ 自受信根逐層開啟 ----------
@@ -551,5 +553,238 @@ def test_worker暫存目錄開啟後被換成連結_不從外部讀取也不寫�
 
 def test_run_worker的tmp不以可替換路徑當起點():
     import inspect
-    src = inspect.getsource(tts._run_worker)
+    src = inspect.getsource(tts._run_proc)
     assert "pj.open_subdir(project_name, \"tmp\"" in src and "tmp_dir.parent" not in src
+
+
+# ---------- CHG-20261029-01 T3:片段靜音裁切與後製管線 ----------
+
+FAKE_SHAPE = textwrap.dedent('''
+    # -*- coding: utf-8 -*-
+    # 替身 shape worker:把輸入照抄成輸出,連音 p% 時去掉開頭 p% × 0.2 秒(模擬句子變短);呼叫記到 shape.log
+    import json, os, sys, wave
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    args = sys.argv[1:]
+    assert args[0] == "shape", args
+    jobs_path, out = args[args.index("--jobs") + 1], args[args.index("--out") + 1]
+    with open(jobs_path, encoding="utf-8") as f:
+        body = json.load(f)
+    with open(os.path.join(HERE, "shape.log"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"jobs": body["jobs"], "inputs": sorted(os.listdir(out))}, ensure_ascii=False) + "\\n")
+    for job in body["jobs"]:
+        with wave.open(os.path.join(out, job["input"]), "rb") as r:
+            params, frames = r.getparams(), r.readframes(r.getnframes())
+        cut = int(job["connect"] / 100 * 0.2 * params.framerate) * params.sampwidth
+        with wave.open(os.path.join(out, job["id"] + ".wav"), "wb") as w:
+            w.setparams(params)
+            w.writeframes(frames[cut:])
+        sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0}) + "\\n")
+        sys.stdout.flush()
+''')
+
+
+@pytest.fixture
+def shaped(env, monkeypatch):
+    (env.fake / "shape.py").write_text(FAKE_SHAPE, encoding="utf-8")
+    monkeypatch.setattr(tts, "_shape_argv", lambda jobs, out: [sys.executable, str(env.fake / "shape.py"),
+                                                               "shape", "--jobs", str(jobs), "--out", str(out)])
+    return env
+
+
+def shape_calls(env) -> list[dict]:
+    return env.log("shape.log")
+
+
+def write_padded(path: Path, head=0.6, body=1.0, tail=0.25, rate=22050):
+    """前 head 秒、後 tail 秒為 −60 dBFS 噪聲,中間為 −6 dBFS 的 440 Hz 正弦波。"""
+    import random
+    rnd = random.Random(3)
+    quiet = int(32768 * 10 ** (-60 / 20))
+    frames = []
+    for i in range(int(head * rate)):
+        frames.append(rnd.randint(-quiet, quiet))
+    for i in range(int(body * rate)):
+        frames.append(int(16000 * math.sin(2 * math.pi * 440 * i / rate)))
+    for i in range(int(tail * rate)):
+        frames.append(rnd.randint(-quiet, quiet))
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(struct.pack(f"<{len(frames)}h", *frames))
+
+
+def quiet_edges(path: Path, db=-40.0):
+    with wave.open(str(path), "rb") as r:
+        rate, n = r.getframerate(), r.getnframes()
+        pcm = struct.unpack(f"<{n}h", r.readframes(n))
+    thr = 32768 * 10 ** (db / 20)
+    loud = [i for i, v in enumerate(pcm) if abs(v) >= thr]
+    return loud[0] / rate, (n - 1 - loud[-1]) / rate, n / rate
+
+
+def test_trim_前後低音量各剩002到005秒(tmp_path):
+    src = tmp_path / "src.wav"
+    write_padded(src)
+    seconds, head, tail = tts.trim(src, tmp_path / "out.wav")
+    a, b, total = quiet_edges(tmp_path / "out.wav")
+    assert 0.02 <= a <= 0.05 and 0.02 <= b <= 0.05
+    assert seconds == pytest.approx(total, abs=0.002)
+    assert seconds == pytest.approx(1.0 + 0.06, abs=0.03)
+    assert head == pytest.approx(0.6, abs=0.01) and tail == pytest.approx(0.25, abs=0.01)
+
+
+def test_trim_濾鏡只含程式常數():
+    f = tts._trim_filter()
+    assert "start_threshold=-40dB" in f and "start_silence=0.030" in f and "detection=peak" in f
+    assert f.count("areverse") == 2 and "afade=t=in:d=0.010" in f
+
+
+def padded_project(env, n=2, **seg_kw):
+    """已有合成音檔(前後低音量)的專案:audio 帶 key,檔案放在 audio/。"""
+    p = pj.Project(name="夜市的味道", segments=[seg(t, **seg_kw) for t in ("今天天氣真好。", "我們去夜市吧。")[:n]])
+    pj.save(p)
+    adir = pj.subdir("夜市的味道", "audio", create=True)
+    for i, s in enumerate(p.segments):
+        key = f"{i + 1:x}" * 64
+        write_padded(adir / f"{key[:32]}.wav")
+        s["audio"] = {"id": key[:32], "seconds": round(media.wav_seconds(adir / f"{key[:32]}.wav"), 3), "key": key}
+    pj.save(p)
+    return pj.load("夜市的味道")
+
+
+def test_預設參數只裁切_不啟動shape(shaped):
+    p = padded_project(shaped)
+    out = tts.post_process(p, None, shaped.emit)
+    assert out == {"processed": [s["id"] for s in p.segments], "cached": []}
+    assert shape_calls(shaped) == [] and shaped.calls() == []
+    adir = pj.subdir("夜市的味道", "audio")
+    for s in p.segments:
+        assert pj.is_post_fresh(s)
+        assert s["post"]["seconds"] == pytest.approx(1.06, abs=0.03)
+        assert s["post"]["trim"] == pytest.approx(s["audio"]["seconds"] - s["post"]["seconds"], abs=0.002)
+        a, b, _ = quiet_edges(adir / f"{s['post']['id']}.wav")
+        assert a <= 0.05 and b <= 0.05
+    assert tts.stale_post(p) == []
+    pj.save(p)                                        # post 欄位通過專案驗證
+    assert [ev["type"] for _, ev in shaped.emits] == ["post", "post"]
+
+
+def test_改連音只啟動shape一次_synth零次_同參數第二次全部命中(shaped):
+    p = padded_project(shaped)
+    tts.post_process(p, None, shaped.emit)
+    trimmed = p.segments[0]["post"]["seconds"]
+    p.segments[0]["connect"] = 50
+    assert [s["id"] for s in tts.stale_post(p)] == [p.segments[0]["id"]]
+    out = tts.post_process(p, [p.segments[0]["id"]], shaped.emit)
+    assert out == {"processed": [p.segments[0]["id"]], "cached": []}
+    calls = shape_calls(shaped)
+    assert len(calls) == 1 and shaped.calls() == []
+    [job] = calls[0]["jobs"]
+    assert job["connect"] == 50 and job["clarity"] == 100 and job["chars"] == 6     # 「今天天氣真好」6 個漢字
+    assert job["input"] == f"{tts._trim_key(p.segments[0])[:32]}.wav" and calls[0]["inputs"] == [job["input"]]
+    assert p.segments[0]["post"]["seconds"] == pytest.approx(trimmed - 0.1, abs=0.002)
+    assert p.segments[0]["post"]["id"] == pj.post_key(p.segments[0])[:32]
+    shaped.emits.clear()
+    again = tts.post_process(p, [s["id"] for s in p.segments], shaped.emit)
+    assert again == {"processed": [], "cached": [s["id"] for s in p.segments]}
+    assert len(shape_calls(shaped)) == 1
+    assert list(tmp_dir().iterdir()) == []            # 輸入複本與輸出暫存目錄用完即刪
+
+
+def test_shape工作的字詞清晰度索引換成念出的字(shaped):
+    s = seg("大家好，歡迎收聽夜市的味道。", word_clarity=[{"start": 8, "end": 10, "value": 40}])
+    s["audio"] = {"id": "a" * 32, "seconds": 1.0, "key": "a" * 64}
+    job = tts.shape_job(pj.validate(pj.Project(name="夜市的味道", segments=[s]).to_dict())["segments"][0],
+                        "b" * 32, "c" * 32)
+    assert job["chars"] == 12 and job["word_clarity"] == [{"start": 7, "end": 9, "value": 40}]
+
+
+def test_shape失敗訊息為繁中且不含路徑(shaped, monkeypatch):
+    p = padded_project(shaped, n=1)
+    (shaped.fake / "shape.py").write_text(
+        "import sys\nprint('✗ 第 1 句後製失敗:/Users/someone/x.wav', file=sys.stderr)\nsys.exit(4)\n",
+        encoding="utf-8")
+    p.segments[0]["clarity"] = 40
+    with pytest.raises(tts.SynthError) as e:
+        tts.post_process(p, None, shaped.emit)
+    assert "後製失敗" in str(e.value) and "/Users/" not in str(e.value)
+    assert not pj.is_post_fresh(p.segments[0])
+
+
+def test_自錄音檔不裁切不後製(shaped):
+    p = padded_project(shaped, n=1)
+    adir = pj.subdir("夜市的味道", "audio")
+    p.segments[0]["audio"] = {"id": "e" * 16, "seconds": p.segments[0]["audio"]["seconds"]}
+    write_padded(adir / f"{'e' * 16}.wav")
+    before = sorted(x.name for x in adir.iterdir())
+    p.segments[0]["connect"] = 80
+    assert tts.post_process(p, None, shaped.emit) == {"processed": [], "cached": []}
+    assert tts.post_process(p, [p.segments[0]["id"]], shaped.emit) == {"processed": [], "cached": []}
+    assert sorted(x.name for x in adir.iterdir()) == before and shape_calls(shaped) == []
+    assert tts.apply_speed({**p.segments[0], "speed": 1.0}, p).name == f"{'e' * 16}.wav"
+
+
+def test_synth每句完成即裁切_post指向裁切檔(env):
+    p = make_project(("今天天氣真好。",))
+    tts.synth(p, env.emit)
+    s = p.segments[0]
+    assert pj.is_post_fresh(s) and s["post"]["id"] == tts._trim_key(s)[:32]
+    [ev] = env.segment_emits()
+    assert ev["post"] == s["post"]
+
+
+def test_synth時非預設參數的post保持過期(env):
+    p = make_project(("今天天氣真好。",))
+    p.segments[0]["clarity"] = 30
+    tts.synth(p, env.emit)
+    assert p.segments[0]["post"] is None and tts.stale_post(p) == [p.segments[0]]
+
+
+def test_改語速只重跑atempo且來源為後製檔(shaped, monkeypatch):
+    p = padded_project(shaped, n=1)
+    p.segments[0]["connect"] = 40
+    tts.post_process(p, None, shaped.emit)
+    shapes = len(shape_calls(shaped))
+    atempo: list = []
+    real_run = subprocess.run
+
+    def rec_run(cmd, *a, **kw):
+        if isinstance(cmd, list) and any(str(x).startswith("atempo=") for x in cmd):
+            atempo.append(cmd)
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", rec_run)
+    p.segments[0]["speed"] = 1.3
+    path = tts.apply_speed(p.segments[0], p)
+    assert len(atempo) == 1 and len(shape_calls(shaped)) == shapes and shaped.calls() == []
+    assert path.name == f"{p.segments[0]['post']['id']}-s130.wav"
+    assert media.wav_seconds(path) == pytest.approx(p.segments[0]["post"]["seconds"] / 1.3, rel=0.03)
+
+
+def test_ensure_post補做所有過期片段(shaped):
+    p = padded_project(shaped)
+    p.segments[1]["pitch"] = {"points": [{"pos": 0.0, "semi": 0.0}, {"pos": 1.0, "semi": 2.0}], "roundness": None}
+    out = tts.ensure_post(p, shaped.emit)
+    assert sorted(out["processed"]) == sorted(s["id"] for s in p.segments)
+    assert tts.stale_post(p) == [] and len(shape_calls(shaped)) == 1
+    assert shape_calls(shaped)[0]["jobs"][0]["pitch"] == {"points": [[0.0, 0.0], [1.0, 2.0]], "roundness": 50}
+
+
+def test_兩片段加15秒停頓匯出後silencedetect量得15秒(shaped, monkeypatch):
+    import re as _re
+
+    import imageio_ffmpeg
+    import timeline
+    p = padded_project(shaped)
+    p.defaults["speed"] = 1.0
+    p.segments[0]["pause_after"] = 1.5
+    tts.ensure_post(p, shaped.emit)
+    pj.save(p)
+    out = Path(taiwan_ai.ROOT) / "outputs"
+    monkeypatch.setattr(taiwan_ai, "OUT", out)
+    mp4, _ = media.render_timeline(p, timeline.layout(p))
+    r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-hide_banner", "-i", str(mp4),
+                        "-af", "silencedetect=noise=-40dB:d=0.3", "-f", "null", "-"], capture_output=True, timeout=120)
+    found = [float(x) for x in _re.findall(r"silence_duration: ([\d.]+)", r.stderr.decode("utf-8", "replace"))]
+    assert len(found) == 1 and found[0] == pytest.approx(1.5, abs=0.1), found

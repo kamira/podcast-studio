@@ -121,6 +121,19 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 .license-table th { background:var(--bg); }
 .import-box { border:1px dashed var(--accent); border-radius:8px; padding:10px 12px; display:grid; gap:6px; background:#f7faff; }
 .import-box p { margin:0; }
+.import-box .warn { color:#8a4b00; background:#fff4e0; border:1px solid #f0c27a; border-radius:6px; padding:4px 8px; }
+.diff-table { border-collapse:collapse; width:100%; background:#fff; }
+.diff-table th, .diff-table td { border:1px solid var(--line); padding:3px 8px; text-align:left; }
+.diff-table th { background:var(--bg); font-weight:600; }
+.diff-legend { display:flex; flex-wrap:wrap; gap:6px; font-size:12px; align-items:center; }
+.lg { padding:1px 6px; border-radius:3px; border-left:4px solid transparent; }
+.lg-add, .diff-add td { background:rgba(46,158,91,.22); } .lg-add, .diff-add td:first-child { border-left:4px solid #2e9e5b; }
+.lg-upd, .diff-upd { background:rgba(240,190,0,.38); border-left:4px solid #c99700 !important; font-weight:600; }
+.lg-dis, .diff-dis { background:rgba(232,137,43,.38); border-left:4px solid #c46a10 !important; font-weight:600; }
+.lg-del, .diff-del td { background:rgba(201,60,55,.22); } .lg-del, .diff-del td:first-child { border-left:4px solid #c93c37; }
+.diff-del s { text-decoration-thickness:2px; }
+.lg-same { border:1px solid var(--line); }
+@media (prefers-color-scheme: dark) { .diff-add td, .lg-add { background:rgba(70,200,120,.30); } .diff-upd, .lg-upd { background:rgba(255,210,40,.40); } .diff-dis, .lg-dis { background:rgba(255,150,60,.42); } .diff-del td, .lg-del { background:rgba(255,90,80,.32); } }
 </style></head>
 <body>
 <div id="shot-full">
@@ -239,9 +252,20 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
       <table class="license-table"><thead><tr><th>原詞(兩字)</th><th>合音注音</th><th>同音字(參考)</th><th>來源</th><th>啟用</th><th></th></tr></thead><tbody><tr><td>這樣</td><td>ㄐㄧㄤˋ</td><td>醬</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>那樣</td><td>ㄋㄧㄤˋ</td><td>釀</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>知道</td><td>ㄗㄠˋ</td><td>造</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>什麼</td><td>ㄕㄚˊ</td><td>啥</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>我們</td><td>ㄨㄣˇ</td><td>穩</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>不要</td><td>ㄅㄧㄠˋ</td><td>—</td><td>預設</td><td>☐</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>然後</td><td>ㄖㄡˋ</td><td>肉</td><td>自訂</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>刪除</button></td></tr></tbody></table>
       <div class="import-box">
         <strong>匯入預覽:fusions-2026-10-29.json(3.1 KB)</strong>
-        <p>格式正確:12 筆 · 將新增 <b>5</b> 筆、覆寫 <b>2</b> 筆、不變 4 筆 · 拒絕 1 筆(第 9 筆「ㄓㄧ」不是合法注音)</p><p>選「取代」時:將<b>刪除</b>自訂詞 <b>1</b> 筆(然後)、將<b>停用</b>預設詞 <b>1</b> 筆(不要);選「合併」時刪除、停用皆為 0 筆</p>
-        <label>○ 合併(保留詞庫中未出現在檔案的詞)</label> <label>● 取代(刪除檔案外的自訂詞;檔案外的預設詞改為停用;被拒絕的詞保留原資料)</label>
-        <div class="tone-actions"><button class="btn tiny">取消</button><button class="btn tiny primary">確認匯入</button></div>
+        <p class="warn">⚠ 匯入檔與現有詞庫<b>不一致</b>:6 項會更動(新增 2、修改 2、停用 1、刪除 1)· 不變 4 · 拒絕 1(第 7 筆「怎麼樣」不是兩字詞)</p>
+        <div class="diff-legend">圖例:<span class="lg lg-add">新增(整列綠底)</span><span class="lg lg-upd">修改(變動的儲存格黃底,原值 → 新值)</span><span class="lg lg-dis">停用(「啟用」欄橙底)</span><span class="lg lg-del">刪除(整列紅底、刪除線)</span><span class="lg lg-same">不變(無底色)</span></div>
+        <table class="diff-table"><thead><tr><th>保留</th><th>類別</th><th>詞</th><th>合音注音</th><th>啟用</th></tr></thead><tbody>
+          <tr class="diff-add"><td>☐</td><td>新增</td><td>不會</td><td>ㄅㄟˋ</td><td>啟用</td></tr>
+          <tr class="diff-add"><td>☐</td><td>新增</td><td>所以</td><td>ㄒㄧˇ</td><td>啟用</td></tr>
+          <tr><td>☐</td><td>修改</td><td>知道</td><td class="diff-upd">ㄗㄠˋ → ㄓㄠˋ</td><td>啟用</td></tr>
+          <tr><td>☐</td><td>修改</td><td>那樣</td><td>ㄋㄧㄤˋ</td><td class="diff-upd">啟用 → 停用</td></tr>
+          <tr><td>☑ 不更新</td><td>停用</td><td>我們</td><td>ㄨㄣˇ</td><td class="diff-dis">啟用 → 停用</td></tr>
+          <tr class="diff-del"><td>☑ 不更新</td><td>刪除</td><td><s>然後</s></td><td><s>ㄖㄡˋ</s></td><td><s>啟用</s></td></tr>
+        </tbody></table>
+        <label>○ 全部覆蓋(套用全部 6 項,含刪除 1 項、停用 1 項)</label>
+        <label>● 自訂(勾選「保留」的項目維持現值、不被更新;刪除與停用預設勾保留)</label>
+        <p class="muted">與現有詞庫一致時只顯示「與現有詞庫一致,無需更動」,不警告、不寫入。</p>
+        <div class="tone-actions"><button class="btn tiny">取消</button><button class="btn tiny primary">確認匯入(將更動 4 項)</button></div>
       </div>
     </div>
   </div>
