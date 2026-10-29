@@ -2,7 +2,8 @@
 """專案資料模型(CHG-20261022-04 T2)。
 
 一個專案 = `projects/<名稱>/`:
-  project.json   專案檔(本模組的資料模型,`schema_version: 1`;其他版本一律拒絕載入,不猜測轉換)
+  project.json   專案檔(本模組的資料模型,`schema_version: 2`;讀到 1 時在記憶體補上 v2 欄位的預設值、
+                 下次存檔寫成 2(CHG-20261029-01 D14);其他版本一律拒絕載入,不猜測轉換)
   history/       舊版專案檔 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`(UTC),只保留最近 HISTORY_KEEP 個
   audio/ assets/ 合成音檔與素材(T3、T6 寫入;專案檔只記 id,不記任何路徑)
   tmp/           worker 輸入檔(T3 用完即刪;`startup_cleanup()` 清空殘留)
@@ -10,7 +11,7 @@
 `projects/.trash/<名稱>-<時間戳>-<4 碼隨機>/` 為刪除的專案,滿 TRASH_DAYS 天由 `startup_cleanup()` 清除。
 
 專案檔(JSON 物件,未知鍵一律拒絕):
-  schema_version  1
+  schema_version  2(v1 = 沒有 connect、clarity、word_clarity、pitch、post 的舊版,載入時升級)
   name            專案名稱(與目錄名相同;規則見 `names.py`:中英日白名單、1~64 字)
   script          文稿全文(≤ MAX_SCRIPT 字)
   defaults        {"speed": 語速預設, "pause_comma", "pause_sentence", "pause_paragraph": 停頓預設秒數}
@@ -22,6 +23,19 @@
                     speed        null(用 defaults.speed)或 0.5~2.0(四捨五入到 0.05)
                     annotations  [{"index": 句內字元索引, "zhuyin": 聲調符號格式注音}](只能標在漢字上)
                     audio        null 或 {"id": 音檔 id, "seconds": 合成長度(變速前), "key"?: 64 碼快取鍵}
+                    (以下 CHG-20261029-01 T1 新增,v2)
+                    connect      null(= 0%)或 0~100 整數:連音(字與字之間的黏著;只動句內字間)
+                    clarity      null(= 100%)或 0~100 整數:清晰度(咬字含糊程度;100 = 字正腔圓)
+                    word_clarity [{"start", "end", "value"}]:字詞清晰度,`[start, end)` 為句內字元索引,
+                                 範圍內一律是漢字、互不重疊、每句 ≤ MAX_WORD_CLARITY 段,value 0~100 整數
+                    pitch        null(不處理)或 {"points": [{"pos": 0~1(取到 0.01), "semi": −6~+6 半音(取到 0.1)}],
+                                 "roundness": null(= 50%)或 0~100 整數};2~16 點,pos 嚴格遞增
+                    post         null 或 {"id": 後製檔 id, "key": 64 碼後製鍵, "seconds": 後製後長度(變速前),
+                                 "trim": 裁掉的前後低音量秒數}(伺服器產生;PATCH 不接受)
+                    fusions      [{"index": 起點字元索引, "length": 2~4, "zhuyin": 1~(length − 1) 個音節(半形空白分隔),
+                                  "source": rule|lexicon|manual}]
+                                 (CHG-20261029-01 T7,D27)範圍內都是漢字、互不重疊、每句 ≤ MAX_FUSIONS 組;
+                                 合音範圍內不得有聲調標註;字詞清晰度區段必須完整包含或完全不含合音範圍
   images          畫面軌(≤ MAX_ASSETS 個):{"id", "asset": 圖片素材 id, "start": 秒, "end": null(到結尾)或秒}
   assets          素材(≤ MAX_ASSETS 個、合計 ≤ MAX_ASSET_BYTES):
                     {"id", "kind": image|audio|text, "ext": 白名單副檔名, "bytes": 位元組數, "label"?: 顯示名稱}
@@ -37,7 +51,9 @@
                                依句尾標點(。！？!?；;,後接的引號括號併入同句)與換行切分;
                                forced_breaks 為原文字元索引,在該字之後另外切分
   escape_text(text) / tts_text(segment) -> str
-                               原文 `[` `]` 轉全形;標註以 `字[:注音]` 插入(注音格式同 breezy_worker,聲調符號)
+                               原文 `[` `]` 轉全形;標註以 `字[:注音]` 插入(注音格式同 breezy_worker,聲調符號);
+                               (T7)合音:第一字帶 `[:合音注音]`、刪除第二字(例 `是這[:ㄐㄧㄤˋ]啊`)
+  fused_out(segment) -> set    合音刪去的第二字索引(送模型時不念的字;字界估計以送模型的字數為準)
   load(name) -> Project / save(project) -> 版本 id 或 None / list_history(name) / trash(name, confirm=True)
   (T6 補)create(name, script, defaults) / list_projects() / load_version(name, 版本 id) / restore(name, 版本 id)
   (T8 補)update(name, change) -> (Project, 版本 id, change 的回傳值)
@@ -45,6 +61,12 @@
                                ProjectNotFound(不存在,伺服器回 404)、ProjectExists(已存在,回 409)
                                皆為 ProjectError 的子類別
   startup_cleanup(now) -> {"trash_removed", "tmp_cleared", "warnings"}
+  (CHG-20261029-01 T1)PROSODY_DEFAULTS / TRIM_PARAMS / POST_VERSION
+  post_params(segment) -> dict 後製參數(null 一律取程式常數):trim、connect、clarity、word_clarity、pitch
+  post_key(segment) -> str     SHA-256(JSON 陣列 [audio.id, POST_VERSION, 裁切參數, connect, clarity,
+                               word_clarity, pitch]);語速、停頓不在內。自錄音檔(audio 沒有 key)丟 ProjectError
+  is_post_fresh(segment)       post 存在且 post.key == post_key(segment)(只比對資料,不看檔案)
+  is_default_post(segment)     連音 0%、清晰度 100%、沒有字詞清晰度、沒有語調(後製結果 = 裁切結果)
   subdir(name, sub, create=False) -> Path
                                專案的 audio/、assets/、tmp/ 真實路徑(符號連結規則同下;T3 起使用)
 
@@ -56,6 +78,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -80,7 +103,8 @@ PROJECTS_NAME = "projects"
 TRASH_NAME = ".trash"
 PROJECT_FILE = "project.json"
 LOCK_FILE = ".lock"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+OLD_SCHEMA_VERSIONS = (1,)   # 載入時自動升級的舊版(CHG-20261029-01 D14)
 
 HISTORY_KEEP = 10
 TRASH_DAYS = 30
@@ -99,6 +123,19 @@ MAX_ASSET_BYTES = 2 * 1024 ** 3
 MAX_AUDIO_SECONDS = 60 * 60
 MAX_LABEL = 255
 ZHUYIN_MAX = 5
+# CHG-20261029-01:連音、清晰度、語調(D6、D7、D9、D10、D15)
+PROSODY_DEFAULTS = {"connect": 0, "clarity": 100, "roundness": 50}
+PITCH_POINTS_MIN, PITCH_POINTS_MAX = 2, 16
+SEMI_MIN, SEMI_MAX, SEMI_STEP = Decimal("-6"), Decimal("6"), Decimal("0.1")
+POS_STEP = Decimal("0.01")
+MAX_WORD_CLARITY = 32
+MAX_FUSIONS = 16
+FUSION_MIN, FUSION_MAX = 2, 4     # 合音字數(使用者 2026-10-29:不超過四字)
+MAX_FUSION_OFF = 32                # fusion_off 每句上限(D41)
+FUSION_SOURCES = ("rule", "lexicon", "manual")
+POST_VERSION = 1
+# 裁切參數(D2):-40 dBFS 樣本峰值門檻、前後各留 30 ms、10 ms 淡入淡出
+TRIM_PARAMS = {"threshold_db": -40, "keep_ms": 30, "fade_ms": 10}
 ASSET_EXTS = {
     "image": ("png", "jpg", "jpeg", "webp"),
     "audio": ("wav", "mp3", "m4a"),
@@ -120,7 +157,10 @@ NAME_HINT = "專案名稱只能用中文、日文假名、英文字母、數字�
 LINK_TRIES = 16
 
 TOP_KEYS = ("schema_version", "name", "script", "defaults", "segments", "images", "assets")
-SEGMENT_KEYS = ("id", "text", "break", "pause_after", "speed", "annotations", "audio")
+SEGMENT_KEYS_V1 = ("id", "text", "break", "pause_after", "speed", "annotations", "audio")
+SEGMENT_KEYS = (*SEGMENT_KEYS_V1, "connect", "clarity", "word_clarity", "pitch", "post", "fusions",
+                "fusion_off")
+POST_KEYS = ("id", "key", "seconds", "trim")
 IMAGE_KEYS = ("id", "asset", "start", "end")
 ASSET_KEYS = ("id", "kind", "ext", "bytes", "label")
 
@@ -231,6 +271,245 @@ def _check_annotations(text: str, anns, where: str) -> list[dict]:
     return sorted(out, key=lambda a: a["index"])
 
 
+# ---------- 連音、清晰度、字詞清晰度、語調(CHG-20261029-01 T1) ----------
+
+def _is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def check_percent(v, where: str):
+    """拉桿百分比:null 或 0~100 的整數(連音、清晰度、圓弧、字詞清晰度值)。"""
+    if v is None:
+        return None
+    if not _is_int(v) or not 0 <= v <= 100:
+        raise ProjectError(f"{where}必須是 0 到 100 的整數(百分比)")
+    return v
+
+
+def _check_word_clarity(text: str, items, where: str) -> list[dict]:
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise ProjectError(f"{where}.word_clarity 必須是陣列")
+    if len(items) > MAX_WORD_CLARITY:
+        raise ProjectError(f"{where}.word_clarity 每句最多 {MAX_WORD_CLARITY} 段")
+    out = []
+    for it in items:
+        if not isinstance(it, dict) or set(it) != {"start", "end", "value"}:
+            raise ProjectError(f"{where}.word_clarity 每項必須恰為 start、end、value 三個欄位")
+        a, b = it["start"], it["end"]
+        if not _is_int(a) or not _is_int(b) or not 0 <= a < b <= len(text):
+            raise ProjectError(f"{where}.word_clarity 的範圍必須在句子之內且起點小於終點")
+        if not all(_is_hanzi(ch) for ch in text[a:b]):
+            raise ProjectError(f"{where}.word_clarity 只能設定在漢字上(不可含標點或其他字元)")
+        out.append({"start": a, "end": b, "value": check_percent(it["value"], f"{where}.word_clarity 的清晰度")})
+        if out[-1]["value"] is None:
+            raise ProjectError(f"{where}.word_clarity 的清晰度必須是 0 到 100 的整數(百分比)")
+    out.sort(key=lambda x: x["start"])
+    for x, y in zip(out, out[1:]):
+        if y["start"] < x["end"]:
+            raise ProjectError(f"{where}.word_clarity 的範圍不可重疊")
+    return out
+
+
+def _check_pitch(p, where: str):
+    if p is None:
+        return None
+    if not isinstance(p, dict) or set(p) != {"points", "roundness"}:
+        raise ProjectError(f"{where}.pitch 必須恰為 points、roundness 兩個欄位")
+    pts = p["points"]
+    if not isinstance(pts, list) or not PITCH_POINTS_MIN <= len(pts) <= PITCH_POINTS_MAX:
+        raise ProjectError(f"{where}.pitch 的關鍵點必須是 {PITCH_POINTS_MIN} 到 {PITCH_POINTS_MAX} 個")
+    out = []
+    for q in pts:
+        if not isinstance(q, dict) or set(q) != {"pos", "semi"}:
+            raise ProjectError(f"{where}.pitch 每個關鍵點必須恰為 pos、semi 兩個欄位")
+        if not _is_number(q["pos"]):
+            raise ProjectError(f"{where}.pitch 關鍵點位置必須是 0 到 1 的數字")
+        pos = _round(q["pos"], POS_STEP)
+        if not Decimal(0) <= pos <= Decimal(1):
+            raise ProjectError(f"{where}.pitch 關鍵點位置必須是 0 到 1 的數字")
+        if not _is_number(q["semi"]):
+            raise ProjectError(f"{where}.pitch 關鍵點音高必須是 {SEMI_MIN} 到 +{SEMI_MAX} 半音的數字")
+        semi = _round(q["semi"], SEMI_STEP)
+        if not SEMI_MIN <= semi <= SEMI_MAX:
+            raise ProjectError(f"{where}.pitch 關鍵點音高必須在 {SEMI_MIN} 到 +{SEMI_MAX} 半音之間")
+        out.append({"pos": float(pos), "semi": float(semi) + 0.0})
+    if any(b["pos"] <= a["pos"] for a, b in zip(out, out[1:])):
+        raise ProjectError(f"{where}.pitch 關鍵點位置必須嚴格遞增")
+    return {"points": out, "roundness": check_percent(p["roundness"], f"{where}.pitch 的圓弧")}
+
+
+def _check_post(post, where: str):
+    if post is None:
+        return None
+    if not isinstance(post, dict) or set(post) != set(POST_KEYS):
+        raise ProjectError(f"{where}.post 格式不正確")
+    if not isinstance(post["id"], str) or not ID_RE.fullmatch(post["id"]):
+        raise ProjectError(f"{where}.post.id 格式不正確")
+    if not isinstance(post["key"], str) or not KEY_RE.fullmatch(post["key"]):
+        raise ProjectError(f"{where}.post.key 格式不正確")
+    for k in ("seconds", "trim"):
+        if not _is_number(post[k]) or post[k] < 0:
+            raise ProjectError(f"{where}.post.{k} 必須是非負數字")
+    return dict(post)
+
+
+def _eff(segment: dict, key: str, default_key: str | None = None) -> int:
+    v = segment.get(key)
+    return PROSODY_DEFAULTS[default_key or key] if v is None else v
+
+
+def post_params(segment: dict) -> dict:
+    """後製參數(null 一律取程式常數;D15)。word_clarity 為 [[start, end, value]],pitch 為 None 或
+    {"points": [[pos, semi]], "roundness"}。"""
+    pitch = segment.get("pitch")
+    if pitch:
+        pitch = {"points": [[float(q["pos"]), float(q["semi"])] for q in pitch["points"]],
+                 "roundness": PROSODY_DEFAULTS["roundness"] if pitch.get("roundness") is None
+                 else pitch["roundness"]}
+    else:
+        pitch = None
+    return {"trim": dict(TRIM_PARAMS), "connect": _eff(segment, "connect"), "clarity": _eff(segment, "clarity"),
+            "word_clarity": [{"start": w["start"], "end": w["end"], "value": w["value"]}
+                             for w in segment.get("word_clarity") or []],
+            "pitch": pitch}
+
+
+def is_default_post(segment: dict) -> bool:
+    """預設參數(連音 0%、清晰度 100%、無字詞清晰度、無語調):後製結果等於裁切結果,不啟動 shape。"""
+    p = post_params(segment)
+    return p["connect"] == 0 and p["clarity"] == 100 and not p["word_clarity"] and p["pitch"] is None
+
+
+def post_key(segment: dict) -> str:
+    """後製鍵 = SHA-256(JSON 陣列 [audio.id, POST_VERSION, 裁切參數, connect, clarity, word_clarity, pitch])。
+
+    語速、停頓不在鍵內(語速另以變速檔快取)。只對合成片段(audio 帶 key)有意義,其他丟 ProjectError。"""
+    audio = segment.get("audio")
+    if not isinstance(audio, dict) or "key" not in audio:
+        raise ProjectError("只有合成的片段有後製(自錄音檔不做後製)")
+    p = post_params(segment)
+    parts = [audio["id"], POST_VERSION, p["trim"], p["connect"], p["clarity"],
+             [[w["start"], w["end"], w["value"]] for w in p["word_clarity"]], p["pitch"]]
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def is_post_fresh(segment: dict) -> bool:
+    """片段的 post 與目前參數相符(只比對資料,不檢查檔案是否存在)。"""
+    post = segment.get("post")
+    audio = segment.get("audio")
+    if not post or not isinstance(audio, dict) or "key" not in audio:
+        return False
+    return post.get("key") == post_key(segment)
+
+
+def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> list[dict]:
+    """合音(D27):範圍 [index, index + length) 為 2~4 個漢字;zhuyin 為 1~(length − 1) 個音節(半形空白分隔);
+    各組不重疊;範圍內沒有聲調標註;字詞清晰度完整包含或完全不含合音範圍。"""
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise ProjectError(f"{where}.fusions 必須是陣列")
+    if len(items) > MAX_FUSIONS:
+        raise ProjectError(f"{where}.fusions 每句最多 {MAX_FUSIONS} 組")
+    out = []
+    for f in items:
+        if not isinstance(f, dict) or set(f) != {"index", "length", "zhuyin", "source"}:
+            raise ProjectError(f"{where}.fusions 每項必須恰為 index、length、zhuyin、source 四個欄位")
+        i, n = f["index"], f["length"]
+        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX:
+            raise ProjectError(f"{where}.fusions 的字數必須是 {FUSION_MIN} 到 {FUSION_MAX}")
+        if not _is_int(i) or not 0 <= i or i + n > len(text):
+            raise ProjectError(f"{where}.fusions 的位置超出句子範圍")
+        if not all(_is_hanzi(c) for c in text[i:i + n]):
+            raise ProjectError(f"{where}.fusions 只能合併相鄰的漢字")
+        if f["source"] not in FUSION_SOURCES:
+            raise ProjectError(f"{where}.fusions 的來源只能是 rule、lexicon、manual")
+        z = f["zhuyin"]
+        parts = z.split(" ") if isinstance(z, str) else []
+        if not 1 <= len(parts) <= n - 1:
+            raise ProjectError(f"{where}:合音注音的音節數必須少於字數(1 到 {n - 1} 個,以半形空白分隔)")
+        for part in parts:
+            try:
+                check_zhuyin(part)
+            except ProjectError as e:
+                raise ProjectError(f"{where}:合音{e.errors[0]}") from None
+        out.append({"index": i, "length": n, "zhuyin": z, "source": f["source"]})
+    out.sort(key=lambda x: x["index"])
+    if any(b["index"] < a["index"] + a["length"] for a, b in zip(out, out[1:])):
+        raise ProjectError(f"{where}.fusions 的範圍不可重疊")
+    marked = {a["index"] for a in annotations or []}
+    for f in out:
+        span = set(range(f["index"], f["index"] + f["length"]))
+        if span & marked:
+            raise ProjectError(f"{where}:合音範圍內有聲調標註,請先清除該字的念法")
+        for w in word_clarity or []:
+            inside = [w["start"] <= k < w["end"] for k in span]
+            if any(inside) and not all(inside):
+                raise ProjectError(f"{where}:字詞清晰度的範圍必須完整包含或完全不含合音的字")
+    return out
+
+
+def _check_fusion_off(text: str, items, where: str) -> list[dict]:
+    """停用合音的位置(D41):[{"index", "length": 2~4}],範圍在句內,每句 ≤ MAX_FUSION_OFF 筆。"""
+    if items is None:
+        return []
+    if not isinstance(items, list) or len(items) > MAX_FUSION_OFF:
+        raise ProjectError(f"{where}.fusion_off 必須是最多 {MAX_FUSION_OFF} 筆的陣列")
+    out = []
+    for d in items:
+        if not isinstance(d, dict) or set(d) != {"index", "length"}:
+            raise ProjectError(f"{where}.fusion_off 每項必須恰為 index、length 兩個欄位")
+        i, n = d["index"], d["length"]
+        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX or not _is_int(i) or i < 0 or i + n > len(text):
+            raise ProjectError(f"{where}.fusion_off 的範圍超出句子")
+        if {"index": i, "length": n} not in out:
+            out.append({"index": i, "length": n})
+    return sorted(out, key=lambda x: (x["index"], x["length"]))
+
+
+def _changed_range(old: str, new: str) -> tuple[int, int, int]:
+    """old → new 的改動範圍(以共同前綴與共同後綴求出):回傳 (舊文字中的起點, 終點, 長度差)。"""
+    p = 0
+    while p < min(len(old), len(new)) and old[p] == new[p]:
+        p += 1
+    q = 0
+    while q < min(len(old), len(new)) - p and old[len(old) - 1 - q] == new[len(new) - 1 - q]:
+        q += 1
+    return p, len(old) - q, len(new) - len(old)
+
+
+def _shift(items, a: int, b: int, delta: int) -> list[dict]:
+    out = []
+    for d in items or []:
+        i, n = d["index"], d["length"]
+        if i + n <= a and not (a == b and i + n > a):
+            out.append({**d})
+        elif i >= b and (a < b or i >= a):
+            out.append({**d, "index": i + delta})
+    return out
+
+
+def shift_marks(segment: dict, old_text: str, new_text: str) -> dict:
+    """句子文字由 old_text 改成 new_text 時調整合音狀態(D41):改動範圍之前的紀錄不動、之後的依位移調整、
+    與改動範圍重疊者清除(回到未決定)。回傳 {"fusions", "fusion_off", "cleared": 被清除的 fusions 筆數}。"""
+    a, b, delta = _changed_range(old_text, new_text)
+    fus = segment.get("fusions") or []
+    kept = _shift(fus, a, b, delta)
+    return {"fusions": kept, "fusion_off": _shift(segment.get("fusion_off"), a, b, delta),
+            "cleared": len(fus) - len(kept)}
+
+
+def fused_out(segment) -> set:
+    """合音刪去的字索引(送模型時不念;n 字合成 k 個音節時刪去後 n − k 字)。"""
+    out = set()
+    for f in segment.get("fusions") or []:
+        k = len(f["zhuyin"].split(" "))
+        out |= set(range(f["index"] + k, f["index"] + f["length"]))
+    return out
+
+
 # ---------- 分句與合成文字 ----------
 
 def _emit_piece(pieces: list, text: str, start: int, end: int, kind: str) -> None:
@@ -302,11 +581,25 @@ def tts_text(segment) -> str:
     text = segment.get("text")
     if not isinstance(text, str) or not text:
         raise ProjectError("片段文字是空的")
-    anns = {a["index"]: a["zhuyin"] for a in _check_annotations(text, segment.get("annotations"), "片段")}
+    checked = _check_annotations(text, segment.get("annotations"), "片段")
+    anns = {a["index"]: a["zhuyin"] for a in checked}
+    fus = {}   # 字元索引 → 該字帶的合音音節;合音範圍內其餘字不送模型(D26)
+    skip = set()
+    for f in _check_fusions(text, segment.get("fusions"), checked, segment.get("word_clarity"), "片段"):
+        parts = f["zhuyin"].split(" ")
+        for j in range(f["length"]):
+            if j < len(parts):
+                fus[f["index"] + j] = parts[j]
+            else:
+                skip.add(f["index"] + j)
     out = []
     for i, ch in enumerate(escape_text(text)):
+        if i in skip:
+            continue
         out.append(ch)
-        if i in anns:
+        if i in fus:
+            out.append(f"[:{fus[i]}]")
+        elif i in anns:
             out.append(f"[:{anns[i]}]")
     return "".join(out)
 
@@ -347,10 +640,12 @@ def _try(errors, fn, *args):
         return None
 
 
-def _check_version(v) -> None:
-    if not isinstance(v, int) or isinstance(v, bool) or v != SCHEMA_VERSION:
+def _check_version(v) -> int:
+    if not isinstance(v, int) or isinstance(v, bool) or (v != SCHEMA_VERSION and v not in OLD_SCHEMA_VERSIONS):
         shown = repr(v) if isinstance(v, (int, float, str, type(None))) else type(v).__name__
-        raise ProjectError(f"專案檔版本 {shown[:20]} 不支援,拒絕載入(本版只讀 schema_version {SCHEMA_VERSION})")
+        raise ProjectError(f"專案檔版本 {shown[:20]} 不支援,拒絕載入"
+                           f"(本版讀 schema_version {SCHEMA_VERSION},舊版 1 會自動升級)")
+    return v
 
 
 def _validate_defaults(d, errors) -> dict:
@@ -367,8 +662,9 @@ def _validate_defaults(d, errors) -> dict:
     return out
 
 
-def _validate_segment(s, where, errors, seen) -> dict | None:
-    if not _check_keys(s, SEGMENT_KEYS, ("id", "text"), where, errors):
+def _validate_segment(s, where, errors, seen, version: int = SCHEMA_VERSION) -> dict | None:
+    if not _check_keys(s, SEGMENT_KEYS if version == SCHEMA_VERSION else SEGMENT_KEYS_V1, ("id", "text"),
+                       where, errors):
         return None
     ok = _check_id(s["id"], where, errors, seen)
     text = s["text"]
@@ -407,6 +703,26 @@ def _validate_segment(s, where, errors, seen) -> dict | None:
     out["audio"] = audio
     if (pause is not None and out["pause_after"] is None) or (speed is not None and out["speed"] is None) \
             or out["annotations"] is None:
+        ok = False
+    # CHG-20261029-01 T1(v2 欄位;v1 載入時一律補預設值)
+    n_err = len(errors)
+    out["connect"] = _try(errors, check_percent, s.get("connect"), f"{where}.connect(連音)")
+    out["clarity"] = _try(errors, check_percent, s.get("clarity"), f"{where}.clarity(清晰度)")
+    out["word_clarity"] = _try(errors, _check_word_clarity, text, s.get("word_clarity"), where)
+    out["pitch"] = _try(errors, _check_pitch, s.get("pitch"), where)
+    out["post"] = _try(errors, _check_post, s.get("post"), where)
+    if out["annotations"] is not None and out["word_clarity"] is not None:
+        out["fusions"] = _try(errors, _check_fusions, text, s.get("fusions"), out["annotations"],
+                              out["word_clarity"], where)
+    else:
+        out["fusions"] = []
+    out["fusion_off"] = _try(errors, _check_fusion_off, text, s.get("fusion_off"), where)
+    if out["fusions"] and out["fusion_off"]:
+        on = {(f["index"], f["length"]) for f in out["fusions"]}
+        if any((d["index"], d["length"]) in on for d in out["fusion_off"]):
+            errors.append(f"{where}:同一範圍不能同時啟用與停用合音")
+            ok = False
+    if len(errors) != n_err:
         ok = False
     return out if ok else None
 
@@ -475,7 +791,7 @@ def validate(data) -> dict:
     errors: list[str] = []
     if not isinstance(data, dict):
         raise ProjectError("專案檔必須是 JSON 物件")
-    _check_version(data.get("schema_version"))
+    version = _check_version(data.get("schema_version"))
     if not _check_keys(data, TOP_KEYS, ("schema_version", "name"), "專案", errors):
         raise ProjectError(errors)
     name = _try(errors, check_name, data["name"])
@@ -494,7 +810,7 @@ def validate(data) -> dict:
     if total > MAX_ASSET_BYTES:
         errors.append(f"素材總量超過 {MAX_ASSET_BYTES // 1024 ** 3} GB")
     image_assets = {a["id"] for a in assets if a and a["kind"] == "image"}
-    segments = [_validate_segment(s, f"segments[{i}]", errors, seen)
+    segments = [_validate_segment(s, f"segments[{i}]", errors, seen, version)
                 for i, s in enumerate(_list(data, "segments", errors, MAX_SEGMENTS))]
     images = [_validate_image(m, f"images[{i}]", errors, seen, image_assets)
               for i, m in enumerate(_list(data, "images", errors, MAX_ASSETS))]
@@ -748,7 +1064,7 @@ def _read_project_file(dirfd: int, filename: str) -> dict:
 
 
 def load(name) -> Project:
-    """讀 `projects/<名稱>/project.json`;schema_version 不是 1 一律拒絕載入。"""
+    """讀 `projects/<名稱>/project.json`;schema_version 1 在記憶體升級為 2(存檔時才寫回),其他版本拒絕載入。"""
     name = check_name(name)
     with safe_fs.closing(open_project(name)) as pfd:
         data = _read_project_file(pfd, PROJECT_FILE)
@@ -922,7 +1238,10 @@ def create(name, script: str = "", defaults: dict | None = None) -> Project:
     pieces = split_segments(script)
     proj = Project(name=name, script=script, defaults=dict(defaults or DEFAULTS),
                    segments=[{"id": new_id(), "text": p["text"], "break": p["break"], "pause_after": None,
-                              "speed": None, "annotations": [], "audio": None} for p in pieces])
+                              "speed": None, "annotations": [], "audio": None, "connect": None,
+                              "clarity": None, "word_clarity": [], "pitch": None, "post": None,
+                              "fusions": [], "fusion_off": []}
+                             for p in pieces])
     proj = Project.from_dict(proj.to_dict())
     with safe_fs.closing(_root_fd(create=True)) as rfd:
         if _case_variant(rfd, name) is not None or safe_fs.lstat(rfd, name) is not None:

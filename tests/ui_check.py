@@ -20,8 +20,12 @@
 
 兩組檢查,各自用一個暫存目錄與一個伺服器:
 - `canvas`(CHG-20261022-01):節點畫布、檔案拖放、設定頁;截圖 canvas.png、dnd.png、settings.png。
+  (CHG-20261029-01 T9)設定頁「合音詞庫」:列表、匯出、差異預覽匯入與三類提示訊息;截圖 settings-fusion.png。
 - `editor`(CHG-20261022-04 T9):首頁雙卡片、精靈 ①~⑤、完整模式、剪輯互動、免責頁、
   畫布刪除封面步驟後的精靈步驟;截圖 home.png、wizard.png、full.png、editor.png、tone.png、disclaimer.png。
+  (CHG-20261029-01 T5)屬性面板的連音、清晰度拉桿與字詞清晰度;截圖 prosody.png。
+  (CHG-20261029-01 T6)時間軸語調折線(新增、拖曳、刪除關鍵點、圓弧)與預覽播放後製檔;截圖 pitch.png。後製的 shape worker
+  以本機 Python 替身代替(輸入照抄成輸出,只用標準庫)。
 不帶參數兩組都跑(先 canvas 再 editor);`--only editor` 只跑 editor。
 
 editor 的替身:語音合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身腳本
@@ -200,7 +204,7 @@ def file_arg(name: str, data: bytes, mime: str) -> dict:
 
 # ---------- 主流程 ----------
 
-def run_checks(page, base: str, root: Path, runner: StubRunner, settings) -> None:
+def run_checks(page, base: str, root: Path, runner: StubRunner, settings, problems: list) -> None:
     from playwright.sync_api import expect
 
     step = {"name": ""}
@@ -405,12 +409,183 @@ def run_checks(page, base: str, root: Path, runner: StubRunner, settings) -> Non
         expect(sel).to_have_value(NEW_REASON_MODEL)
         expect(page.locator("#cfg-warnings")).to_be_hidden()
         page.screenshot(path=str(SHOT_DIR / "settings.png"))
+
+        # CHG-20261029-01 T9:設定 › 合音詞庫(列表、匯出、差異預覽匯入、提示訊息)
+        fusion_steps(page, expect, begin, settings, toast, problems)
     except StepFailed as e:
         raise StepFailed(f"步驟「{step['name']}」:{e}") from None
     except AssertionError as e:
         raise StepFailed(f"步驟「{step['name']}」:畫面不符預期({str(e).splitlines()[0] if str(e) else 'AssertionError'})") from None
     except Exception as e:  # Playwright 逾時等
         raise StepFailed(f"步驟「{step['name']}」:{type(e).__name__}:{str(e).splitlines()[0] if str(e) else ''}") from None
+
+
+FUSION_FORMAT = "podcast-studio-fusions"
+
+
+def fusion_file(words) -> dict:
+    return {"name": "詞庫.json", "mimeType": "application/json",
+            "buffer": json.dumps({"format": FUSION_FORMAT, "version": 1, "words": words}, ensure_ascii=False).encode("utf-8")}
+
+
+def fusion_steps(page, expect, begin, settings, toast, problems: list) -> None:
+    """CHG-20261029-01 T9:設定頁「合音詞庫」子頁。跳出訊息(#toast.is-error)只在格式錯誤、超過上限、
+    匯入失敗三類出現;一致、不一致、含被拒詞條的預覽都不跳出訊息。"""
+    preview = page.locator("#fusion-preview")
+
+    def quiet_toast():
+        page.evaluate("() => { const t = document.getElementById('toast'); t.hidden = true; t.classList.remove('is-error'); }")
+
+    def no_popup():
+        check(page.evaluate("document.getElementById('toast').hidden"), "這個情況不應出現跳出的提示訊息")
+
+    def allow_one(status):
+        """預期的錯誤回應(格式錯誤 422、超過上限 413、版本不符 409)瀏覽器會記一筆 console error;只容許一筆。"""
+        hit = [p for p in problems if f"status of {status}" in p]
+        check(len(hit) == 1, f"應恰有一筆 {status} 回應:{hit}")
+        problems.remove(hit[0])
+
+    def upload(f):
+        quiet_toast()
+        page.locator("#fusion-file").set_input_files(f)
+
+    begin("設定 › 合音詞庫:列出 6 筆預設詞")
+    page.locator('.subnav-link[data-sub="fusion"]').click()
+    rows = page.locator("#fusion-rows tr[data-word]")
+    expect(rows).to_have_count(len(settings.FUSION_DEFAULTS))
+
+    begin("合音詞庫:匯出 JSON 的內容等於 GET /api/settings/fusions")
+    with page.expect_download() as dl:
+        page.locator("#fusion-export-json").click()
+    exported = json.loads(Path(dl.value.path()).read_text(encoding="utf-8"))
+    check(exported["words"] == settings.load_fusions()["words"], "匯出 JSON 應等於詞庫列表")
+
+    begin("合音詞庫:匯入與現有詞庫相同的檔案 → 只顯示一行狀態,沒有確認按鈕")
+    upload(fusion_file(exported["words"]))
+    expect(preview.locator(".fusion-same")).to_have_text("與現有詞庫一致,無需更動")
+    expect(page.locator("#fusion-apply")).to_have_count(0)
+    expect(page.locator("#fusion-diff")).to_have_count(0)
+    no_popup()
+
+    begin("合音詞庫:新增自訂詞「然後」")
+    page.locator("#fusion-new-word").fill("然後")
+    page.locator("#fusion-new-zhuyin").fill("ㄖㄢˊ")
+    page.locator("#fusion-add").click()
+    expect(rows).to_have_count(len(settings.FUSION_DEFAULTS) + 1)
+
+    begin("合音詞庫:匯入不一致的檔案 → 警告、圖例與五欄差異表")
+    words = [dict(w, zhuyin="ㄓㄠˋ") if w["word"] == "知道" else dict(w, display="降") if w["word"] == "這樣" else w
+             for w in exported["words"] if w["word"] != "我們"]
+    words.append({"word": "好像", "zhuyin": "ㄏㄠˇ", "enabled": True, "source": "custom"})
+    upload(fusion_file(words))
+    table = page.locator("#fusion-diff")
+    expect(table).to_be_visible()
+    expect(preview.locator(".fusion-warn")).to_be_visible()
+    expect(preview.locator(".fusion-legend")).to_be_visible()
+    expect(table.locator("thead th")).to_have_text(["保留", "類別", "詞", "合音注音", "啟用"])
+    upd = table.locator('tr[data-word="知道"] td')
+    expect(upd.nth(3)).to_have_text("ㄗㄠˋ → ㄓㄠˋ")
+    expect(upd.nth(3)).to_have_class(re.compile(r"\bdiff-upd\b"))
+    check("diff-" not in (upd.nth(4).get_attribute("class") or ""), "「知道」的啟用沒有變,不應有差異標示")
+    expect(table.locator('tr[data-word="好像"]')).to_have_class(re.compile(r"\bdiff-add\b"))
+    disp = table.locator('tr[data-word="這樣"] td').nth(3)                  # 只差顯示字 → 修改,第二行顯示
+    expect(disp).to_contain_text("ㄐㄧㄤˋ")
+    expect(disp).to_contain_text("顯示字 醬 → 降")
+    expect(disp).to_have_class(re.compile(r"\bdiff-upd\b"))
+    dele = table.locator('tr[data-word="然後"]')
+    expect(dele).to_have_class(re.compile(r"\bdiff-del\b"))
+    deco = dele.locator("td").nth(2).evaluate("e => getComputedStyle(e).textDecorationLine")
+    check("line-through" in deco, f"刪除列文字應有刪除線,實際 {deco}")
+    dis = table.locator('tr[data-word="我們"] td').nth(4)
+    expect(dis).to_have_class(re.compile(r"\bdiff-dis\b"))
+    expect(dis).to_have_text("啟用 → 停用")
+    expect(dele.locator(".fusion-keep")).to_be_checked()
+    expect(table.locator('tr[data-word="我們"] .fusion-keep')).to_be_checked()
+    expect(table.locator('tr[data-word="好像"] .fusion-keep')).not_to_be_checked()
+    expect(page.locator("#fusion-reject-reasons")).to_have_count(0)
+    cells = [t.strip() for t in table.locator("tbody td").all_text_contents()]
+    check(all(("→" in t) or t in ("", "新增", "修改", "停用", "刪除", "拒絕", "啟用") or not any(
+        k in t for k in ("檔案外", "注音不同", "不合法", "原因")) for t in cells), f"儲存格不應有原因說明:{cells}")
+    no_popup()
+    page.screenshot(path=str(SHOT_DIR / "settings-fusion.png"))
+
+    begin("合音詞庫:取消勾選「然後」的保留並確認 → 只有該詞被刪,勾保留的「我們」不變")
+    dele.locator(".fusion-keep").uncheck()
+    page.locator("#fusion-apply").click()
+    expect(page.locator("#fusion-diff")).to_have_count(0)
+    got = {w["word"]: w for w in settings.load_fusions()["words"]}
+    check("然後" not in got and got["我們"]["enabled"] is True and got["知道"]["zhuyin"] == "ㄓㄠˋ"
+          and got["好像"]["source"] == "custom" and got["這樣"]["display"] == "降", f"套用結果不符:{sorted(got)}")
+    no_popup()
+
+    begin("合音詞庫:含 1 筆非法注音的檔案 → 類別「拒絕」1 列、沒有保留框,拒絕原因區塊 1 行")
+    cur = settings.load_fusions()["words"]
+    bad = [w for w in cur] + [{"word": "然後", "zhuyin": "ㄓㄧ", "enabled": True}]
+    upload(fusion_file(bad))
+    rej = page.locator("#fusion-preview tr.kind-reject")
+    expect(rej).to_have_count(1)
+    expect(rej.locator(".fusion-keep")).to_have_count(0)
+    reasons = page.locator("#fusion-reject-reasons .reject-line")
+    expect(reasons).to_have_count(1)
+    expect(reasons.first).to_have_text("然後:注音不是合法音節(多個音節以半形空白分隔)")
+    expect(page.locator("#fusion-apply")).to_have_count(0)            # 只差被拒詞條 → 一致,不給確認
+    expect(preview.locator(".fusion-same")).to_have_text("與現有詞庫一致,無需更動")
+    no_popup()
+
+    begin("合音詞庫:新增三字詞;注音輸入三個音節時顯示伺服器的錯誤")
+    page.locator("#fusion-new-word").fill("沒關係")
+    page.locator("#fusion-new-zhuyin").fill("ㄇㄟˊ ㄍㄨㄢ ㄒㄧ")
+    quiet_toast()
+    page.locator("#fusion-add").click()
+    expect(toast).to_contain_text("音節數必須少於字數")
+    allow_one(422)
+    page.locator("#fusion-new-zhuyin").fill("ㄇㄟˊ ㄍㄨㄢ")
+    page.locator("#fusion-add").click()
+    expect(page.locator('#fusion-rows tr[data-word="沒關係"]')).to_have_count(1)
+
+    begin("合音詞庫:上限設定超出範圍顯示錯誤且不變;改為 32 KB / 20 筆後超過上限的提示")
+    page.locator("#fusion-max-kb").fill("4097")
+    page.locator("#fusion-limits-save").click()
+    expect(toast).to_contain_text("16–4096")
+    allow_one(422)
+    page.locator("#fusion-max-kb").fill("256")
+    page.locator("#fusion-max-rows").fill("9")
+    page.locator("#fusion-limits-save").click()
+    expect(toast).to_contain_text("10–10000")
+    allow_one(422)
+    check(settings.load_import_limits() == {"max_kb": 256, "max_rows": 1000}, "超出範圍時設定值不應改變")
+    page.locator("#fusion-max-kb").fill("32")
+    page.locator("#fusion-max-rows").fill("20")
+    page.locator("#fusion-limits-save").click()
+    expect(toast).to_contain_text("32 KB")
+    upload({"name": "33.json", "mimeType": "application/json", "buffer": b" " * (33 * 1024)})
+    expect(toast).to_have_text("超過允許大小上限(32 KB)")
+    allow_one(413)
+    many = [{"word": chr(0x4E00 + i) + "好", "zhuyin": "ㄏㄠˇ", "enabled": True} for i in range(21)]
+    upload(fusion_file(many))
+    expect(toast).to_have_text("超過筆數上限(20 筆)")
+    allow_one(413)
+    settings.save_import_limits(256, 1000)
+
+    begin("合音詞庫:非 UTF-8 檔 → 格式錯誤提示;300 KB 檔 → 超過上限提示")
+    upload({"name": "壞.json", "mimeType": "application/json", "buffer": "{}".encode("utf-16")})
+    expect(toast).to_have_class(re.compile(r"\bis-error\b"))
+    expect(toast).to_contain_text("格式錯誤")
+    allow_one(422)
+    upload({"name": "大.json", "mimeType": "application/json", "buffer": b" " * (300 * 1024)})
+    expect(toast).to_have_class(re.compile(r"\bis-error\b"))
+    expect(toast).to_have_text("超過允許大小上限(256 KB)")
+    allow_one(413)
+
+    begin("合音詞庫:預覽後另一處修改詞庫再確認 → 匯入失敗提示")
+    upload(fusion_file([w for w in settings.load_fusions()["words"] if w["word"] != "好像"]))
+    expect(page.locator("#fusion-apply")).to_be_visible()
+    settings.save_fusion("知道", "ㄗㄠˋ", True)
+    page.locator("#fusion-apply").click()
+    expect(toast).to_have_class(re.compile(r"\bis-error\b"))
+    expect(toast).to_contain_text("匯入失敗")
+    allow_one(409)
+    check("好像" in {w["word"] for w in settings.load_fusions()["words"]}, "版本不符時詞庫不應被改")
 
 
 # ---------- editor(CHG-20261022-04 T9)----------
@@ -421,9 +596,15 @@ SCRIPT_EDITED = SCRIPT.replace("四十年", "五十年")
 SYNTH_SECONDS = 1.6          # 替身 worker 每句的長度
 OWN_WAV_SECONDS = 1.2        # 自錄音檔長度
 VOICE_TEXT = "這是聲線逐字稿(UI 檢查替身)。"
-EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "disclaimer.png")
-CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png")
-STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ"}
+EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "pitch.png",
+                "fusion-typing.png", "fusion.png", "disclaimer.png")
+CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png", "settings-fusion.png")
+STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ",
+               # CHG-20261029-01 T9:合音規則推導需要的字
+               "是": "ㄕˋ", "這": "ㄓㄜˋ", "樣": "ㄧㄤˋ", "不": "ㄅㄨˋ", "知": "ㄓ", "道": "ㄉㄠˋ", "就": "ㄐㄧㄡˋ",
+               "你": "ㄋㄧˇ", "嗎": "˙ㄇㄚ", "啊": "˙ㄚ", "攤": "ㄊㄢ", "販": "ㄈㄢˋ",
+               # DIR-5 修正 M-4:不在詞庫的「那裡」以規則推導
+               "那": "ㄋㄚˋ", "裡": "ㄌㄧˇ"}
 
 # 替身 worker:參數格式同 breezy_worker.py synth;每句寫一個真的 16 kHz 正弦波 WAV,
 # stdout 逐句印 {"id", "seconds"};呼叫紀錄寫到同目錄的 calls.log(一行一次呼叫)。
@@ -457,6 +638,24 @@ for n, job in enumerate(body["jobs"]):
 """ % SYNTH_SECONDS
 
 
+# 替身 shape worker(CHG-20261029-01):參數格式同 breezy_worker.py shape;輸入照抄成輸出,
+# 呼叫紀錄寫到同目錄的 shape.log(一行一次呼叫)。
+FAKE_SHAPE = """# -*- coding: utf-8 -*-
+import json, os, shutil, sys
+HERE = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+jobs_path, out = args[args.index("--jobs") + 1], args[args.index("--out") + 1]
+with open(jobs_path, encoding="utf-8") as f:
+    body = json.load(f)
+with open(os.path.join(HERE, "shape.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"jobs": body["jobs"]}, ensure_ascii=False) + "\\n")
+for job in body["jobs"]:
+    shutil.copyfile(os.path.join(out, job["input"]), os.path.join(out, job["id"] + ".wav"))
+    sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0}) + "\\n")
+    sys.stdout.flush()
+"""
+
+
 def sine_wav(seconds: float, rate: int = 22050, freq: float = 330.0) -> bytes:
     """真正的 RIFF/WAVE(PCM 16-bit 單聲道);自錄音檔替身用。"""
     n = int(seconds * rate)
@@ -484,12 +683,22 @@ class EditorStubs:
         self.fake.mkdir(parents=True, exist_ok=True)
         self.breezy.mkdir(parents=True, exist_ok=True)
         (self.fake / "worker.py").write_text(FAKE_WORKER, encoding="utf-8")
+        (self.fake / "shape.py").write_text(FAKE_SHAPE, encoding="utf-8")
         self.render_calls: list[list[str]] = []
         self.annotate_calls: list[str] = []
         self.out: Path | None = None
 
     def worker_argv(self, jobs_path, out_dir):
         return [sys.executable, str(self.fake / "worker.py"), "synth", "--jobs", str(jobs_path), "--out", str(out_dir)]
+
+    def shape_argv(self, jobs_path, out_dir):
+        return [sys.executable, str(self.fake / "shape.py"), "shape", "--jobs", str(jobs_path), "--out", str(out_dir)]
+
+    def shape_calls(self) -> list[list[dict]]:
+        p = self.fake / "shape.log"
+        if not p.exists():
+            return []
+        return [json.loads(x)["jobs"] for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
 
     def set_delay(self, seconds: float) -> None:
         (self.fake / "delay.txt").write_text(str(seconds), encoding="utf-8")
@@ -574,6 +783,301 @@ async ([a, b]) => {
   return out;
 }
 """
+
+
+JS_MARK = """(word) => {
+  const m = Array.from(document.querySelectorAll('.fusion-mirror .mk')).filter(e => e.textContent === word);
+  return m.map(e => { const r = e.getClientRects()[0] || e.getBoundingClientRect();   // 跨行時取第一行
+    return {cls: e.className, x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left, top: r.top,
+            right: r.right, bottom: r.bottom, start: Number(e.dataset.start)}; });
+}"""
+
+# 以獨立的鏡像元素量測 textarea 中第 i 個字的位置(與標記層的實作無關),檢查標記是否對齊
+JS_CHAR_POS = """(i) => {
+  const ta = document.getElementById('script-text'), cs = getComputedStyle(ta);
+  const d = document.createElement('div');
+  ['fontFamily','fontSize','fontWeight','lineHeight','letterSpacing','paddingTop','paddingRight','paddingBottom',
+   'paddingLeft','borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth','borderStyle',
+   'boxSizing','whiteSpace','overflowWrap','wordBreak'].forEach(k => d.style[k] = cs[k]);
+  d.style.position = 'absolute'; d.style.visibility = 'hidden'; d.style.width = ta.clientWidth + ta.clientLeft * 2 + 'px';
+  d.textContent = ta.value.slice(0, i);
+  const s = document.createElement('span'); s.textContent = ta.value.charAt(i) || '.'; d.appendChild(s);
+  document.body.appendChild(d);
+  const r = ta.getBoundingClientRect(), dr = d.getBoundingClientRect(), sr = s.getBoundingClientRect();
+  d.remove();
+  return {x: r.left + (sr.left - dr.left), y: r.top + (sr.top - dr.top) - ta.scrollTop};
+}"""
+
+
+def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toast, problems, seg_ids) -> None:
+    import settings
+    ta = page.locator("#script-text")
+    pop = page.locator("#fusion-pop")
+
+    def marks(word):
+        return page.evaluate(JS_MARK, word)
+
+    def append_text(text):
+        ta.click()
+        page.keyboard.press("ControlOrMeta+End")
+        page.keyboard.type(text)
+
+    def seg_with(text):
+        return next((s for s in proj().segments if s["text"] == text), None)
+
+    begin("文稿框:輸入「我也不知道。」→「不知道」出現黃色波浪底線(不含單獨的「知道」),不自動跳出浮動窗")
+    append_text("我也不知道。")
+    wait_until(lambda: any("mark-pending" in m["cls"] for m in marks("不知道")), "「不知道」應有黃色波浪底線")
+    check(not marks("知道"), "不應另外標示單獨的「知道」")
+    expect(pop).to_be_hidden()
+    check(page.evaluate("document.activeElement.id") == "script-text", "標示出現後文稿框仍應保有焦點")
+
+    begin("文稿框:點擊「不知道」開浮動窗,選「啟用」→ 綠線、片段 fusions、浮層「不造」蓋住原詞")
+    m = marks("不知道")[0]
+    page.mouse.click(m["x"], m["y"])
+    expect(pop).to_be_visible()
+    expect(pop).to_contain_text("不知道 → ㄅㄨˋ ㄗㄠˋ")
+    expect(pop.locator("#fusion-pop-on")).to_have_text("啟用")
+    expect(pop.locator("#fusion-pop-off")).to_have_text("停用")
+    pop.locator("#fusion-pop-on").click()
+    wait_until(lambda: seg_with("我也不知道。") is not None and seg_with("我也不知道。")["fusions"] == [
+        {"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}], "啟用後片段應有 3 字合音")
+    wait_until(lambda: any("mark-on" in x["cls"] for x in marks("不知道")), "啟用後應為綠色標記")
+    pill = page.locator(".fusion-pill")
+    expect(pill).to_have_count(1)
+    expect(pill).to_have_text("不造")
+    pb, mk = pill.bounding_box(), marks("不知道")[0]
+    check(pb["x"] <= mk["left"] + 1 and pb["x"] + pb["width"] >= mk["right"] - 1
+          and pb["y"] <= mk["top"] + 1 and pb["y"] + pb["height"] >= mk["bottom"] - 1,
+          f"浮層應蓋住「不知道」三字:浮層 {pb},標記 {mk}")
+    shot("fusion-typing.png")
+    pill.click()
+    expect(pop).to_be_visible()
+    page.locator("#script-status").click()
+    expect(pop).to_be_hidden()
+
+    begin("文稿框:另一處「是這樣」選「停用」→ 紅線、fusion_off 有該位置、fusions 沒有")
+    append_text("是這樣啊。")
+    wait_until(lambda: any("mark-pending" in x["cls"] for x in marks("是這樣")), "「是這樣」應有黃色波浪底線")
+    m = marks("是這樣")[0]
+    page.mouse.click(m["x"], m["y"])
+    expect(pop).to_be_visible()
+    pop.locator("#fusion-pop-off").click()
+    wait_until(lambda: seg_with("是這樣啊。") is not None and seg_with("是這樣啊。")["fusion_off"] == [
+        {"index": 0, "length": 3}] and seg_with("是這樣啊。")["fusions"] == [], "停用應寫入 fusion_off")
+    wait_until(lambda: any("mark-off" in x["cls"] for x in marks("是這樣")), "停用後應為紅色標記")
+
+    begin("重新載入頁面後三種狀態都保留")
+    page.reload()
+    expect(ta).to_be_visible()
+    wait_until(lambda: any("mark-on" in x["cls"] for x in marks("不知道"))
+               and any("mark-off" in x["cls"] for x in marks("是這樣")), "重新載入後綠、紅標記應保留")
+    expect(page.locator(".fusion-pill")).to_have_text("不造")
+
+    begin("IME 組字期間不出現浮動窗、組字結束後值與游標正確且標記出現;貼上後標記出現")
+    ta.click()
+    page.keyboard.press("ControlOrMeta+End")
+    page.evaluate("() => document.getElementById('script-text').dispatchEvent(new CompositionEvent('compositionstart', {data: ''}))")
+    page.evaluate("() => document.getElementById('script-text').dispatchEvent(new CompositionEvent('compositionupdate', {data: 'ㄕㄜˊ'}))")
+    page.keyboard.insert_text("你說什麼")
+    check(not marks("什麼"), "組字期間不應重算標示")
+    expect(pop).to_be_hidden()
+    page.evaluate("() => document.getElementById('script-text').dispatchEvent(new CompositionEvent('compositionend', {data: '什麼'}))")
+    wait_until(lambda: any("mark-pending" in x["cls"] for x in marks("什麼")), "組字結束後應出現標記")
+    v = page.evaluate("() => { const t = document.getElementById('script-text'); return [t.value, t.selectionStart]; }")
+    check(v[0].endswith("你說什麼") and v[1] == len(v[0]), f"組字後的值與游標不符:{v}")
+    page.keyboard.insert_text("。為什麼呢。")
+    wait_until(lambda: any("mark-pending" in x["cls"] for x in marks("為什麼")), "貼上的文字也應出現標記")
+
+    begin("捲動文稿框後標記與文字位置對齊(≤ 2 px)")
+    page.evaluate("() => { const t = document.getElementById('script-text'); t.style.height = '90px'; }")
+    ta.press("ControlOrMeta+End")
+    page.evaluate("() => { const t = document.getElementById('script-text'); t.scrollTop = t.scrollHeight; t.dispatchEvent(new Event('scroll')); }")
+    page.wait_for_timeout(100)
+    mk = [x for x in marks("為什麼")][0]
+    pos = page.evaluate(JS_CHAR_POS, mk["start"])
+    check(abs(pos["x"] - mk["left"]) <= 2 and abs(pos["y"] - mk["top"]) <= 2,
+          f"捲動後標記應與文字對齊:標記 {mk},字元 {pos}")
+    page.evaluate("() => { const t = document.getElementById('script-text'); t.style.height = ''; }")
+
+    begin("在被浮層遮住的字中間刪除一字 → 狀態清除、浮層消失,存檔後該句沒有合音且需重新合成")
+    val = ta.input_value()
+    i = val.index("我也不知道") + 4      # 「知」之後
+    page.evaluate("(i) => { const t = document.getElementById('script-text'); t.focus(); t.setSelectionRange(i, i); }", i)
+    page.keyboard.press("Backspace")
+    wait_until(lambda: not page.locator(".fusion-pill").count(), "刪字後浮層應消失")
+    check(not any("mark-on" in x["cls"] for x in marks("不道")), "刪字後不應再有綠色標記")
+    page.locator("#script-save").click()
+    wait_until(lambda: seg_with("我也不道。") is not None, "文稿應已存檔")
+    s4 = seg_with("我也不道。")
+    check(s4["fusions"] == [] and s4["audio"] is None, f"該句應沒有合音且需重新合成:{s4}")
+    check(not any(c.get("fusions") for c in proj().segments if "不道" in c["text"]), "不應殘留合音")
+
+    begin("合音模式:準備五句並合成(停用詞庫的「這樣」,以規則推導)")
+    settings.save_fusion("這樣", "ㄐㄧㄤˋ", False)
+    ta.fill(SCRIPT_EDITED + "是這樣啊，你不知道嗎。就是這家攤販。就是這樣。那裡很好。他也不知道。")
+    page.locator("#script-synth").click()
+    wait_until(lambda: seg_with("是這樣啊，你不知道嗎。") and seg_with("是這樣啊，你不知道嗎。")["audio"]
+               and not page.evaluate("window.Studio.Voice.running"), "三句應已合成", timeout=30)
+    s1 = seg_with("是這樣啊，你不知道嗎。")
+
+    def drag_chars(a, b):
+        ca = page.locator(f'#props-body .tone-char[data-index="{a}"]').bounding_box()
+        cb = page.locator(f'#props-body .tone-char[data-index="{b}"]').bounding_box()
+        page.mouse.move(ca["x"] + ca["width"] / 2, ca["y"] + ca["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(cb["x"] + cb["width"] / 2, cb["y"] + cb["height"] / 2, steps=4)
+        page.mouse.up()
+
+    def select_seg(sid):
+        page.locator(f'#tl-voice [data-segment="{sid}"]').first.click()
+        page.locator('#props-body .tone-mode[data-mode="fusion"]').click()
+
+    fpop = page.locator("#fusion-popup")
+    begin("合音模式:選「這樣」顯示規則推導 ㄓ + ㄧㄤˋ → 顎化 → ㄐㄧㄤˋ,套用後重新合成、送模型含 [:ㄐㄧㄤˋ] 不含「樣」")
+    select_seg(s1["id"])
+    drag_chars(1, 2)
+    expect(fpop).to_be_visible()
+    expect(fpop.locator(".fusion-derive")).to_contain_text("ㄓ + ㄧㄤˋ")
+    expect(fpop.locator(".fusion-derive")).to_contain_text("顎化")
+    expect(fpop.locator(".fusion-input")).to_have_value("ㄐㄧㄤˋ")
+    n = len(calls())
+    fpop.get_by_role("button", name="套用").click()
+    wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
+    check(seg_with("是這樣啊，你不知道嗎。")["fusions"] == [{"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "rule"}],
+          f"fusions 不符:{seg_with('是這樣啊，你不知道嗎。')['fusions']}")
+    sent = calls()[-1][0]["text"]
+    check("是這[:ㄐㄧㄤˋ]啊" in sent and "樣" not in sent, f"送模型的文字不符:{sent}")
+    cue = page.locator(f'#tl-cues .tl-cue[data-segment="{s1["id"]}"]')
+    expect(cue.first).to_contain_text("是這樣啊")
+
+    begin("合音模式:選不在詞庫的「那裡」以規則推導 ㄋㄧˇ,套用後 source 為 rule、送模型含 那[:ㄋㄧˇ] 不含「裡」")
+    s5 = seg_with("那裡很好。")
+    select_seg(s5["id"])
+    drag_chars(0, 1)
+    expect(fpop).to_be_visible()
+    expect(fpop.locator(".fusion-input")).to_have_value("ㄋㄧˇ")
+    n = len(calls())
+    fpop.get_by_role("button", name="套用").click()
+    wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
+    check(seg_with("那裡很好。")["fusions"] == [{"index": 0, "length": 2, "zhuyin": "ㄋㄧˇ", "source": "rule"}],
+          f"fusions 不符:{seg_with('那裡很好。')['fusions']}")
+    sent = calls()[-1][0]["text"]
+    check("那[:ㄋㄧˇ]" in sent and "裡" not in sent, f"送模型的文字不符:{sent}")
+    expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s5["id"]}"]').first).to_contain_text("那裡很好")
+
+    begin("合音模式:詞庫有停用的「攤販」時按「存入合音詞庫」先確認覆寫;取消不變、接受才寫入")
+    settings.save_fusion("攤販", "ㄈㄢ", False)
+    s2 = seg_with("就是這家攤販。")
+    select_seg(s2["id"])
+    drag_chars(4, 5)
+    expect(fpop).to_be_visible()
+    finput = fpop.locator(".fusion-input")
+    expect(finput).not_to_have_value("")             # 等規則推導預填完成
+    z = finput.input_value()
+    check(z and z != "ㄈㄢ", f"預填的合音注音應與詞庫中停用的值不同:{z}")
+    asked = []    # 對話框事件要靠 Playwright 呼叫才會分派,等待時以 page.wait_for_timeout 推進
+    page.once("dialog", lambda d: (asked.append(d.message), d.dismiss()))
+    fpop.get_by_role("button", name="存入合音詞庫").click()
+    wait_until(lambda: page.wait_for_timeout(50) or len(asked) == 1, "停用中的既有詞也應先跳覆寫確認")
+    check("攤販" in asked[0] and "覆寫" in asked[0], f"確認訊息不符:{asked}")
+    page.wait_for_timeout(300)
+
+    def lex_tanfan():
+        return {w["word"]: w for w in settings.load_fusions()["words"]}["攤販"]
+
+    check(lex_tanfan()["zhuyin"] == "ㄈㄢ" and lex_tanfan()["enabled"] is False,
+          f"取消確認後詞庫不應改變:{lex_tanfan()}")
+    page.once("dialog", lambda d: (asked.append(d.message), d.accept()))
+    fpop.get_by_role("button", name="存入合音詞庫").click()
+    wait_until(lambda: page.wait_for_timeout(50) or len(asked) == 2, "再按一次應再跳覆寫確認")
+    wait_until(lambda: page.wait_for_timeout(50) or lex_tanfan()["zhuyin"] == z, "接受確認後應寫入新注音")
+    check(lex_tanfan()["enabled"] is True, "接受確認後應啟用")
+    page.keyboard.press("Escape")
+    settings.delete_fusion("攤販")
+
+    begin("合音模式:選三字「不知道」預填詞庫值 ㄅㄨˋ ㄗㄠˋ,套用後送模型含 不[:ㄅㄨˋ]知[:ㄗㄠˋ] 不含「道」")
+    select_seg(s1["id"])
+    drag_chars(6, 8)
+    expect(fpop.locator(".fusion-input")).to_have_value("ㄅㄨˋ ㄗㄠˋ")
+    expect(fpop.locator(".fusion-derive")).to_contain_text("詞庫")
+    n = len(calls())
+    fpop.get_by_role("button", name="套用").click()
+    wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成")
+    sent = calls()[-1][0]["text"]
+    check("不[:ㄅㄨˋ]知[:ㄗㄠˋ]" in sent and "道" not in sent, f"送模型的文字不符:{sent}")
+    expect(page.locator(f'#tl-voice [data-segment="{s1["id"]}"] .tl-badge')).to_have_text("⟲ 合音 2")
+    select_seg(s1["id"])
+    shot("fusion.png")
+
+    begin("合音模式:「就是」顯示不合音原因、套用停用;選五字時套用停用")
+    s2 = seg_with("就是這家攤販。")
+    select_seg(s2["id"])
+    drag_chars(0, 1)
+    expect(fpop.locator(".fusion-derive")).to_contain_text("不合音")
+    expect(fpop.get_by_role("button", name="套用")).to_be_disabled()
+    page.keyboard.press("Escape")
+    select_seg(s2["id"])
+    drag_chars(0, 4)
+    expect(fpop.locator(".fusion-derive")).to_contain_text("合音最多 4 個漢字")
+    expect(fpop.get_by_role("button", name="套用")).to_be_disabled()
+    page.keyboard.press("Escape")
+
+    begin("合音模式:選四字「就是這樣」列出三組相鄰兩字選項且預設選「這樣」")
+    settings.save_fusion("這樣", "ㄐㄧㄤˋ", True)
+    settings.save_fusion("是這樣", "ㄕˋ ㄐㄧㄤˋ", False)
+    s3 = seg_with("就是這樣。")
+    select_seg(s3["id"])
+    drag_chars(0, 3)
+    opts = fpop.locator(".fusion-option")
+    expect(opts).to_have_count(3)
+    expect(fpop.locator(".fusion-option:has(input:checked)")).to_contain_text("這樣:詞庫 ㄐㄧㄤˋ")
+    expect(fpop.locator(".fusion-input")).to_have_value("ㄐㄧㄡˋ ㄕˋ ㄐㄧㄤˋ")
+    page.keyboard.press("Escape")
+    settings.save_fusion("是這樣", "ㄕˋ ㄐㄧㄤˋ", True)
+
+    begin("合音模式:選預設詞「這樣」(詞庫啟用)套用後 source 為 lexicon、送模型含 [:ㄐㄧㄤˋ] 不含「樣」、字幕仍為原文")
+    select_seg(s3["id"])
+    drag_chars(2, 3)
+    expect(fpop).to_be_visible()
+    expect(fpop.locator(".fusion-input")).to_have_value("ㄐㄧㄤˋ")
+    expect(fpop.locator(".fusion-derive")).to_contain_text("詞庫")
+    n = len(calls())
+    fpop.get_by_role("button", name="套用").click()
+    wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
+    check(seg_with("就是這樣。")["fusions"] == [{"index": 2, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "lexicon"}],
+          f"fusions 不符:{seg_with('就是這樣。')['fusions']}")
+    sent = calls()[-1][0]["text"]
+    check("[:ㄐㄧㄤˋ]" in sent and "樣" not in sent, f"送模型的文字不符:{sent}")
+    expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s3["id"]}"]').first).to_contain_text("就是這樣")
+
+    begin("屬性面板句子文字:「不知道」顯示黃色波浪底線,點擊開同一個浮動窗;停用變紅、再點選啟用變綠")
+    s6 = seg_with("他也不知道。")
+    page.locator(f'#tl-voice [data-segment="{s6["id"]}"]').first.click()
+    ptext = page.locator("#props-body .prop-text")
+    expect(ptext).to_have_text("他也不知道。")
+    pmk = ptext.locator(".mk")
+    expect(pmk).to_have_count(1)
+    expect(pmk).to_have_text("不知道")
+    expect(pmk).to_have_class(re.compile(r"\bmark-pending\b"))
+    deco = pmk.evaluate("e => getComputedStyle(e).textDecorationStyle")
+    check(deco == "wavy", f"屬性面板的標記應為波浪底線,實際 {deco}")
+    expect(pop).to_be_hidden()
+    pmk.click()
+    expect(pop).to_be_visible()
+    expect(pop).to_contain_text("不知道 → ㄅㄨˋ ㄗㄠˋ")
+    pop.locator("#fusion-pop-off").click()
+    wait_until(lambda: seg_with("他也不知道。")["fusion_off"] == [{"index": 2, "length": 3}]
+               and seg_with("他也不知道。")["fusions"] == [], "屬性面板選停用應寫入 fusion_off")
+    expect(page.locator("#props-body .prop-text .mk")).to_have_class(re.compile(r"\bmark-off\b"))
+    page.locator("#props-body .prop-text .mk").click()
+    expect(pop).to_be_visible()
+    pop.locator("#fusion-pop-on").click()
+    wait_until(lambda: seg_with("他也不知道。")["fusions"] == [
+        {"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}]
+        and seg_with("他也不知道。")["fusion_off"] == [], "屬性面板選啟用應寫入 fusions")
+    expect(page.locator("#props-body .prop-text .mk")).to_have_class(re.compile(r"\bmark-on\b"))
+    expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s6["id"]}"]').first).to_contain_text("他也不知道")
 
 
 def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems: list) -> None:
@@ -924,6 +1428,151 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         no_prev_next("#page-full")
         shot("full.png")
 
+        # CHG-20261029-01 T5:韻律拉桿與字詞清晰度
+        begin("完整模式:第 1 句連音拉桿拖動時即時顯示百分比,放開後只重做後製(不重新合成)")
+        n_calls = len(calls())
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[0]}"]').click()
+        expect(page.locator("#props-body .prop-title")).to_have_text("選取:片段 #1")
+        conn = page.locator('#props-body [data-hook="prosody"] input[aria-label="連音(百分比)"]')
+        out = conn.locator("xpath=following-sibling::output[1]")
+        expect(conn).to_have_attribute("min", "0")
+        expect(conn).to_have_attribute("max", "100")
+        expect(conn).to_have_attribute("step", "1")
+        expect(out).to_have_text("0%")
+        conn.evaluate("(e) => { e.value = '35'; e.dispatchEvent(new Event('input', {bubbles: true})); }")
+        expect(out).to_have_text("35%")
+        check(proj().segments[0]["connect"] is None, "拖動中(還沒放開)不應送出")
+        conn.evaluate("(e) => e.dispatchEvent(new Event('change', {bubbles: true}))")
+        wait_until(lambda: proj().segments[0]["connect"] == 35, "放開後第 1 句連音應存成 35")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "連音改了之後應完成後製")
+        check(len(calls()) == n_calls, "改連音不應呼叫合成 worker")
+        check(stubs.shape_calls() and stubs.shape_calls()[-1][0]["connect"] == 35, "應以 shape 重做第 1 句的後製")
+        expect(page.locator('#props-body [data-hook="prosody"] input[aria-label="連音(百分比)"]')).to_have_value("35")
+
+        begin("完整模式:按連音的「預設」改回 null")
+        page.locator('#props-body [data-hook="prosody"] .pct-row').first.locator(".pct-reset").click()
+        wait_until(lambda: proj().segments[0]["connect"] is None, "按「預設」後連音應為 null")
+        check(len(calls()) == n_calls, "改回預設不應呼叫合成 worker")
+
+        begin("完整模式:清晰度模式拖曳選取「歡迎」設 40% 並套用")
+        page.locator('#props-body .tone-mode[data-mode="clarity"]').click()
+        expect(page.locator('#props-body .tone-mode[data-mode="clarity"]')).to_have_attribute("aria-pressed", "true")
+        c4 = page.locator('#props-body .tone-char[data-index="4"]')
+        c5 = page.locator('#props-body .tone-char[data-index="5"]')
+        expect(c4.locator(".tone-glyph")).to_have_text("歡")
+        b4, b5 = c4.bounding_box(), c5.bounding_box()
+        page.mouse.move(b4["x"] + b4["width"] / 2, b4["y"] + b4["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(b5["x"] + b5["width"] / 2, b5["y"] + b5["height"] / 2, steps=4)
+        page.mouse.up()
+        wpop = page.locator("#word-popup")
+        expect(wpop).to_be_visible()
+        expect(wpop.locator(".tone-title")).to_have_text("「歡迎」的清晰度 — 第 5–6 字")
+        wpop.locator("input[type=range]").fill("40")
+        expect(wpop.locator("output")).to_have_text("40%")
+        wpop.get_by_role("button", name="套用").click()
+        wait_until(lambda: proj().segments[0]["word_clarity"] == [{"start": 4, "end": 6, "value": 40}],
+                   f"字詞清晰度應存成 [4, 6) 40%,實際 {proj().segments[0]['word_clarity']}")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "字詞清晰度改了之後應完成後製")
+        expect(page.locator('#props-body .tone-char[data-index="4"] .clarity-bar.is-own')).to_have_count(1)
+        check(len(calls()) == n_calls, "改字詞清晰度不應呼叫合成 worker")
+        shot("prosody.png")
+
+        begin("完整模式:自錄音檔的第 2 句,韻律拉桿停用")
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[1]}"]').click()
+        expect(page.locator("#props-body .prop-title")).to_have_text("選取:片段 #2")
+        for lab in ("連音", "清晰度"):
+            expect(page.locator(f'#props-body input[aria-label="{lab}(百分比)"]')).to_be_disabled()
+        expect(page.locator('#props-body [data-hook="prosody"]')).to_contain_text("自錄音檔不做後製")
+        page.locator('#props-body .tone-mode[data-mode="tone"]').click()
+
+        # CHG-20261029-01 T6:語調折線
+        seg0 = f'#tl-voice .tl-seg[data-segment="{seg_ids[0]}"]'
+        keys = page.locator(f"{seg0} svg.tl-pitch .tl-pitch-key")
+
+        def pitch_pts():
+            p = proj().segments[0]["pitch"]
+            return p["points"] if p else None
+
+        def dbl_at(fx, fy):
+            box = page.locator(f"{seg0} svg.tl-pitch.is-editable").bounding_box()
+            page.mouse.dblclick(box["x"] + box["width"] * fx, box["y"] + box["height"] * fy)
+
+        begin("時間軸:選取第 1 句,點兩下新增關鍵點(菱形),只重做後製")
+        n_calls = len(calls())
+        page.locator("#tl-zoom-in").click()                     # 放大時間軸,片段夠寬才好點選關鍵點
+        page.locator("#tl-zoom-in").click()
+        page.locator("#tl-zoom-in").click()
+        page.locator(seg0).click()
+        expect(page.locator(f"{seg0} svg.tl-pitch.is-editable")).to_have_count(1)
+        check(page.locator("#tl-voice").bounding_box()["height"] >= 77, "語音軌高度應為 78 px")
+        dbl_at(0.3, 0.25)
+        wait_until(lambda: pitch_pts() is not None and len(pitch_pts()) == 3, f"第一次點兩下應建立 3 點,實際 {pitch_pts()}")
+        expect(keys).to_have_count(3)
+        dbl_at(0.7, 0.75)
+        wait_until(lambda: pitch_pts() is not None and len(pitch_pts()) == 4, f"再點兩下應為 4 點,實際 {pitch_pts()}")
+        expect(keys).to_have_count(4)
+        check(pitch_pts()[1]["semi"] > 0 and pitch_pts()[2]["semi"] < 0, f"點的高度應對應音高,實際 {pitch_pts()}")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "新增關鍵點後應完成後製")
+        check(len(calls()) == n_calls, "新增關鍵點不應呼叫合成 worker")
+
+        begin("時間軸:把第 3 個關鍵點往上拖(位置不越過相鄰點),屬性面板顯示選取中與半音")
+        before = pitch_pts()
+        k = keys.nth(2)
+        kb = k.bounding_box()
+        x, y = kb["x"] + kb["width"] / 2, kb["y"] + kb["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x - 600, y - 20, steps=6)
+        page.mouse.move(x - 600, y - 40, steps=6)
+        page.mouse.up()
+        wait_until(lambda: pitch_pts()[2]["semi"] > 0, f"往上拖後第 3 點半音應 > 0,實際 {pitch_pts()}")
+        got = pitch_pts()
+        check(got[1]["pos"] < got[2]["pos"] < got[3]["pos"] and got[2]["pos"] >= before[1]["pos"] + 0.01,
+              f"拖曳不應越過相鄰點,實際 {got}")
+        expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("選取中:#3")
+        expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("半音")
+        check(len(calls()) == n_calls, "拖曳關鍵點不應呼叫合成 worker")
+
+        begin("屬性面板:圓弧 0% 與 100% 的折線不同(100% 含 Q 指令)")
+        rnd = page.locator('#props-body input[aria-label="圓弧(百分比)"]')
+        rnd.fill("0")
+        wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == 0, "圓弧應存成 0")
+        expect(page.locator('#props-body input[aria-label="圓弧(百分比)"]')).to_have_value("0")
+        d0 = page.locator(f"{seg0} svg.tl-pitch .tl-pitch-line").get_attribute("d")
+        page.locator('#props-body input[aria-label="圓弧(百分比)"]').fill("100")
+        wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == 100, "圓弧應存成 100")
+        expect(page.locator('#props-body input[aria-label="圓弧(百分比)"]')).to_have_value("100")
+        d100 = page.locator(f"{seg0} svg.tl-pitch .tl-pitch-line").get_attribute("d")
+        check(d0 != d100 and "Q" in d100 and "Q" not in d0, f"圓弧 0% / 100% 的 path 應不同且 100% 含 Q:{d0} / {d100}")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "改圓弧後應完成後製")
+        shot("pitch.png")
+
+        begin("預覽:第 1 句播放的 <audio> 來源是後製檔")
+        post_id = proj().segments[0]["post"]["id"]
+        page.locator("#preview-start").click()
+        page.locator("#preview-play").click()
+        wait_until(lambda: post_id in (page.evaluate("window.Studio.Preview.audio.src") or ""),
+                   "預覽第 1 句時 <audio> 應播放後製檔")
+        page.locator("#preview-play").click()
+        expect(page.locator("#preview-play")).to_have_attribute("aria-label", "播放")
+
+        begin("時間軸:選取關鍵點後按 Delete 刪除;剩 2 點時再刪即清除語調")
+        page.locator(seg0).click()
+        for want in (3, 2):
+            keys.nth(1).click()
+            page.keyboard.press("Delete")
+            wait_until(lambda: pitch_pts() is not None and len(pitch_pts()) == want, f"刪除後應剩 {want} 點,實際 {pitch_pts()}")
+            expect(keys).to_have_count(want)
+        keys.nth(0).click()
+        page.keyboard.press("Delete")
+        wait_until(lambda: pitch_pts() is None, "剩 2 點時再刪應清除語調(pitch 為 null)")
+        expect(keys).to_have_count(0)
+        check(len(calls()) == n_calls, "編輯語調不應呼叫合成 worker")
+
+        # CHG-20261029-01 T9:文稿框的合音標示(D40~D43)與聲調區「合音」模式(D23~D28、D37)
+        fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toast, problems, seg_ids)
+
         # 4. 免責說明與授權
         begin("回首頁點底部「免責說明與授權」連結")
         page.locator("#page-full .back-link").click()
@@ -1072,6 +1721,7 @@ def run_suite(browser, suite: str) -> int:
             patch(heavy_lock, "LOCK_PATH", root / "outputs" / ".heavy.lock")
             patch(tts_service, "BREEZY", stubs.breezy)
             patch(tts_service, "_worker_argv", stubs.worker_argv)
+            patch(tts_service, "_shape_argv", stubs.shape_argv)
             patch(taiwan_ai, "role_config", lambda role: {"wav": "voice/voice.wav", "text": VOICE_TEXT})
             kwargs = {"render": stubs.render, "annotate": stubs.annotate}
         app = ss.create_app(runner=runner, root=root, ollama_tags=lambda: list(STUB_TAGS), **kwargs)
@@ -1098,7 +1748,7 @@ def run_suite(browser, suite: str) -> int:
                 if suite == "editor":
                     run_editor_checks(page, base, root, stubs, problems)
                 else:
-                    run_checks(page, base, root, runner, settings)
+                    run_checks(page, base, root, runner, settings, problems)
                 csp = page.evaluate("window.__csp || []")
                 problems.extend(f"CSP 違規:{c}" for c in csp)
             except StepFailed as e:

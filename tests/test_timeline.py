@@ -182,3 +182,35 @@ def test_layout不改動專案物件():
     before = p.to_dict()
     tl.layout(p)
     assert p.to_dict() == before
+
+
+# ---------- CHG-20261029-01 T3:片段長度取後製後長度 ----------
+
+def _synth_seg(i, seconds, post_seconds=None, stale=False, **kw):
+    s = seg(i, seconds=seconds, **kw)
+    key = f"{i + 1:x}" * 64
+    s["audio"] = {"id": key[:32], "seconds": seconds, "key": key}
+    s.update({"connect": None, "clarity": None, "word_clarity": [], "pitch": None, "post": None})
+    if post_seconds is not None:
+        pk = pj.post_key(s)
+        s["post"] = {"id": pk[:32], "key": pk, "seconds": post_seconds, "trim": seconds - post_seconds}
+        if stale:
+            s["connect"] = 50          # 參數改過 → post 過期
+    return s
+
+
+def test_片段長度取後製後長度除以語速_過期退回合成長度():
+    p = make([_synth_seg(0, 2.3, post_seconds=1.84, pause=0.0),
+              _synth_seg(1, 3.0, post_seconds=2.0, stale=True, speed=2.0, pause=0.0),
+              _synth_seg(2, 1.0, brk="end")])
+    a, b, c = tl.layout(p)["segments"]
+    assert (a["start"], a["end"]) == (0.0, 1.6)         # 1.84 ÷ 1.15
+    assert (b["start"], b["end"]) == (1.6, 3.1)         # 過期:3.0 ÷ 2.0
+    assert (c["start"], c["end"]) == (3.1, 3.97)        # 沒有 post:1.0 ÷ 1.15
+    assert tl.segment_seconds(p.segments[0]) == 1.84
+
+
+def test_自錄音檔長度不看post():
+    s = seg(0, seconds=1.5, brk="end")
+    s["post"] = {"id": "f" * 32, "key": "f" * 64, "seconds": 0.5, "trim": 1.0}
+    assert tl.segment_seconds(s) == 1.5

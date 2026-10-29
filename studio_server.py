@@ -211,10 +211,11 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi import FastAPI, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse  # noqa: E402
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
 import executor  # noqa: E402
+import fusion  # noqa: E402
 import heavy_lock  # noqa: E402
 import media  # noqa: E402
 import names  # noqa: E402
@@ -709,7 +710,11 @@ MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "w
 WAV_ONLY = "取代語音只接受 WAV 音檔"
 BUSY = "已有語音合成、匯出、注音標註或流程在執行中,請等它結束"
 SEGMENT_PATCH_KEYS = ("text", "pause_after", "speed", "annotations", "split_at", "merge_next",
-                      "audio_file", "audio")
+                      "audio_file", "audio", "connect", "clarity", "word_clarity", "pitch", "fusions",
+                      "fusion_off")
+PROSODY_KEYS = ("connect", "clarity", "word_clarity", "pitch")   # CHG-20261029-01:改了只重做後製,不重新合成
+NO_POST_EXTERNAL = "自錄音檔不做後製(連音、清晰度、字詞清晰度、語調只適用於合成的語音)"
+MAX_POST_IDS = 2000
 PROJECT_PUT_KEYS = ("script", "forced_breaks", "defaults")
 
 
@@ -721,6 +726,10 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.extra = extra
+
+
+class _NoChange(Exception):
+    """mutate 的 change 沒有任何修改:不存檔(避免 history 多一版)。"""
 
 
 class AnnotateError(RuntimeError):
@@ -817,29 +826,43 @@ def _forced_breaks(proj) -> list[int]:
 
 
 def _view(proj) -> dict:
-    """GET /api/projects/{p} 與各修改端點共用的回應本體。"""
-    return {"project": proj.to_dict(), "layout": timeline.layout(proj), "forced_breaks": _forced_breaks(proj)}
+    """GET /api/projects/{p} 與各修改端點共用的回應本體。
+
+    (CHG-20261029-01 T4)post_stale:後製過期的合成片段 id(前端開啟專案或改參數後據此呼叫 POST /post)。"""
+    return {"project": proj.to_dict(), "layout": timeline.layout(proj), "forced_breaks": _forced_breaks(proj),
+            "post_stale": [s["id"] for s in tts_service.stale_post(proj)]}
 
 
 def _new_segment(text: str, brk: str) -> dict:
     return {"id": pj.new_id(), "text": text, "break": brk, "pause_after": None, "speed": None,
-            "annotations": [], "audio": None}
+            "annotations": [], "audio": None, "connect": None, "clarity": None, "word_clarity": [],
+            "pitch": None, "post": None, "fusions": [], "fusion_off": []}
 
 
 def _resplit(proj, script, forced) -> None:
-    """文稿改寫後重新分句;文字相同的片段(依序配對)沿用 id、停頓、語速、標註與音檔,只有新句沒有音檔。"""
+    """文稿改寫後重新分句;文字相同的片段(依序配對)沿用 id、停頓、語速、標註與音檔,只有新句沒有音檔。
+
+    (CHG-20261029-01 D41)句數不變時,改過文字的句子沿用同一位置舊句的合音狀態(依位移調整、
+    與改動範圍重疊者清除);音檔、標註與其他設定不沿用。"""
     pieces = pj.split_segments(script, forced)
     pool: dict[str, list] = {}
     for s in proj.segments:
         pool.setdefault(s["text"], []).append(s)
+    same_count = len(pieces) == len(proj.segments)
+    used = set()
     segs = []
-    for p in pieces:
+    for k, p in enumerate(pieces):
         olds = pool.get(p["text"])
         if olds:
             s = dict(olds.pop(0))
             s["break"] = p["break"]
+            used.add(s["id"])
         else:
             s = _new_segment(p["text"], p["break"])
+            old = proj.segments[k] if same_count else None
+            if old is not None and old["id"] not in used and (old.get("fusions") or old.get("fusion_off")):
+                moved = pj.shift_marks(old, old["text"], p["text"])
+                s["fusions"], s["fusion_off"] = moved["fusions"], moved["fusion_off"]
         segs.append(s)
     proj.script = script
     proj.segments = segs
@@ -917,6 +940,9 @@ def _media_file(name: str, aid: str, overlay: Callable | None = None) -> tuple[i
     found = next(((("assets", a["ext"])) for a in proj.assets if a["id"] == aid), None)
     if found is None and any((s.get("audio") or {}).get("id") == aid for s in proj.segments):
         found = ("audio", "wav")
+    if found is None and any((s.get("post") or {}).get("id") == aid and pj.is_post_fresh(s)
+                             for s in proj.segments):
+        found = ("audio", "wav")   # CHG-20261029-01 D18:預覽播放後製檔
     if found is None or found[1] not in MEDIA_TYPES:
         raise ApiError(404, "找不到這個檔案")
     sub, ext = found
@@ -1044,6 +1070,33 @@ def annotate_text(text: str, root: Path) -> list:
     return out
 
 
+def _fusion_lexicon() -> dict:
+    """合音詞庫(啟用者):{2~4 字詞: 合音注音},讀設定資料庫(CHG-20261029-01 T8,settings.fusion_lexicon)。"""
+    return settings.fusion_lexicon()
+
+
+FUSION_PREVIEW_TTL = 600          # 匯入預覽代號 10 分鐘過期(D30)
+FUSION_PREVIEW_MAX = 32           # 記憶體內最多保留的預覽數
+FUSION_MULTIPART_OVERHEAD = 16 * 1024
+FUSION_WORD_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\U00020000-\U000323af]{2,4}")
+
+
+def _multipart_file(content_type: str, body: bytes, field: str = "file") -> bytes | None:
+    """以標準庫 email 解析 multipart/form-data,回傳欄位 field 的檔案內容(只在記憶體,不落地);沒有回 None。"""
+    from email.parser import BytesParser
+    from email.policy import HTTP
+    if not content_type.lower().startswith("multipart/form-data"):
+        return None
+    msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body)
+    if not msg.is_multipart():
+        return None
+    for part in msg.iter_parts():
+        if part.get_param("name", header="content-disposition") == field:
+            data = part.get_payload(decode=True)
+            return data if isinstance(data, bytes) else b""
+    return None
+
+
 def _render_default(proj):
     return media.render_timeline(proj, timeline.layout(proj))
 
@@ -1076,14 +1129,18 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                ollama_tags: Callable[[], list] | None = None,
                synth: Callable | None = None, render: Callable | None = None,
                annotate: Callable[[str], list] | None = None,
-               voice_defaults: Callable[[], dict] | None = None) -> FastAPI:
+               voice_defaults: Callable[[], dict] | None = None,
+               post: Callable | None = None,
+               fusion_lexicon: Callable[[], dict] | None = None) -> FastAPI:
     """建立 app。runner 預設為 executor.run(測試可換替身);token 預設每次隨機產生;
     root 為 repo 根目錄(`outputs/`、`workflows/` 所在處),預設本檔所在目錄,測試可指到暫存目錄;
     ollama_tags 為取得 Ollama 已下載模型清單的函式(預設 fetch_ollama_tags,測試可換替身;
     失敗時應丟 OllamaUnavailable)。設定資料庫的位置由 settings.ROOT 決定。
     專案 API(T6)的替身:synth(project, emit)預設 tts_service.synth;render(project) -> (mp4, srt)
     預設 media.render_timeline(project, timeline.layout(project));annotate(text) -> 注音陣列預設
-    annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8:讀設定資料庫)。
+    annotate_text(text, root);voice_defaults() 預設 _voice_defaults(T8:讀設定資料庫);
+    post(project, segment_ids, emit) 預設 tts_service.post_process(CHG-20261029-01 T4);
+    fusion_lexicon() -> {2~4 字詞: 合音注音}(只含啟用者)預設 _fusion_lexicon(CHG-20261029-01 T7)。
     專案目錄由 project.ROOT 決定(不是 root)。"""
     token = token or secrets.token_urlsafe(32)
     tags_fn = ollama_tags or fetch_ollama_tags
@@ -1384,12 +1441,14 @@ def create_app(runner: Callable | None = None, token: str | None = None,
     render_fn = render or _render_default
     annotate_fn = annotate or (lambda text: annotate_text(text, root))
     defaults_fn = voice_defaults or _voice_defaults
+    post_fn = post or tts_service.post_process
+    lexicon_fn = fusion_lexicon or _fusion_lexicon
     plocks: dict[str, threading.Lock] = {}
     plocks_guard = threading.Lock()
     jobs: dict[str, str] = {}   # run_id → 執行合成 / 匯出中的專案名稱(比對鍵),刪除專案時檢查
     # 合成中途可試聽(DIR-5 統整 M-1):本次合成已完成、尚未寫回專案的片段音檔,只存在記憶體。
     # 專案比對鍵 → {片段 id: (合成當時的含標註文字, audio)};結束寫回(merge_audio)後清除。
-    live_audio: dict[str, dict[str, tuple[str, dict]]] = {}
+    live_audio: dict[str, dict[str, tuple]] = {}   # (CHG-20261029-01)值為 (合成文字, audio, post)
     live_guard = threading.Lock()
 
     def overlay(name: str, proj):
@@ -1401,6 +1460,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             if got is None or _external(s.get("audio")) or pj.tts_text(s) != got[0]:
                 continue
             s["audio"] = dict(got[1])
+            post = got[2] if len(got) > 2 else None
+            if post and pj.is_post_fresh({**s, "post": post}):
+                s["post"] = dict(post)
         return proj
 
     def plock(name: str) -> threading.Lock:
@@ -1578,6 +1640,26 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             for key in ("pause_after", "speed"):
                 if key in data:
                     seg[key] = data[key]
+            if "text" in data and seg["text"] != proj.segments[idx]["text"]:
+                if "word_clarity" not in data:
+                    seg["word_clarity"] = []   # 字詞清晰度以字元索引記錄,文字改了即清除(同注音標註)
+                moved = pj.shift_marks(seg, proj.segments[idx]["text"], seg["text"])   # D41:依位移調整
+                if "fusions" not in data:
+                    seg["fusions"] = moved["fusions"]
+                if "fusion_off" not in data:
+                    seg["fusion_off"] = moved["fusion_off"]
+            if "fusion_off" in data:
+                seg["fusion_off"] = data["fusion_off"]
+            if "fusions" in data:   # 合音改變送模型的文字:該句變髒、走既有 synth(D28)
+                if seg.get("fusions") != data["fusions"] and _external(seg.get("audio")) \
+                        and "audio_file" not in data:
+                    seg["audio"] = None
+                seg["fusions"] = data["fusions"]
+            for key in PROSODY_KEYS:   # (CHG-20261029-01 T4)範圍驗證在 project.validate()
+                if key in data:
+                    if _external(seg.get("audio")) and data[key] not in (None, []):
+                        raise ApiError(422, NO_POST_EXTERNAL)
+                    seg[key] = data[key]
             # 先驗證單一片段(注音、停頓、語速不合法 → 422,不存檔)
             pj.Project.from_dict({**proj.to_dict(), "segments": [seg]})
             new_segments = [*proj.segments[:idx], seg, *proj.segments[idx + 1:]]
@@ -1592,10 +1674,11 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 skip = len(second) - len(second.lstrip())
                 anns = seg.get("annotations") or []
                 a = {**seg, "text": first.strip(), "break": "forced", "pause_after": None, "audio": None,
+                     "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_off": [],
                      "annotations": [{"index": x["index"] - lead, "zhuyin": x["zhuyin"]}
                                      for x in anns if x["index"] <= i]}
                 b = {**_new_segment(second.strip(), seg["break"]), "pause_after": seg.get("pause_after"),
-                     "speed": seg.get("speed"),
+                     "speed": seg.get("speed"), "connect": seg.get("connect"), "clarity": seg.get("clarity"),
                      "annotations": [{"index": x["index"] - (i + 1) - skip, "zhuyin": x["zhuyin"]}
                                      for x in anns if x["index"] > i]}
                 new_segments[idx:idx + 1] = [a, b]
@@ -1607,6 +1690,7 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 shift = len(seg["text"])
                 merged = {**seg, "text": seg["text"] + nxt["text"], "break": nxt["break"],
                           "pause_after": nxt.get("pause_after"), "audio": None,
+                          "word_clarity": [], "pitch": None, "post": None, "fusions": [], "fusion_off": [],
                           "annotations": (seg.get("annotations") or []) + [
                               {"index": x["index"] + shift, "zhuyin": x["zhuyin"]}
                               for x in nxt.get("annotations") or []]}
@@ -1723,8 +1807,9 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                     audio = ev.get("audio") if isinstance(ev.get("audio"), dict) else (seg or {}).get("audio")
                     if seg is not None and isinstance(audio, dict) and isinstance(audio.get("id"), str) \
                             and pj.ID_RE.fullmatch(audio["id"]):
+                        post = ev.get("post") if isinstance(ev.get("post"), dict) else None
                         with live_guard:   # 該句立即可在專案檢視、時間軸與 media 端點取用(不存檔)
-                            live_audio.setdefault(key, {})[sid] = (pj.tts_text(seg), dict(audio))
+                            live_audio.setdefault(key, {})[sid] = (pj.tts_text(seg), dict(audio), post)
                 run.emit(ev)
 
             status, result = "error", {"synthesized": [], "cached": []}
@@ -1732,6 +1817,11 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                 with plock(name):
                     snapshot = pj.load(name)
                 result = synth_fn(snapshot, emit) or result
+                done = set(done_ids)
+                stale = [s["id"] for s in snapshot.segments if s["id"] in done and s.get("audio")
+                         and not _external(s.get("audio")) and not pj.is_post_fresh(s)]
+                if stale:   # (CHG-20261029-01 D20)非預設參數的片段接著後製(不進 heavy_lock)
+                    post_fn(snapshot, stale, run.emit)
                 status = "ok"
             except (tts_service.SynthError, pj.ProjectError) as e:
                 run.emit({"type": "error", "message": str(e)})
@@ -1754,6 +1844,39 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                          daemon=True).start()
         return {"run_id": run.id, "events": f"/api/run/{run.id}/events"}
 
+    def _post_for(cur: dict, done: dict):
+        """合成 / 後製結果的 post 只在「目前片段」的後製鍵相符時才寫回(期間改了參數就保持過期)。"""
+        post = done.get("post")
+        if not post:
+            return cur.get("post")
+        probe = {**cur, "audio": done["audio"], "post": post}
+        return dict(post) if pj.is_post_fresh(probe) else cur.get("post")
+
+    def merge_post(name: str, snapshot, ids) -> int:
+        """把後製結果(snapshot 的 post)寫回目前專案:只更新同 id、同音檔、後製鍵仍相符的片段;沒有變化不存檔。"""
+        wanted = set(ids)
+        by_id = {s["id"]: s for s in snapshot.segments if s["id"] in wanted and s.get("post")}
+        if not by_id:
+            return 0
+
+        def change(cur, created):
+            n = 0
+            for s in cur.segments:
+                w = by_id.get(s["id"])
+                if w is None or _external(s.get("audio")) or s.get("audio") != w.get("audio"):
+                    continue
+                post = _post_for(s, w)
+                if post != s.get("post"):
+                    s["post"] = post
+                    n += 1
+            if not n:
+                raise _NoChange()
+            return {"n": n}
+        try:
+            return mutate(name, change)["n"]
+        except _NoChange:
+            return 0
+
     def merge_audio(name: str, snapshot, ids: list) -> int:
         """把合成結果寫回目前的專案:只更新同 id 且合成文字未變的片段;合成期間改成自錄音檔的不覆蓋。"""
         if snapshot is None or not ids:
@@ -1765,11 +1888,15 @@ def create_app(runner: Callable | None = None, token: str | None = None,
             n = 0
             for s in cur.segments:
                 w = by_id.get(s["id"])
-                if w is None or _external(s.get("audio")) or s.get("audio") == w["audio"]:
+                if w is None or _external(s.get("audio")):
                     continue
                 if pj.tts_text(s) != pj.tts_text(w):
                     continue
+                post = _post_for(s, w)
+                if s.get("audio") == w["audio"] and s.get("post") == post:
+                    continue
                 s["audio"] = dict(w["audio"])
+                s["post"] = post
                 n += 1
             if n:
                 pj.save(cur)
@@ -1795,6 +1922,10 @@ def create_app(runner: Callable | None = None, token: str | None = None,
 
         def work():
             try:
+                stale = [s["id"] for s in tts_service.stale_post(proj)]
+                if stale:   # (CHG-20261029-01 D20)匯出前自動補做過期的後製
+                    post_fn(proj, stale, run.emit)
+                    merge_post(name, proj, stale)
                 with heavy_lock.heavy_lock(on_wait=lambda: run.emit({"type": "waiting"})):
                     run.emit({"type": "render", "status": "started"})
                     mp4, srt = render_fn(proj)
@@ -1802,6 +1933,8 @@ def create_app(runner: Callable | None = None, token: str | None = None,
                           "srt": _out_relative(srt)})
             except media.RenderError as e:
                 run.emit({"type": "error", "message": str(e), "segments": list(e.segments)})
+            except tts_service.SynthError as e:
+                run.emit({"type": "error", "message": str(e)})
             except Exception as e:
                 print(f"studio_server:匯出錯誤 {type(e).__name__}", file=sys.stderr)
                 run.emit({"type": "error", "message": "✗ 影片匯出失敗"})
@@ -1809,6 +1942,230 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         threading.Thread(target=_job_thread, args=(work, run, end_job), name=f"render-{run.id}",
                          daemon=True).start()
         return {"run_id": run.id, "events": f"/api/run/{run.id}/events"}
+
+    @app.post("/api/projects/{p}/post")
+    @_guard
+    async def api_post(p: str, request: Request):
+        """(CHG-20261029-01 T4)只重做後製(裁切、連音、清晰度、語調),不重新合成;同步完成後回專案檢視。
+
+        body {"segments": [片段 id…]};省略或 {} = 全部後製過期的片段;自錄音檔片段略過。與 synth / render /
+        run / annotate 共用「執行中」旗標(忙碌 409),不進 heavy_lock。"""
+        name = _pname(p)
+        data = await _json(request, allow_empty=True)
+        _only_keys(data, ("segments",))
+        ids = data.get("segments")
+        if ids is not None:
+            if not isinstance(ids, list) or len(ids) > MAX_POST_IDS:
+                raise ApiError(422, f"segments 必須是最多 {MAX_POST_IDS} 個片段 id 的陣列")
+            ids = [_check_item_id(i, "片段") for i in ids]
+        proj = await run_in_threadpool(pj.load, name)
+        if ids is not None:
+            known = {s["id"] for s in proj.segments}
+            if any(i not in known for i in ids):
+                raise ApiError(404, "找不到這個片段")
+            ext = {s["id"] for s in proj.segments if _external(s.get("audio"))}
+            ids = [i for i in ids if i not in ext]
+        else:
+            ids = [s["id"] for s in tts_service.stale_post(proj)]
+        run = start_job(name)
+
+        def work():
+            try:
+                out = post_fn(proj, ids, run.emit) if ids else {"processed": [], "cached": []}
+            except tts_service.SynthError as e:
+                raise ApiError(500, str(e)) from None
+            merge_post(name, proj, ids)
+            return {**_view(overlay(name, pj.load(name))), "post": out}
+        try:
+            result = await run_in_threadpool(work)
+            run.emit({"type": "finished", "status": "ok"})
+        finally:
+            end_job(run)
+        return result
+
+    # ---------- 合音詞庫(CHG-20261029-01 T8;D29~D31) ----------
+
+    previews: "OrderedDict[str, dict]" = OrderedDict()   # 預覽代號 → {"result", "expires"}(只在記憶體)
+    previews_guard = threading.Lock()
+
+    def fusion_call(fn, *a):
+        try:
+            return fn(*a)
+        except settings.FusionError as e:
+            raise ApiError(e.status, str(e)) from None
+
+    def fusion_word(word) -> str:
+        if not isinstance(word, str) or not FUSION_WORD_RE.fullmatch(word):
+            raise ApiError(404, "詞庫沒有這個詞(詞須為 2~4 個漢字)")
+        return word
+
+    def fusions_view() -> dict:
+        got = settings.load_fusions()
+        return {"words": got["words"], "version": got["version"], **({"_warnings": got["_warnings"]}
+                                                                      if got.get("_warnings") else {})}
+
+    @app.get("/api/settings/fusions/limits")
+    @_guard
+    def api_fusion_limits():
+        return JSONResponse({**settings.load_import_limits(), "kb_range": list(settings.FUSION_KB_RANGE),
+                             "rows_range": list(settings.FUSION_ROWS_RANGE)}, headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/settings/fusions/limits")
+    @_guard
+    async def api_fusion_limits_put(request: Request):
+        """(D36)匯入大小與筆數上限;超出允許範圍回 422 且不寫入。"""
+        data = await _json(request, limit=4096)
+        _only_keys(data, ("max_kb", "max_rows"))
+        out = await run_in_threadpool(fusion_call, settings.save_import_limits, data.get("max_kb"),
+                                      data.get("max_rows"))
+        return {**out, "kb_range": list(settings.FUSION_KB_RANGE), "rows_range": list(settings.FUSION_ROWS_RANGE)}
+
+    @app.get("/api/settings/fusions")
+    @_guard
+    def api_fusions():
+        return JSONResponse(fusions_view(), headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/settings/fusions/{word}")
+    @_guard
+    async def api_fusion_put(word: str, request: Request):
+        word = fusion_word(word)
+        data = await _json(request, limit=4096)
+        if data.get("restore") is True:
+            _only_keys(data, ("restore",))
+            await run_in_threadpool(fusion_call, settings.restore_fusion, word)
+        else:
+            _only_keys(data, ("zhuyin", "enabled", "display"))
+            await run_in_threadpool(fusion_call, settings.save_fusion, word, data.get("zhuyin"),
+                                    data.get("enabled"), data.get("display"))
+        return fusions_view()
+
+    @app.delete("/api/settings/fusions/{word}")
+    @_guard
+    async def api_fusion_delete(word: str):
+        word = fusion_word(word)
+        await run_in_threadpool(fusion_call, settings.delete_fusion, word)
+        return fusions_view()
+
+    @app.get("/api/settings/fusions/export")
+    @_guard
+    def api_fusions_export(format: str = "json"):
+        if format not in ("json", "csv"):
+            raise ApiError(422, "匯出格式只能是 json 或 csv")
+        data = settings.export_fusions(format)
+        ctype = "application/json; charset=utf-8" if format == "json" else "text/csv; charset=utf-8"
+        return Response(data, media_type=ctype, headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": _content_disposition("attachment", f"合音詞庫.{format}")})
+
+    @app.post("/api/settings/fusions/import/preview")
+    @_guard
+    async def api_fusions_preview(request: Request):
+        """差異預覽(D30 (a)):multipart 欄位 file(只在記憶體解析,不落地);回傳預覽結果與 preview_id。"""
+        limits = await run_in_threadpool(settings.load_import_limits)
+        max_kb = min(limits["max_kb"], settings.FUSION_HARD_MAX_KB)
+        body = await _read_body(request, max_kb * 1024 + FUSION_MULTIPART_OVERHEAD)   # 超過即停,不讀完
+        if body is None:
+            raise ApiError(413, settings.size_limit_message(max_kb))
+        raw = _multipart_file(request.headers.get("content-type", ""), body)
+        if raw is None:
+            raise ApiError(422, "請以 multipart/form-data 的 file 欄位上傳詞庫檔")
+        result = await run_in_threadpool(fusion_call, settings.preview_import, raw, limits)
+        pid = secrets.token_hex(16)   # 128 位元
+        now = time.monotonic()
+        with previews_guard:
+            for k in [k for k, v in previews.items() if v["expires"] <= now]:
+                previews.pop(k, None)
+            while len(previews) >= FUSION_PREVIEW_MAX:
+                previews.popitem(last=False)
+            previews[pid] = {"result": result, "expires": now + FUSION_PREVIEW_TTL}
+        return {**result, "preview_id": pid}
+
+    @app.post("/api/settings/fusions/import/apply")
+    @_guard
+    async def api_fusions_apply(request: Request):
+        """套用預覽(D30 (b)):{preview_id, base_version, apply: "all"} 或 {preview_id, base_version, keep: [詞]}。
+        代號單次有效、10 分鐘過期;代號失效、詞庫版本不符、預覽為「一致」皆回 409。"""
+        data = await _json(request, limit=64 * 1024)
+        _only_keys(data, ("preview_id", "base_version", "apply", "keep"))
+        pid = data.get("preview_id")
+        if ("apply" in data) == ("keep" in data):
+            raise ApiError(422, "請指定 apply: \"all\" 或 keep: [詞…] 其中之一")
+        if "apply" in data and data["apply"] != "all":
+            raise ApiError(422, "apply 只能是 \"all\"")
+        keep = data.get("keep", [])
+        if not isinstance(keep, list) or any(not isinstance(w, str) for w in keep) or len(keep) > 2000:
+            raise ApiError(422, "keep 必須是詞的陣列")
+        with previews_guard:
+            entry = previews.pop(pid, None) if isinstance(pid, str) else None
+        if entry is None or entry["expires"] <= time.monotonic():
+            raise ApiError(409, "預覽已失效或已使用,請重新匯入預覽")
+        result = entry["result"]
+        if data.get("base_version") != result["base_version"]:
+            raise ApiError(409, "詞庫在預覽後被修改,請重新預覽")
+        if result["status"] == "same":
+            raise ApiError(409, "與現有詞庫一致,無需更動")
+        out = await run_in_threadpool(fusion_call, settings.apply_import, result["changes"],
+                                      result["base_version"], "apply" in data, keep)
+        return {**fusions_view(), **out}
+
+    @app.post("/api/fusion/suggest")
+    @_guard
+    async def api_fusion_suggest(request: Request):
+        """(CHG-20261029-01 T7)合音建議與選取範圍的推導(純計算,不寫檔、不佔執行旗標)。
+
+        body {"text": 句子, "zhuyin"?: 逐字注音(null = 非中文字), "exclude"?: 不提示的字元索引,
+        "index"?: 選取起點, "length"?: 選取字數 2~4(預設 2)}。回傳
+        {"suggestions": 詞庫詞(4 → 3 → 2 字、由左至右、不重疊), "fusion"?: 選取範圍的推導}:
+          2 字:{"index", "length", "word", "a", "b", "rule", "raw", "reason", "lexicon", "zhuyin", "source"}
+          3~4 字:{"index", "length", "word", "lexicon", "options": [{offset, length, zhuyin, source, reason,
+                   "combined"}], "default": 預設選項索引或 null, "zhuyin", "source", "reason"}(D37)
+        zhuyin 為整個選取範圍的合音注音(音節以半形空白分隔);不合音時為 null。"""
+        data = await _json(request)
+        _only_keys(data, ("text", "zhuyin", "index", "length", "exclude"))
+        text = data.get("text")
+        if not isinstance(text, str) or not text or len(text) > MAX_ANNOTATE_CHARS:
+            raise ApiError(422, f"句子必須是 1 到 {MAX_ANNOTATE_CHARS} 字的文字")
+        zh = data.get("zhuyin")
+        if zh is not None and (not isinstance(zh, list) or len(zh) != len(text)
+                               or any(z is not None and (not isinstance(z, str) or len(z) > 5) for z in zh)):
+            raise ApiError(422, "zhuyin 必須是與句子等長的注音陣列(非中文字為 null)")
+        exclude = data.get("exclude", [])
+        if not isinstance(exclude, list) or len(exclude) > MAX_ANNOTATE_CHARS \
+                or any(not isinstance(k, int) or isinstance(k, bool) for k in exclude):
+            raise ApiError(422, "exclude 必須是字元索引的陣列")
+        lexicon = await run_in_threadpool(lexicon_fn)
+        out = {"suggestions": fusion.suggest(text, zh, lexicon, exclude)}
+        if "index" in data:
+            i, n = data["index"], data.get("length", 2)
+            if not isinstance(n, int) or isinstance(n, bool) or not pj.FUSION_MIN <= n <= pj.FUSION_MAX:
+                raise ApiError(422, f"合音最多 {pj.FUSION_MAX} 個漢字(至少 {pj.FUSION_MIN} 個)")
+            if not isinstance(i, int) or isinstance(i, bool) or not 0 <= i or i + n > len(text):
+                raise ApiError(422, "合音需要句內相鄰的字")
+            word = text[i:i + n]
+            if not all(fusion.is_hanzi(c) for c in word):
+                raise ApiError(422, "合音只能合併相鄰的漢字")
+            zs = list(zh[i:i + n]) if zh else [None] * n
+            lex = lexicon.get(word)
+            if n == 2:
+                a, b = zs
+                r = fusion.explain(a, b) if a and b else {"zhuyin": None, "reason": "缺少這兩個字的注音",
+                                                          "raw": None}
+                out["fusion"] = {"index": i, "length": 2, "word": word, "a": a, "b": b, "rule": r["zhuyin"],
+                                 "raw": r["raw"], "reason": r["reason"], "lexicon": lex,
+                                 "zhuyin": lex or r["zhuyin"],
+                                 "source": "lexicon" if lex else ("rule" if r["zhuyin"] else None)}
+            else:
+                options = fusion.pair_options(word, zs, lexicon)
+                for o in options:
+                    o["combined"] = fusion.combine(zs, o)
+                k = fusion.default_option(options)
+                pick = options[k] if k is not None else None
+                z = lex or (pick and pick["combined"])
+                out["fusion"] = {"index": i, "length": n, "word": word, "lexicon": lex, "options": options,
+                                 "default": None if lex else k, "zhuyin": z or None,
+                                 "source": "lexicon" if lex else (pick["source"] if z else None),
+                                 "reason": "詞庫" if lex else (pick["reason"] if pick else "沒有可合併的相鄰兩字")}
+        return out
 
     @app.post("/api/annotate")
     @_guard

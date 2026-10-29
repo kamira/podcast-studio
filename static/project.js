@@ -123,6 +123,22 @@
       return p ? p.assets.find(function (a) { return a.id === id; }) || null : null;
     },
 
+    // (CHG-20261029-01)後製有效:合成片段、有 post、且不在伺服器回報的 post_stale 內
+    postFresh(seg) {
+      const stale = (this.view && this.view.post_stale) || [];
+      return !!(seg && seg.audio && ("key" in seg.audio) && seg.post && stale.indexOf(seg.id) === -1);
+    },
+
+    // 預覽播放的音檔 id:後製有效時為後製檔,否則為合成 / 自錄音檔(與 timeline.layout() 一致)
+    audioId(seg) {
+      return this.postFresh(seg) ? seg.post.id : seg.audio.id;
+    },
+
+    // 片段長度(變速前):同 timeline.segment_seconds()
+    seconds(seg) {
+      return this.postFresh(seg) ? Number(seg.post.seconds) : Number(seg.audio.seconds);
+    },
+
     // 片段實際語速:speed 為 null 時用專案的語速預設(同 project.effective_speed)
     speedOf(seg) {
       const d = this.view ? this.view.project.defaults : {};
@@ -753,7 +769,7 @@
   function playSegment(seg) {
     if (!seg || !seg.audio) return;
     solo.pause();
-    solo.src = Store.mediaUrl(seg.audio.id);
+    solo.src = Store.mediaUrl(Store.audioId(seg));
     solo.playbackRate = Store.speedOf(seg);
     solo.play().catch(function () { S.toast("無法播放這一句", true); });
   }

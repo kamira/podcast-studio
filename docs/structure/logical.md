@@ -359,3 +359,11 @@ flowchart LR
 4. **使用者核准**:CI 全綠後,只改 `docs/`、`features/` 的 PR 可自動 merge;改到任何程式路徑的 PR 不論分級,一律停下等使用者核准(DIR-2 第 3 條);已過確認閘的 CHG 依 DIR-4 預授權,以統整席判定 `merge` 且 CI 全綠為條件由派發者 merge。審議留言只是完整性檢查,授權只有使用者核准(CHG-20261022-03 安全影響 (n))。
 5. **squash merge**:main 只接受 squash merge,標題帶 CHG 編號。
 6. **本機部署**:有程式變更時,在乾淨的 main 上執行 `scripts/deploy_local.sh`:`git pull --ff-only` → 跑 `scripts/check.sh`(存在時)→ 重啟 7860 網頁伺服器 → 驗證本專案行程的全部 LISTEN socket 只綁 `127.0.0.1` / `[::1]`,否則停止伺服器並 exit 1。MCP 伺服器由 client 啟動,腳本只印出重新啟動提醒。
+
+## CHG-20261029-01:後製管線與語調關鍵點流程
+
+〔觀察〕合成片段的後製:合成檔(內容定址,不改寫)→ ① 裁切(ffmpeg)→ 參數皆為預設時即為後製檔;否則 ② 連音 → ③ 清晰度(整句再疊字詞)→ ④ 語調(`breezy_worker shape`,BreezyVoice venv)→ 後製檔 `audio/<後製鍵前 32 碼>.wav` → ⑤ 語速 `atempo`(既有)→ 匯出;預覽播放後製檔並以 `playbackRate` 變速。改連音、清晰度、字詞清晰度、語調、語速一律不呼叫 synth。
+
+拖曳語調關鍵點:使用者在時間軸選取的片段上點兩下新增 / 拖曳 / Delete 刪除 → `PATCH segments/{id} {pitch}`(`project.validate` 驗證並存檔)→ 前端 `POST /post {segments: [id]}` → 伺服器取執行中旗標(忙碌 409,前端每秒重試)→ `tts_service.post_process` → 後製鍵未命中時啟動 shape worker → 寫回 `segment.post` → 時間軸依新長度重排、預覽改播新後製檔。
+
+合音:文稿框標示(未決定 / 啟用 / 停用)→ 啟用寫入片段 `fusions`(文稿未存檔先存檔分句)→ 該句 `tts_text` 改變、變髒 → 既有 synth(heavy_lock)重新合成該句;字幕、時間軸顯示原文。

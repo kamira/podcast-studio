@@ -40,6 +40,7 @@ worker 錯誤訊息:worker stderr 混有 BreezyVoice 的輸出(含本機路徑),
 """
 from __future__ import annotations
 
+import array
 import collections
 import contextlib
 import hashlib
@@ -50,6 +51,7 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -73,6 +75,10 @@ MODEL_LOAD_TIMEOUT = 180  # 第一句另給的模型載入額度(秒;CHG 修訂 
 # 等第一個進度行最多 MODEL_LOAD_TIMEOUT + SENTENCE_TIMEOUT 秒,之後每句 SENTENCE_TIMEOUT 秒;
 # 整批逾時 = MODEL_LOAD_TIMEOUT + 句數 × SENTENCE_TIMEOUT。
 SPEED_TIMEOUT = 120
+TRIM_TIMEOUT = 60
+MAX_POST = 2000                       # post 一次最多處理的句數(CHG-20261029-01 安全影響 g)
+POST_TIMEOUT_BASE, POST_TIMEOUT_EACH = 30, 5   # 後製 worker 逾時 = 30 + 5 × 句數 秒(D19)
+SHAPE_EXIT_HINTS = {2: "✗ 後製的輸入不正確", 3: "✗ 無法載入後製所需的模組", 4: "✗ 後製失敗"}
 STDERR_KEEP = 200
 MAX_MESSAGE = 300
 EXIT_HINTS = {
@@ -214,16 +220,23 @@ def _mask(text: str) -> str:
     return _ABS_PATH.sub("<路徑>", text)
 
 
-def _worker_message(code: int | None, stderr_lines) -> str:
+def _worker_message(code: int | None, stderr_lines, hints: dict | None = None,
+                    fallback: str = "✗ 語音合成失敗") -> str:
     """worker 失敗訊息:只取 worker 自己印的「✗」行並遮蔽路徑;取不到時依結束碼給固定訊息。"""
     mine = [ln.strip() for ln in stderr_lines if ln.strip().startswith("✗")]
     if mine:
         return _mask(mine[-1])[:MAX_MESSAGE]
-    return EXIT_HINTS.get(code, "✗ 語音合成失敗")
+    return (EXIT_HINTS if hints is None else hints).get(code, fallback)
 
 
 def _worker_argv(jobs_path: Path, out_dir: Path) -> list[str]:
     return [str(BREEZY / ".venv" / "bin" / "python"), str(WORKER), "synth",
+            "--jobs", str(jobs_path), "--out", str(out_dir)]
+
+
+def _shape_argv(jobs_path: Path, out_dir: Path) -> list[str]:
+    """後製 worker(CHG-20261029-01 T3):同一個 breezy_worker.py 的 shape 子命令,以 BreezyVoice venv 執行。"""
+    return [str(BREEZY / ".venv" / "bin" / "python"), str(WORKER), "shape",
             "--jobs", str(jobs_path), "--out", str(out_dir)]
 
 
@@ -235,9 +248,8 @@ def _pump(stream, sink):
         sink(None)
 
 
-def _write_jobs(tmp_fd: int, voice: Voice, jobs: list[dict]) -> int:
+def _write_jobs(tmp_fd: int, body: dict) -> int:
     """工作清單寫進 tmp/ 內排他建立的檔案後立即刪除名稱,回傳匿名 fd(DIR-5 修正 4:worker 以 /dev/fd 讀取)。"""
-    body = {"prompt_wav": str(voice.wav), "prompt_text": voice.text, "model": voice.model, "jobs": jobs}
     name = f"jobs-{secrets.token_hex(8)}.json"
     fd = safe_fs.create_excl(tmp_fd, name, 0o600, flags=os.O_RDWR)
     try:
@@ -251,12 +263,25 @@ def _write_jobs(tmp_fd: int, voice: Voice, jobs: list[dict]) -> int:
 
 
 def _run_worker(voice: Voice, jobs: list[dict], project_name: str, on_done) -> None:
+    """合成 worker(synth 子命令);逾時見 MODEL_LOAD_TIMEOUT、SENTENCE_TIMEOUT。"""
+    body = {"prompt_wav": str(voice.wav), "prompt_text": voice.text, "model": voice.model, "jobs": jobs}
+    _run_proc(lambda j, o: _worker_argv(j, o), body, [j["id"] for j in jobs], project_name, on_done,
+              first=MODEL_LOAD_TIMEOUT + SENTENCE_TIMEOUT, each=SENTENCE_TIMEOUT,
+              total=MODEL_LOAD_TIMEOUT + SENTENCE_TIMEOUT * len(jobs), timeout_msg="✗ 語音合成逾時,已終止",
+              hints=EXIT_HINTS, fallback="✗ 語音合成失敗", start_msg="✗ 無法啟動語音合成(請確認 tools/BreezyVoice 已安裝)",
+              incomplete="✗ 語音合成未完成:worker 沒有回報全部句子")
+
+
+def _run_proc(make_argv, body: dict, ids: list, project_name: str, on_done, *, first: float, each: float,
+              total: float, timeout_msg: str, hints: dict, fallback: str, start_msg: str, incomplete: str,
+              prepare=None) -> None:
     """啟動 worker 並逐行處理進度;on_done(job_id, out_fd) 在每句完成時呼叫(out_fd 為本次輸出目錄的 fd)。
+    prepare(out_fd) 在啟動 worker 前呼叫(shape 用來把輸入檔複製進輸出目錄)。
 
     (DIR-5 修正 4)tmp/ 以 `project` 的目錄 fd 開啟:工作清單為匿名 fd(`--jobs /dev/fd/<n>`,pass_fds);
     輸出目錄以 mkdir(dir_fd) 建立後保留 O_NOFOLLOW 開啟的 fd,本程式讀取產物與清理都相對這個 fd。
     worker 是外部行程,只能以路徑 `--out` 寫入(殘餘風險記於 CHG 修訂 4 補記)。"""
-    pending = {j["id"] for j in jobs}
+    pending = set(ids)
     lines: queue.Queue = queue.Queue()
     stderr_tail: collections.deque = collections.deque(maxlen=STDERR_KEEP)
     proc = jobs_fd = out_fd = out_name = None
@@ -265,33 +290,35 @@ def _run_worker(voice: Voice, jobs: list[dict], project_name: str, on_done) -> N
     tmp_fd = pj.open_subdir(project_name, "tmp", create=True)
     tmp_dir = pj._top() / pj.PROJECTS_NAME / project_name / "tmp"
     try:
-        jobs_fd = _write_jobs(tmp_fd, voice, jobs)
+        jobs_fd = _write_jobs(tmp_fd, body)
         out_name = f"out-{secrets.token_hex(8)}"
         os.mkdir(out_name, 0o700, dir_fd=tmp_fd)
         out_fd = safe_fs.open_child(tmp_fd, out_name)
+        if prepare is not None:
+            prepare(out_fd)
         try:
-            proc = subprocess.Popen(_worker_argv(Path(f"/dev/fd/{jobs_fd}"), tmp_dir / out_name),
+            proc = subprocess.Popen(make_argv(Path(f"/dev/fd/{jobs_fd}"), tmp_dir / out_name),
                                     cwd=str(BREEZY), env=taiwan_ai.BREEZY_ENV, pass_fds=(jobs_fd,),
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, encoding="utf-8", errors="replace", bufsize=1)
         except OSError:
-            raise SynthError("✗ 無法啟動語音合成(請確認 tools/BreezyVoice 已安裝)") from None
+            raise SynthError(start_msg) from None
         readers = [threading.Thread(target=_pump, args=(proc.stdout, lines.put), daemon=True),
                    threading.Thread(target=_pump, args=(proc.stderr, lambda ln: ln is not None and
                                                         stderr_tail.append(ln)), daemon=True)]
         for t in readers:
             t.start()
-        deadline = time.monotonic() + MODEL_LOAD_TIMEOUT + SENTENCE_TIMEOUT * len(jobs)
-        first = True   # 第一句含模型載入,另給 MODEL_LOAD_TIMEOUT
+        deadline = time.monotonic() + total
+        is_first = True   # synth:第一句含模型載入,另給 MODEL_LOAD_TIMEOUT
         while True:
-            limit = SENTENCE_TIMEOUT + (MODEL_LOAD_TIMEOUT if first else 0)
+            limit = first if is_first else each
             wait = min(limit, deadline - time.monotonic())
             if wait <= 0:
-                raise SynthError("✗ 語音合成逾時,已終止")
+                raise SynthError(timeout_msg)
             try:
                 line = lines.get(timeout=wait)
             except queue.Empty:
-                raise SynthError("✗ 語音合成逾時,已終止") from None
+                raise SynthError(timeout_msg) from None
             if line is None:
                 break
             try:
@@ -302,18 +329,18 @@ def _run_worker(voice: Voice, jobs: list[dict], project_name: str, on_done) -> N
             if jid not in pending:
                 continue
             pending.discard(jid)
-            first = False
+            is_first = False
             on_done(jid, out_fd)
         try:
             code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            raise SynthError("✗ 語音合成逾時,已終止") from None
+            raise SynthError(timeout_msg) from None
         for t in readers:
             t.join(timeout=5)
         if code != 0:
-            raise SynthError(_worker_message(code, list(stderr_tail)))
+            raise SynthError(_worker_message(code, list(stderr_tail), hints, fallback))
         if pending:
-            raise SynthError("✗ 語音合成未完成:worker 沒有回報全部句子")
+            raise SynthError(incomplete)
     finally:
         if proc is not None and proc.poll() is None:
             proc.kill()
@@ -339,18 +366,33 @@ def synth(project, emit) -> dict:
     for seg in dirty:
         by_key.setdefault(cache_key(seg, voice), []).append(seg)
 
+    adir = _audio_fd(project, create=True)
+
     def assign(key: str, seconds: float, cached: bool):
         for seg in by_key[key]:
             seg["audio"] = {"id": _audio_id(key), "seconds": seconds, "key": key}
+            _trim_on_synth(adir, seg)
             result["cached" if cached else "synthesized"].append(seg["id"])
             emit({"type": "segment", "id": seg["id"], "seconds": seconds, "cached": cached,
-                  "audio": dict(seg["audio"])})
+                  "audio": dict(seg["audio"]), "post": dict(seg["post"]) if seg.get("post") else None})
 
-    adir = _audio_fd(project, create=True)
     try:
         return _synth_into(project, emit, voice, by_key, assign, adir, result)
     finally:
         os.close(adir)
+
+
+def _trim_on_synth(adir: int, seg: dict) -> None:
+    """(CHG-20261029-01 D20)每句合成完成即裁切:預設參數的片段 post 直接指向裁切檔;
+    其他片段的 post 保持過期(由呼叫端接著 post_process)。裁切失敗只讓 post 過期,不中斷合成。"""
+    try:
+        _, trimmed = _ensure_trim(adir, seg)
+    except SynthError:
+        seg["post"] = None
+        return
+    if pj.is_default_post(seg):
+        key = pj.post_key(seg)
+        seg["post"] = _post_of(seg, key, trimmed, trimmed)
 
 
 def _synth_into(project, emit, voice, by_key, assign, adir: int, result: dict) -> dict:
@@ -380,20 +422,259 @@ def _synth_into(project, emit, voice, by_key, assign, adir: int, result: dict) -
     return result
 
 
+# ---------- 後製:裁切與 shape(CHG-20261029-01 T3) ----------
+
+def _trim_filter() -> str:
+    """D2:-40 dBFS 樣本峰值、前後各留 30 ms、10 ms 淡入 / 淡出(結尾以 areverse 倒轉後同樣處理)。
+    濾鏡字串只含程式常數(pj.TRIM_PARAMS)。"""
+    t = pj.TRIM_PARAMS
+    keep, fade = t["keep_ms"] / 1000, t["fade_ms"] / 1000
+    one = (f"silenceremove=start_periods=1:start_threshold={t['threshold_db']}dB:start_silence={keep:.3f}"
+           f":detection=peak,afade=t=in:d={fade:.3f}")
+    return f"{one},areverse,{one},areverse"
+
+
+def _scan_edges(src_fd: int) -> tuple[float, float]:
+    """以 ffmpeg 把來源解成 s16le 單聲道,回傳 (開頭, 結尾) 低於門檻的秒數(僅供顯示)。"""
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-i", "pipe:0",
+           "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000", "pipe:1"]
+    os.lseek(src_fd, 0, os.SEEK_SET)
+    try:
+        r = subprocess.run(cmd, stdin=src_fd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           check=True, timeout=TRIM_TIMEOUT)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return 0.0, 0.0
+    pcm = array.array("h")
+    pcm.frombytes(r.stdout[:len(r.stdout) // 2 * 2])
+    if sys.byteorder == "big":  # pragma: no cover
+        pcm.byteswap()
+    thr = int(32768 * 10 ** (pj.TRIM_PARAMS["threshold_db"] / 20))
+    first = next((i for i, v in enumerate(pcm) if v >= thr or v <= -thr), None)
+    if first is None:
+        return len(pcm) / 16000, 0.0
+    last = next(i for i in range(len(pcm) - 1, -1, -1) if pcm[i] >= thr or pcm[i] <= -thr)
+    return first / 16000, (len(pcm) - 1 - last) / 16000
+
+
+def _trim_fd(src_fd: int, adir: int, dest: str) -> None:
+    """src_fd 的音檔裁切後寫成 adir 內的 dest(暫存檔排他建立 → rename);裁切後沒有聲音時原樣複製。"""
+    part = f".{dest[:-len('.wav')]}-{secrets.token_hex(4)}.part.wav"
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-y", "-f", "wav", "-i", "pipe:0",
+           "-filter:a", _trim_filter(), "-c:a", "pcm_s16le", "-f", "wav"]
+    out = None
+    try:
+        out = safe_fs.create_excl(adir, part, 0o644, flags=os.O_RDWR)
+        os.lseek(src_fd, 0, os.SEEK_SET)
+        subprocess.run([*cmd, f"/dev/fd/{out}"], check=True, stdin=src_fd, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=TRIM_TIMEOUT, pass_fds=(out,))
+        try:
+            empty = media.wav_seconds(out) <= 0
+        except ValueError:
+            empty = True
+        if empty:   # 整段都在門檻以下:不裁切,改以 ffmpeg 原樣轉成 PCM
+            os.ftruncate(out, 0)
+            os.lseek(src_fd, 0, os.SEEK_SET)
+            subprocess.run([*cmd[:7], "-c:a", "pcm_s16le", "-f", "wav", f"/dev/fd/{out}"], check=True,
+                           stdin=src_fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=TRIM_TIMEOUT, pass_fds=(out,))
+        safe_fs.replace(adir, part, adir, dest)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        raise SynthError("✗ 片段靜音裁切失敗") from None
+    finally:
+        if out is not None:
+            os.close(out)
+        safe_fs.unlink(adir, part, missing_ok=True)
+
+
+def trim(src, dst) -> tuple[float, float, float]:
+    """把 src(WAV)裁掉前後低音量段寫成 dst;回傳 (裁切後秒數, 開頭低音量秒數, 結尾低音量秒數)。
+
+    開頭 / 結尾為來源中低於 -40 dBFS 的長度(裁切後各剩約 30 ms)。src、dst 為本機路徑(供工具與測試);
+    專案內一律經 `post_process()` 以目錄 fd 處理。"""
+    src, dst = Path(src), Path(dst)
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        head, tail = _scan_edges(fd)
+        dfd = safe_fs.open_dir(dst.parent)
+        with safe_fs.closing(dfd):
+            _trim_fd(fd, dfd, dst.name)
+            seconds = _seconds_in(dfd, dst.name)
+    finally:
+        os.close(fd)
+    return seconds, head, tail
+
+
+def _trim_key(segment: dict) -> str:
+    """裁切檔(= 預設參數的後製檔)的後製鍵。"""
+    return pj.post_key({**segment, "connect": None, "clarity": None, "word_clarity": [], "pitch": None})
+
+
+def _ensure_trim(adir: int, segment: dict) -> tuple[str, float]:
+    """確保 `audio/<裁切 id>.wav` 存在(不存在才跑 ffmpeg);回傳 (裁切 id, 裁切後秒數)。"""
+    tid = _trim_key(segment)[:32]
+    name = f"{tid}.wav"
+    if not _regular_in(adir, name):
+        try:
+            src = safe_fs.open_file(adir, f"{segment['audio']['id']}.wav")
+        except OSError:
+            raise SynthError("✗ 找不到這一句的合成音檔") from None
+        try:
+            _trim_fd(src, adir, name)
+        finally:
+            os.close(src)
+    return tid, _seconds_in(adir, name)
+
+
+def _post_of(segment: dict, key: str, seconds: float, trimmed: float) -> dict:
+    return {"id": key[:32], "key": key, "seconds": seconds,
+            "trim": round(max(0.0, segment["audio"]["seconds"] - trimmed), 3)}
+
+
+def _synthesized(segment: dict) -> bool:
+    audio = segment.get("audio")
+    return isinstance(audio, dict) and "key" in audio
+
+
+def _model_units(segment: dict) -> list[int]:
+    """送模型時會念出的字(漢字)在原文中的索引;估計字界與字詞清晰度的時間換算以此為準(D8、D28)。
+    合音刪去的第二字不念,不算一個字。"""
+    skip = pj.fused_out(segment)
+    return [i for i, ch in enumerate(segment["text"]) if pj._is_hanzi(ch) and i not in skip]
+
+
+def shape_job(segment: dict, out_id: str, input_id: str) -> dict:
+    """breezy_worker shape 的一筆工作:字詞清晰度的原文索引換成「念出的字」索引。"""
+    p = pj.post_params(segment)
+    units = _model_units(segment)
+    pos = {i: k for k, i in enumerate(units)}
+    words = []
+    for w in p["word_clarity"]:
+        idx = [pos[i] for i in range(w["start"], w["end"]) if i in pos]
+        if idx:
+            words.append({"start": idx[0], "end": idx[-1] + 1, "value": w["value"]})
+    return {"id": out_id, "input": f"{input_id}.wav", "chars": max(1, len(units)), "connect": p["connect"],
+            "clarity": p["clarity"], "word_clarity": words, "pitch": p["pitch"]}
+
+
+def stale_post(project) -> list[dict]:
+    """後製過期的合成片段(post 為 null、參數改過或音檔改過);自錄音檔與未合成的片段不算。
+
+    (CHG-20261029-01 DIR-5 修正 M-3)post 資料仍有效但後製檔 `audio/<post.id>.wav` 已不在,也算過期:
+    匯出前補做、專案檢視的 post_stale 與開啟時補做(D20)都會重做後製,時間軸長度與匯出音源維持同一份後製檔。"""
+    segs = [s for s in project.segments if _synthesized(s)]
+    if not segs:
+        return []
+    adir = _audio_fd(project, create=False)
+    try:
+        return [s for s in segs if not pj.is_post_fresh(s) or not _regular_in(adir, f"{s['post']['id']}.wav")]
+    finally:
+        if adir is not None:
+            os.close(adir)
+
+
+def post_process(project, segment_ids, emit) -> dict:
+    """對指定片段(None = 全部後製過期的合成片段)做後製,就地更新 segment.post,不存檔。
+
+    快取:後製檔 `audio/<後製鍵前 32 碼>.wav` 已存在即命中。預設參數的後製結果就是裁切檔,不啟動 shape;
+    其他片段在同一次 shape worker 內處理(不進 heavy_lock;逾時 30 + 5 × 句數 秒)。自錄音檔一律略過。
+    emit 的事件:{"type": "post", "id", "seconds", "cached"}。回傳 {"processed": [片段 id], "cached": [片段 id]}。
+    """
+    wanted = None if segment_ids is None else set(segment_ids)
+    segs = [s for s in project.segments if _synthesized(s) and (wanted is None or s["id"] in wanted)]
+    if wanted is None:
+        stale = {s["id"] for s in stale_post(project)}
+        segs = [s for s in segs if s["id"] in stale]
+    result = {"processed": [], "cached": []}
+    if not segs:
+        return result
+    if len(segs) > MAX_POST:
+        raise SynthError(f"✗ 一次最多後製 {MAX_POST} 句")
+    adir = _audio_fd(project, create=True)
+    try:
+        todo: dict[str, tuple[list, str, str, float]] = {}   # 後製 id → (片段, 後製鍵, 裁切 id, 裁切秒數)
+
+        def done(seg, key, seconds, trimmed, cached):
+            seg["post"] = _post_of(seg, key, seconds, trimmed)
+            result["cached" if cached else "processed"].append(seg["id"])
+            emit({"type": "post", "id": seg["id"], "seconds": seconds, "cached": cached})
+
+        for seg in segs:
+            key = pj.post_key(seg)
+            pid = key[:32]
+            if _regular_in(adir, f"{pid}.wav"):
+                done(seg, key, _seconds_in(adir, f"{pid}.wav"), _ensure_trim(adir, seg)[1], True)
+                continue
+            tid, trimmed = _ensure_trim(adir, seg)
+            if pj.is_default_post(seg):
+                done(seg, key, trimmed, trimmed, False)
+                continue
+            todo.setdefault(pid, ([], key, tid, trimmed))[0].append(seg)
+        if todo:
+            jobs = [shape_job(v[0][0], pid, v[2]) for pid, v in todo.items()]
+
+            def prepare(out_fd: int):
+                for tid in {v[2] for v in todo.values()}:
+                    src = safe_fs.open_file(adir, f"{tid}.wav")
+                    try:
+                        dst = safe_fs.create_excl(out_fd, f"{tid}.wav", 0o600)
+                        try:
+                            while chunk := os.read(src, 1 << 20):
+                                os.write(dst, chunk)
+                        finally:
+                            os.close(dst)
+                    finally:
+                        os.close(src)
+
+            def on_done(jid: str, out_fd: int):
+                name = f"{jid}.wav"
+                if not _regular_in(out_fd, name):
+                    raise SynthError("✗ 後製失敗:找不到這一句的後製檔")
+                safe_fs.replace(out_fd, name, adir, name)
+                segs_, key, _, trimmed = todo[jid]
+                seconds = _seconds_in(adir, name)
+                for seg in segs_:
+                    done(seg, key, seconds, trimmed, False)
+
+            _run_proc(lambda j, o: _shape_argv(j, o), {"jobs": jobs}, list(todo), project.name, on_done,
+                      first=POST_TIMEOUT_BASE + POST_TIMEOUT_EACH * len(jobs), each=POST_TIMEOUT_BASE
+                      + POST_TIMEOUT_EACH * len(jobs), total=POST_TIMEOUT_BASE + POST_TIMEOUT_EACH * len(jobs),
+                      timeout_msg="✗ 後製逾時,已終止", hints=SHAPE_EXIT_HINTS, fallback="✗ 後製失敗",
+                      start_msg="✗ 無法啟動後製(請確認 tools/BreezyVoice 已安裝)",
+                      incomplete="✗ 後製未完成:worker 沒有回報全部句子", prepare=prepare)
+    finally:
+        os.close(adir)
+    return result
+
+
+def ensure_post(project, emit) -> dict:
+    """匯出前補做所有後製過期的片段(D20)。"""
+    return post_process(project, None, emit)
+
+
 # ---------- 語速 ----------
 
+def _speed_source(segment: dict, adir: int | None) -> str:
+    """變速的來源檔名:後製有效且檔案存在時用後製檔(D18),否則用合成 / 自錄音檔。"""
+    post = segment.get("post")
+    if adir is not None and _synthesized(segment) and post and pj.is_post_fresh(segment) \
+            and _regular_in(adir, f"{post['id']}.wav"):
+        return post["id"]
+    return segment["audio"]["id"]
+
+
 def apply_speed(segment: dict, project) -> Path:
-    """回傳變速後的音檔路徑;以「合成快取鍵(audio.id)+ 語速」快取,命中時不跑 ffmpeg。
+    """回傳變速後的音檔路徑;以「來源 id(後製檔或合成 / 自錄音檔)+ 語速」快取,命中時不跑 ffmpeg。
 
     (DIR-5 修正 4)來源與輸出都相對 `audio/` 的目錄 fd:來源以 O_NOFOLLOW 開啟後經 stdin(`pipe:0`)
     交給 ffmpeg;輸出先在目錄 fd 內排他建立暫存檔,ffmpeg 寫 `/dev/fd/<n>`(pass_fds),完成後以
-    rename(dir_fd) 換成快取檔名。argv 不含任何專案路徑。"""
+    rename(dir_fd) 換成快取檔名。argv 不含任何專案路徑。CHG-20261029-01 T3 起來源為後製檔。"""
     audio = segment.get("audio")
     if not audio:
         raise SynthError("✗ 這一句尚未合成")
     speed = pj.effective_speed(project, segment)
     adir = _audio_fd(project, create=False)
-    src_name = f"{audio['id']}.wav"
+    src_id = _speed_source(segment, adir) if adir is not None else audio["id"]
+    src_name = f"{src_id}.wav"
     if not _regular_in(adir, src_name):
         if adir is not None:
             os.close(adir)
@@ -402,7 +683,7 @@ def apply_speed(segment: dict, project) -> Path:
     with safe_fs.closing(adir):
         if speed == 1.0:
             return base / src_name
-        dest = f"{audio['id']}-s{round(speed * 100):03d}.wav"
+        dest = f"{src_id}-s{round(speed * 100):03d}.wav"
         if _regular_in(adir, dest):
             return base / dest
         part = f".{dest[:-len('.wav')]}-{secrets.token_hex(4)}.part.wav"

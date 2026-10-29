@@ -891,7 +891,8 @@ def test_preview_schedule_matches_export_rules():
 def test_preview_uses_layout_and_playback_rate():
     js = _js("timeline.js")
     assert "this.audio.playbackRate = speed" in js
-    assert "Store.mediaUrl(seg.audio.id)" in js
+    assert "Store.mediaUrl(Store.audioId(seg))" in js   # CHG-20261029-01 D18:播放後製檔
+    assert "postFresh(seg) ? seg.post.id : seg.audio.id" in _js("project.js")
     assert "activeImage(lay.images, t)" in js and "activeCue(lay.cues, t)" in js
     assert "activeSegment(this.layout().segments, this.t)" in js
 

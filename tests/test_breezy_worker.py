@@ -313,3 +313,94 @@ def test_不認得的子命令與缺參數非0結束(tmp_path, breezy):
     r = run_worker(breezy, "synth", "--jobs", str(tmp_path / "none.json"), "--out", str(tmp_path))
     assert r.returncode != 0
     assert str(tmp_path) not in r.stderr
+
+
+# ---------- CHG-20261029-01 T2:shape 子命令(連音、清晰度、字詞清晰度、語調) ----------
+# 本檔的 Python 沒有 numpy:這裡只測參數驗證與「預設參數 = 原樣複製」;實際訊號處理的量測在
+# tests/integration/test_shape_real.py(BreezyVoice venv)。
+
+SHAPE_IN = "0123456789abcdef.wav"
+
+
+def _shape_out(tmp_path):
+    out = tmp_path / "shape-out"
+    out.mkdir()
+    import wave as _wave
+    with _wave.open(str(out / SHAPE_IN), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(22050)
+        w.writeframes(bytes(range(256)) * 40)
+    return out
+
+
+def _shape_job(**kw):
+    job = {"id": "fedcba9876543210", "input": SHAPE_IN, "chars": 12, "connect": 0, "clarity": 100,
+           "word_clarity": [], "pitch": None}
+    job.update(kw)
+    return job
+
+
+def _run_shape(tmp_path, breezy, jobs, out):
+    p = tmp_path / "shape-jobs.json"
+    p.write_text(json.dumps({"jobs": jobs}, ensure_ascii=False), encoding="utf-8")
+    return run_worker(breezy, "shape", "--jobs", str(p), "--out", str(out))
+
+
+def test_shape預設參數輸出與輸入逐位元組相同_不需numpy(tmp_path, breezy):
+    out = _shape_out(tmp_path)
+    r = _run_shape(tmp_path, breezy, [_shape_job()], out)
+    assert r.returncode == 0, r.stderr
+    rows = [json.loads(x) for x in r.stdout.splitlines()]
+    assert rows == [{"id": "fedcba9876543210", "seconds": pytest.approx(10240 / 2 / 22050, abs=0.001)}]
+    assert (out / "fedcba9876543210.wav").read_bytes() == (out / SHAPE_IN).read_bytes()
+    assert count(breezy, "ctor") == 0 and count(breezy, "g2pw_ctor") == 0   # 不載入任何模型
+
+
+@pytest.mark.parametrize("over", [
+    {"connect": "50"}, {"clarity": "100"}, {"connect": 50.0}, {"connect": 101}, {"clarity": -1},
+    {"connect": True}, {"chars": "12"}, {"chars": 0}, {"chars": 501},
+    {"id": "../evil01"}, {"id": "ABCDEF01"}, {"id": "abc"},
+    {"input": "../0123456789abcdef.wav"}, {"input": "sub/0123456789abcdef.wav"},
+    {"input": "/etc/passwd"}, {"input": "0123456789abcdef.WAV"}, {"input": "abcdef0123.wav"},
+    {"word_clarity": [{"start": 0, "end": 2, "value": "40"}]},
+    {"word_clarity": [{"start": 0, "end": 13, "value": 40}]},
+    {"word_clarity": [{"start": 0, "end": 3, "value": 40}, {"start": 2, "end": 4, "value": 40}]},
+    {"word_clarity": [{"start": i, "end": i + 1, "value": 1} for i in range(12)] * 3},
+    {"pitch": {"points": [[0, "3"], [1, 0]], "roundness": 50}},
+    {"pitch": {"points": [[0, 7], [1, 0]], "roundness": 50}},
+    {"pitch": {"points": [[0.5, 0], [0.4, 0]], "roundness": 50}},
+    {"pitch": {"points": [[0, 0]], "roundness": 50}},
+    {"pitch": {"points": [[0, 0], [1, 0]], "roundness": "50"}},
+    {"pitch": {"points": [[0, 0], [1, 0]]}},
+    {"extra": 1},
+])
+def test_shape不合法的jobs結束碼2且不寫檔(tmp_path, breezy, over):
+    out = _shape_out(tmp_path)
+    r = _run_shape(tmp_path, breezy, [_shape_job(**over)], out)
+    assert r.returncode == 2, r.stderr
+    assert sorted(p.name for p in out.iterdir()) == [SHAPE_IN]
+    assert r.stdout == ""
+    assert str(tmp_path) not in r.stderr and "Traceback" not in r.stderr
+
+
+def test_shape輸入是符號連結拒絕(tmp_path, breezy):
+    out = _shape_out(tmp_path)
+    (tmp_path / "outside.wav").write_bytes((out / SHAPE_IN).read_bytes())
+    (out / SHAPE_IN).unlink()
+    (out / SHAPE_IN).symlink_to(tmp_path / "outside.wav")
+    r = _run_shape(tmp_path, breezy, [_shape_job()], out)
+    assert r.returncode == 2
+    assert not (out / "fedcba9876543210.wav").exists()
+
+
+def test_shape的jobs不是物件或缺參數(tmp_path, breezy):
+    out = _shape_out(tmp_path)
+    p = tmp_path / "bad.json"
+    for body in ("[]", '{"jobs": {}}', '{"jobs": []}', "{壞"):
+        p.write_text(body, encoding="utf-8")
+        r = run_worker(breezy, "shape", "--jobs", str(p), "--out", str(out))
+        assert r.returncode == 2
+    assert run_worker(breezy, "shape", "--jobs", str(p)).returncode == 2
+    r = run_worker(breezy, "shape", "--jobs", str(p), "--out", str(tmp_path / "none"))
+    assert r.returncode == 2
