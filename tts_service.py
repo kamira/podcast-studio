@@ -275,7 +275,8 @@ def _run_worker(voice: Voice, jobs: list[dict], project_name: str, on_done) -> N
 def _run_proc(make_argv, body: dict, ids: list, project_name: str, on_done, *, first: float, each: float,
               total: float, timeout_msg: str, hints: dict, fallback: str, start_msg: str, incomplete: str,
               prepare=None) -> None:
-    """啟動 worker 並逐行處理進度;on_done(job_id, out_fd) 在每句完成時呼叫(out_fd 為本次輸出目錄的 fd)。
+    """啟動 worker 並逐行處理進度;on_done(job_id, out_fd, row) 在每句完成時呼叫(out_fd 為本次輸出目錄的 fd,
+    row 為 worker 該句的 stdout JSON;修訂 1 T11 起 shape 以 row 帶回 pitch_points)。
     prepare(out_fd) 在啟動 worker 前呼叫(shape 用來把輸入檔複製進輸出目錄)。
 
     (DIR-5 修正 4)tmp/ 以 `project` 的目錄 fd 開啟:工作清單為匿名 fd(`--jobs /dev/fd/<n>`,pass_fds);
@@ -330,7 +331,7 @@ def _run_proc(make_argv, body: dict, ids: list, project_name: str, on_done, *, f
                 continue
             pending.discard(jid)
             is_first = False
-            on_done(jid, out_fd)
+            on_done(jid, out_fd, row)
         try:
             code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -410,7 +411,7 @@ def _synth_into(project, emit, voice, by_key, assign, adir: int, result: dict) -
     keys = {_audio_id(k): k for k in todo}
     jobs = [{"id": _audio_id(k), "text": pj.tts_text(by_key[k][0])} for k in todo]
 
-    def on_done(jid: str, out_fd: int):
+    def on_done(jid: str, out_fd: int, row: dict):
         name = f"{jid}.wav"
         if not _regular_in(out_fd, name):
             raise SynthError("✗ 語音合成失敗:找不到這一句的音檔")
@@ -525,9 +526,35 @@ def _ensure_trim(adir: int, segment: dict) -> tuple[str, float]:
     return tid, _seconds_in(adir, name)
 
 
-def _post_of(segment: dict, key: str, seconds: float, trimmed: float) -> dict:
-    return {"id": key[:32], "key": key, "seconds": seconds,
+def _post_of(segment: dict, key: str, seconds: float, trimmed: float, pitch_points=None) -> dict:
+    post = {"id": key[:32], "key": key, "seconds": seconds,
             "trim": round(max(0.0, segment["audio"]["seconds"] - trimmed), 3)}
+    if pitch_points is not None:
+        post["pitch_points"] = pitch_points
+    return post
+
+
+def _shape_pitch_points(segment: dict, row: dict):
+    """驗證 shape 回傳的 pitch_points(修訂 1 R1-10、安全影響 (b)):有語調的句子必須是 2–30 個 [位置 0–1 遞增,
+    半音 ±7.2];沒有語調的句子必須是 null 或不帶。不合格丟 SynthError(該句後製失敗,沿用上一份後製檔)。"""
+    has_pitch = pj.post_params(segment)["pitch"] is not None
+    if not has_pitch:
+        if row.get("pitch_points") is not None:
+            raise SynthError("✗ 後製失敗:worker 回傳的語調點格式不正確")
+        return None
+    try:
+        return pj.check_pitch_points(row.get("pitch_points"), "pitch_points")
+    except pj.ProjectError:
+        raise SynthError("✗ 後製失敗:worker 回傳的語調點格式不正確") from None
+
+
+def _known_pitch_points(project, key: str):
+    """後製檔快取命中時沿用的 pitch_points:專案內同一後製鍵、已寫入的 post.pitch_points(沒有則 None)。"""
+    for s in project.segments:
+        post = s.get("post")
+        if isinstance(post, dict) and post.get("key") == key and post.get("pitch_points") is not None:
+            return post["pitch_points"]
+    return None
 
 
 def _synthesized(segment: dict) -> bool:
@@ -578,6 +605,10 @@ def post_process(project, segment_ids, emit) -> dict:
     快取:後製檔 `audio/<後製鍵前 32 碼>.wav` 已存在即命中。預設參數的後製結果就是裁切檔,不啟動 shape;
     其他片段在同一次 shape worker 內處理(不進 heavy_lock;逾時 30 + 5 × 句數 秒)。自錄音檔一律略過。
     emit 的事件:{"type": "post", "id", "seconds", "cached"}。回傳 {"processed": [片段 id], "cached": [片段 id]}。
+
+    (修訂 1 T11)有語調的句子:worker 回傳的 pitch_points(實際套用的內部點)驗證後寫入 segment.post.pitch_points;
+    不合格時該句後製失敗(丟 SynthError,後製檔不搬進 audio/、post 維持上一份)。快取命中時沿用專案內
+    同一後製鍵已寫入的 pitch_points(找不到則不帶)。
     """
     wanted = None if segment_ids is None else set(segment_ids)
     segs = [s for s in project.segments if _synthesized(s) and (wanted is None or s["id"] in wanted)]
@@ -593,8 +624,8 @@ def post_process(project, segment_ids, emit) -> dict:
     try:
         todo: dict[str, tuple[list, str, str, float]] = {}   # 後製 id → (片段, 後製鍵, 裁切 id, 裁切秒數)
 
-        def done(seg, key, seconds, trimmed, cached):
-            seg["post"] = _post_of(seg, key, seconds, trimmed)
+        def done(seg, key, seconds, trimmed, cached, pitch_points=None):
+            seg["post"] = _post_of(seg, key, seconds, trimmed, pitch_points)
             result["cached" if cached else "processed"].append(seg["id"])
             emit({"type": "post", "id": seg["id"], "seconds": seconds, "cached": cached})
 
@@ -602,7 +633,8 @@ def post_process(project, segment_ids, emit) -> dict:
             key = pj.post_key(seg)
             pid = key[:32]
             if _regular_in(adir, f"{pid}.wav"):
-                done(seg, key, _seconds_in(adir, f"{pid}.wav"), _ensure_trim(adir, seg)[1], True)
+                done(seg, key, _seconds_in(adir, f"{pid}.wav"), _ensure_trim(adir, seg)[1], True,
+                     _known_pitch_points(project, key))
                 continue
             tid, trimmed = _ensure_trim(adir, seg)
             if pj.is_default_post(seg):
@@ -625,15 +657,16 @@ def post_process(project, segment_ids, emit) -> dict:
                     finally:
                         os.close(src)
 
-            def on_done(jid: str, out_fd: int):
+            def on_done(jid: str, out_fd: int, row: dict):
                 name = f"{jid}.wav"
                 if not _regular_in(out_fd, name):
                     raise SynthError("✗ 後製失敗:找不到這一句的後製檔")
-                safe_fs.replace(out_fd, name, adir, name)
                 segs_, key, _, trimmed = todo[jid]
+                points = _shape_pitch_points(segs_[0], row)     # 先驗證再搬檔:不合格時不留下後製檔
+                safe_fs.replace(out_fd, name, adir, name)
                 seconds = _seconds_in(adir, name)
                 for seg in segs_:
-                    done(seg, key, seconds, trimmed, False)
+                    done(seg, key, seconds, trimmed, False, None if points is None else [list(q) for q in points])
 
             _run_proc(lambda j, o: _shape_argv(j, o), {"jobs": jobs}, list(todo), project.name, on_done,
                       first=POST_TIMEOUT_BASE + POST_TIMEOUT_EACH * len(jobs), each=POST_TIMEOUT_BASE

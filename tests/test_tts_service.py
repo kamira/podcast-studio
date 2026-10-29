@@ -578,7 +578,19 @@ FAKE_SHAPE = textwrap.dedent('''
         with wave.open(os.path.join(out, job["id"] + ".wav"), "wb") as w:
             w.setparams(params)
             w.writeframes(frames[cut:])
-        sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0}) + "\\n")
+        # 修訂 1 T11:回傳 pitch_points(有語調時照抄使用者點;shape_pitch.json 存在時改回傳其內容,
+        # 內容為 {"missing": true} 時不帶這個欄位)
+        row = {"id": job["id"], "seconds": 0,
+               "pitch_points": job["pitch"]["points"] if job["pitch"] else None}
+        ctl = os.path.join(HERE, "shape_pitch.json")
+        if os.path.exists(ctl):
+            with open(ctl, encoding="utf-8") as f:
+                over = json.load(f)
+            if over == {"missing": True}:
+                row.pop("pitch_points")
+            else:
+                row["pitch_points"] = over
+        sys.stdout.write(json.dumps(row) + "\\n")
         sys.stdout.flush()
 ''')
 
@@ -833,3 +845,57 @@ def test_後製檔不在_自錄音檔與未合成片段仍不列過期(shaped):
     assert tts.stale_post(p) == []
     p.segments[0]["audio"] = None
     assert tts.stale_post(p) == []
+
+
+# ---------- CHG-20261029-01 修訂 1 T11:shape 回傳的 pitch_points 寫進 segment.post(R1-10) ----------
+
+def _pitch(*pts, roundness=50):
+    return {"points": [{"pos": a, "semi": b} for a, b in pts], "roundness": roundness}
+
+
+def test_shape回傳的pitch_points寫進post_存檔往返_快取命中保留(shaped):
+    p = padded_project(shaped)
+    p.segments[0]["pitch"] = _pitch((0.0, 0.0), (0.5, 3.0), (1.0, 0.0))
+    p.segments[1]["connect"] = 50
+    tts.post_process(p, None, shaped.emit)
+    assert p.segments[0]["post"]["pitch_points"] == [[0.0, 0.0], [0.5, 3.0], [1.0, 0.0]]
+    assert "pitch_points" not in p.segments[1]["post"]                 # 沒有語調:不帶 pitch_points
+    pj.save(p)
+    q = pj.load("夜市的味道")
+    assert q.segments[0]["post"]["pitch_points"] == [[0.0, 0.0], [0.5, 3.0], [1.0, 0.0]]
+    assert pj.is_post_fresh(q.segments[0])
+    again = tts.post_process(q, [s["id"] for s in q.segments], shaped.emit)
+    assert again["cached"] == [s["id"] for s in q.segments] and len(shape_calls(shaped)) == 1
+    assert q.segments[0]["post"]["pitch_points"] == [[0.0, 0.0], [0.5, 3.0], [1.0, 0.0]]
+
+
+@pytest.mark.parametrize("bad", [
+    [[i / 30, 0] for i in range(31)], [[0, 0], [0.5, 1], [0.5, 2]], [[0, 0], [1, 7.3]], [[0, "1"], [1, 0]],
+    None, "x", {"missing": True},
+])
+def test_pitch_points格式不合_該句後製失敗_沿用上一份後製檔(shaped, bad):
+    p = padded_project(shaped, n=1)
+    p.segments[0]["pitch"] = _pitch((0.0, 0.0), (1.0, 2.0))
+    tts.post_process(p, None, shaped.emit)
+    prev = dict(p.segments[0]["post"])
+    adir = pj.subdir("夜市的味道", "audio")
+    before = sorted(x.name for x in adir.iterdir())
+    p.segments[0]["pitch"] = _pitch((0.0, 0.0), (1.0, -2.0))
+    new_id = pj.post_key(p.segments[0])[:32]
+    (shaped.fake / "shape_pitch.json").write_text(json.dumps(bad), encoding="utf-8")
+    with pytest.raises(tts.SynthError) as e:
+        tts.post_process(p, None, shaped.emit)
+    assert "後製失敗" in str(e.value) and "/Users/" not in str(e.value)
+    assert p.segments[0]["post"] == prev and not pj.is_post_fresh(p.segments[0])
+    assert sorted(x.name for x in adir.iterdir()) == before and not (adir / f"{new_id}.wav").exists()
+    assert (adir / f"{prev['id']}.wav").exists()
+    assert list(tmp_dir().iterdir()) == []
+
+
+def test_沒有語調的句子回傳非null的pitch_points也算失敗(shaped):
+    p = padded_project(shaped, n=1)
+    p.segments[0]["connect"] = 40
+    (shaped.fake / "shape_pitch.json").write_text(json.dumps([[0, 0], [1, 1]]), encoding="utf-8")
+    with pytest.raises(tts.SynthError):
+        tts.post_process(p, None, shaped.emit)
+    assert p.segments[0]["post"] is None or not pj.is_post_fresh(p.segments[0])

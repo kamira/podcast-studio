@@ -639,7 +639,8 @@ for n, job in enumerate(body["jobs"]):
 
 
 # 替身 shape worker(CHG-20261029-01):參數格式同 breezy_worker.py shape;輸入照抄成輸出,
-# 呼叫紀錄寫到同目錄的 shape.log(一行一次呼叫)。
+# 呼叫紀錄寫到同目錄的 shape.log(一行一次呼叫)。修訂 1 T11 起 stdout 同真 worker 帶 pitch_points
+# (有語調時照抄使用者點,沒有語調時為 null)。
 FAKE_SHAPE = """# -*- coding: utf-8 -*-
 import json, os, shutil, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -651,7 +652,8 @@ with open(os.path.join(HERE, "shape.log"), "a", encoding="utf-8") as f:
     f.write(json.dumps({"jobs": body["jobs"]}, ensure_ascii=False) + "\\n")
 for job in body["jobs"]:
     shutil.copyfile(os.path.join(out, job["input"]), os.path.join(out, job["id"] + ".wav"))
-    sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0}) + "\\n")
+    pts = job["pitch"]["points"] if job["pitch"] else None
+    sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0, "pitch_points": pts}) + "\\n")
     sys.stdout.flush()
 """
 

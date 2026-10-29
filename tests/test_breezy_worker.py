@@ -352,7 +352,8 @@ def test_shape預設參數輸出與輸入逐位元組相同_不需numpy(tmp_path
     r = _run_shape(tmp_path, breezy, [_shape_job()], out)
     assert r.returncode == 0, r.stderr
     rows = [json.loads(x) for x in r.stdout.splitlines()]
-    assert rows == [{"id": "fedcba9876543210", "seconds": pytest.approx(10240 / 2 / 22050, abs=0.001)}]
+    assert rows == [{"id": "fedcba9876543210", "seconds": pytest.approx(10240 / 2 / 22050, abs=0.001),
+                     "pitch_points": None}]                  # 修訂 1 T11:沒有語調時 pitch_points 為 null
     assert (out / "fedcba9876543210.wav").read_bytes() == (out / SHAPE_IN).read_bytes()
     assert count(breezy, "ctor") == 0 and count(breezy, "g2pw_ctor") == 0   # 不載入任何模型
 
@@ -404,3 +405,84 @@ def test_shape的jobs不是物件或缺參數(tmp_path, breezy):
     assert run_worker(breezy, "shape", "--jobs", str(p)).returncode == 2
     r = run_worker(breezy, "shape", "--jobs", str(p), "--out", str(tmp_path / "none"))
     assert r.returncode == 2
+
+
+# ---------- CHG-20261029-01 修訂 1 T11:語調自動補點與吸附(R1-7、R1-8、R1-9;純 Python,不需 numpy) ----------
+
+import breezy_worker as bw  # noqa: E402
+
+FIVE = [(0.0, 0.0), (0.25, 3.0), (0.5, -2.0), (0.75, 2.0), (1.0, 0.0)]
+
+
+def _all_voiced(x0, x1, xd):
+    return xd
+
+
+def _close(got, want):
+    assert len(got) == len(want), got
+    for (a, b), (c, d) in zip(got, want):
+        assert abs(a - c) <= 1e-9 and abs(b - d) <= 1e-9, (got, want)
+
+
+def test_expand_points_5點全部有聲回8點():
+    r = bw.expand_points(FIVE, _all_voiced)
+    _close(r["points"], [(0, 0), (0.175, 1.1), (0.25, 3.6), (0.425, 0.5), (0.5, -2.4), (0.675, -0.2),
+                         (0.75, 2.4), (1, 0)])
+    _close(r["auto"], [(0.175, 1.1), (0.425, 0.5), (0.675, -0.2)])
+    _close(r["amplified"], [(0.25, 3.6), (0.5, -2.4), (0.75, 2.4)])
+
+
+def test_expand_points_插入點無聲改到同段最近有聲處_值在新位置重算():
+    calls = []
+
+    def voiced_at(x0, x1, xd):
+        calls.append((x0, x1, xd))
+        return 0.2 if x1 == 0.25 else xd          # 第 1 段的 0.175 無聲,最近有聲在 0.2
+
+    r = bw.expand_points(FIVE, voiced_at)
+    assert [round(c[2], 9) for c in calls] == [0.175, 0.425, 0.675]
+    assert [(c[0], c[1]) for c in calls] == [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75)]   # 以使用者原始點分段
+    _close(r["auto"][:1], [(0.2, 3 * 0.2 / 0.25 - 1)])                               # 折線 2.4 − 1 = 1.4
+    _close(r["points"][:3], [(0, 0), (0.2, 1.4), (0.25, 3.6)])
+
+
+def test_expand_points_該段全無聲不插入_峰谷仍放大():
+    r = bw.expand_points(FIVE, lambda x0, x1, xd: None if x1 == 0.5 else xd)
+    _close(r["auto"], [(0.175, 1.1), (0.675, -0.2)])
+    _close(r["points"], [(0, 0), (0.175, 1.1), (0.25, 3.6), (0.5, -2.4), (0.675, -0.2), (0.75, 2.4), (1, 0)])
+    _close(r["amplified"], [(0.25, 3.6), (0.5, -2.4), (0.75, 2.4)])
+
+
+def test_expand_points_首尾不處理_只有2點不變_非峰谷不動():
+    for pts in ([(0.0, 3.0), (1.0, -3.0)], [(0.0, -6.0), (1.0, 6.0)]):
+        r = bw.expand_points(pts, _all_voiced)
+        _close(r["points"], pts)
+        assert r["auto"] == [] and r["amplified"] == []
+    # 2(正值但不比前一點高)、−0.5(負值但不比前一點低)不是峰谷;−1 是谷
+    pts = [(0.0, 4.0), (0.3, 2.0), (0.6, -1.0), (0.8, -0.5), (1.0, 5.0)]
+    r = bw.expand_points(pts, _all_voiced)
+    _close(r["points"], [(0.0, 4.0), (0.3, 2.0), (0.51, 2.0 - 3.0 * 0.7 + 1), (0.6, -1.2), (0.8, -0.5), (1.0, 5.0)])
+    _close(r["amplified"], [(0.6, -1.2)])
+
+
+def test_expand_points_16點交錯峰谷最多30點且在正負7點2內():
+    pts = [(i / 15, 6.0 if i % 2 else -6.0) for i in range(16)]
+    r = bw.expand_points(pts, _all_voiced)
+    assert len(r["points"]) <= 30 and len(r["points"]) == 16 + 14
+    assert all(abs(s) <= 7.2 + 1e-12 for _, s in r["points"])
+    assert all(b[0] > a[0] for a, b in zip(r["points"], r["points"][1:]))
+    assert max(s for _, s in r["points"]) == pytest.approx(7.2) and min(s for _, s in r["points"]) == pytest.approx(-7.2)
+
+
+def test_snap_voiced_所在幀有聲不動_無聲取同段最近有聲幀_距離相同取前者_離端點至少001():
+    times = [i / 100 for i in range(101)]                      # 幀位置 0.00、0.01、…、1.00
+    voiced = [False] * 101
+    for i in (30, 40, 41, 60):
+        voiced[i] = True
+    assert bw.snap_voiced(times, voiced, 0.25, 0.5, 0.401) == 0.401   # 所在幀(0.40)有聲:位置不變
+    assert bw.snap_voiced(times, voiced, 0.25, 0.5, 0.35) == 0.30     # 0.30 與 0.40 等距:取前者
+    assert bw.snap_voiced(times, voiced, 0.25, 0.5, 0.37) == 0.40
+    assert bw.snap_voiced(times, voiced, 0.5, 0.6, 0.57) is None      # 0.60 = x1,與端點差 < 0.01
+    assert bw.snap_voiced(times, voiced, 0.5, 0.61, 0.58) == 0.60
+    assert bw.snap_voiced(times, voiced, 0.7, 0.9, 0.85) is None      # 同段沒有有聲幀
+    assert bw.snap_voiced(times, voiced, 0.0, 0.29, 0.2) is None      # 0.30 在段外

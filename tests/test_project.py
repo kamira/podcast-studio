@@ -927,6 +927,38 @@ def test_PATCH不能寫入post():
     assert "post" not in ss.SEGMENT_PATCH_KEYS
 
 
+# ---------- CHG-20261029-01 修訂 1 T11:post.pitch_points(R1-10;伺服器產生,PATCH 不能寫入) ----------
+
+PP8 = [[0, 0], [0.175, 1.1], [0.25, 3.6], [0.425, 0.5], [0.5, -2.4], [0.675, -0.2], [0.75, 2.4], [1, 0]]
+
+
+def test_post含pitch_points可載入且存檔往返():
+    good = {"id": KEY_B[:32], "key": KEY_B, "seconds": 2.1, "trim": 0.4, "pitch_points": PP8}
+    assert synth_seg(post=good)["post"] == good
+    edge = [[i / 29, 7.2 if i % 2 else -7.2] for i in range(30)]          # 30 點、±7.2 為上限
+    assert synth_seg(post={**good, "pitch_points": edge})["post"]["pitch_points"] == edge
+
+
+@pytest.mark.parametrize("bad", [
+    [[i / 30, 0] for i in range(31)],                    # 31 點
+    [[0, 0], [0.5, 1], [0.5, 2]],                         # 位置不遞增
+    [[0, 0], [0.6, 1], [0.4, 2]],
+    [[0, 0], [1, 7.3]],                                   # 超過 ±7.2
+    [[0, 0], [1, -7.3]],
+    [[0, 0], [1.01, 1]], [[-0.01, 0], [1, 1]],            # 位置超出 0–1
+    [[0, 0]], [],                                         # 少於 2 點
+    [[0, "1"], [1, 0]], [[0, True], [1, 0]], [[0, 0, 0], [1, 0]], [{"pos": 0, "semi": 0}, [1, 0]],
+    [[0, float("nan")], [1, 0]], None, "x", {"0": 0},
+])
+def test_post的pitch_points不合格為錯誤(bad):
+    with pytest.raises(pj.ProjectError):
+        synth_seg(post={"id": KEY_B[:32], "key": KEY_B, "seconds": 2.1, "trim": 0.4, "pitch_points": bad})
+
+
+def test_PATCH仍不能寫入post_含pitch_points():
+    assert "post" not in ss.SEGMENT_PATCH_KEYS and "pitch_points" not in ss.SEGMENT_PATCH_KEYS
+
+
 def test_post_params以程式常數補預設():
     p = pj.post_params(synth_seg())
     assert p["connect"] == 0 and p["clarity"] == 100 and p["word_clarity"] == [] and p["pitch"] is None
