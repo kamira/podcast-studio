@@ -108,12 +108,16 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 .fusion-grid { display:grid; grid-template-columns:1fr 320px; gap:16px; align-items:start; }
 .static-popup { position:static; width:auto; }
 .pause-input.wide { width:110px; }
-#panel-fusion-typing { margin:8px; width:560px; }
+#panel-fusion-typing { margin:8px; width:600px; }
 .typing-wrap { position:relative; height:190px; }
 .fake-textarea { border:1px solid var(--accent); border-radius:6px; padding:8px; height:100px; line-height:1.7; }
-.hit { text-decoration:underline 2px #2f6fdd; text-underline-offset:3px; }
+.w { position:relative; text-decoration-line:underline; text-decoration-style:wavy; text-decoration-thickness:2px; text-underline-offset:4px; }
+.w-pending { text-decoration-color:#e0b000; } .w-on { text-decoration-color:#2e9e5b; } .w-off { text-decoration-color:#c93c37; }
+.pill { position:absolute; left:-2px; right:-2px; top:-3px; bottom:2px; display:flex; align-items:center; justify-content:center; background:#e3f5ea; border:1px solid #2e9e5b; border-radius:5px; color:#1e6b3e; font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.15); }
+.float-actions { display:flex; gap:6px; } .float-actions .on { border-color:#2e9e5b; color:#1e6b3e; } .float-actions .off { border-color:#c93c37; color:#a12e2a; }
+.lg-w { margin-right:10px; }
 .caret { display:inline-block; width:1px; height:16px; background:var(--fg); vertical-align:middle; margin-left:1px; }
-.float-tip { position:absolute; left:120px; top:96px; width:300px; background:var(--panel); border:1px solid #b7cdf3; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.16); padding:8px 10px; display:grid; gap:6px; }
+.float-tip { position:absolute; left:118px; top:96px; width:220px; background:var(--panel); border:1px solid #b7cdf3; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.16); padding:8px 10px; display:grid; gap:6px; }
 .float-tip::before { content:''; position:absolute; top:-6px; left:40px; width:10px; height:10px; background:var(--panel); border-left:1px solid #b7cdf3; border-top:1px solid #b7cdf3; transform:rotate(45deg); }
 .float-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
 .pause-input.wider { width:160px; }
@@ -270,13 +274,13 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 <section class="panel" id="panel-fusion-typing">
   <h2 class="panel-title">文稿</h2>
   <div class="typing-wrap">
-    <div class="fake-textarea">大家好，歡迎收聽夜市的味道。…這家攤販已經開了四十年。<br>是這樣啊，我也<span class="hit">不知道</span><span class="caret"></span></div>
+    <div class="fake-textarea">大家好，歡迎收聽夜市的味道。…這家攤販已經開了四十年。<br><span class="w w-on">是這樣<span class="pill">是醬</span></span>啊，我也<span class="w w-pending">不知道</span>，<span class="w w-off">為什麼</span>夜市這麼好逛？<span class="caret"></span></div>
     <div class="float-tip">
-      <div class="float-head"><span>可使用合音:<b>不知道</b> → <b>ㄅㄨˋ ㄗㄠˋ</b></span><button class="btn tiny">✕</button></div>
-      <label>☐ 啟用(勾選後這一句需重新合成)</label>
+      <div class="float-head"><span><b>不知道</b> → <b>ㄅㄨˋ ㄗㄠˋ</b></span></div>
+      <div class="float-actions"><button class="btn tiny on">啟用</button><button class="btn tiny off">停用</button></div>
     </div>
   </div>
-  <p class="prop-hint">只提示字數最多的「不知道」,不另提示「知道」;浮動窗不取得焦點,可繼續輸入</p>
+  <div class="diff-legend">圖例:<span class="lg-w"><span class="w w-pending">黃色波浪</span> 可合音(未決定,點擊開啟)</span><span class="lg-w"><span class="w w-on">綠色波浪</span> 已啟用(上方浮層顯示合音詞)</span><span class="lg-w"><span class="w w-off">紅色波浪</span> 已停用</span></div>
 </section>
 
 <section class="panel" id="panel-settings-fusion">
