@@ -19,7 +19,7 @@
       輸入檔:{"text": 1–500 字};stdout 印一個 JSON 陣列,長度等於字數,每字為聲調符號格式的注音
       (一聲不標、輕聲以 ˙ 開頭),非中文字為 null。只用 G2PW,不載入語音模型。
   shape --jobs <json> --out <dir>(CHG-20261029-01 T2)
-      後製:連音 → 清晰度(整句,再疊字詞)→ 語調(TD-PSOLA)。jobs 檔:
+      後製:連音 → 清晰度(整句,再疊字詞;修訂 1 起為方案 C,不含低通)→ 語調(TD-PSOLA)。jobs 檔:
         {"jobs": [{"id": ^[0-9a-f]{8,32}$(輸出 <out>/<id>.wav), "input": 「十六進位 id + .wav」(<out> 內的
                    一般檔,不可是符號連結), "chars": 估計字界用的字數(1–500), "connect": 0–100, "clarity": 0–100,
                    "word_clarity": [{"start", "end", "value": 0–100}](字索引以 chars 計,≤ 32 段、不重疊),
@@ -240,11 +240,19 @@ GAP_REL_DB = -30.0          # 句內低於句峰值 −30 dB 的段落
 GAP_MIN, GAP_MAX = 0.03, 0.12  # 字間空隙 30–120 ms;長於 120 ms(多為逗號處)不動
 GAP_XFADE = 0.012           # 縮空隙切點的等功率交叉淡化
 BOUND_OVERLAP = 0.03        # 字界交叉淡化長度 = p × 30 ms
-# 清晰度(D7,v2)
+# 清晰度(修訂 1 R1-1:方案 C;取代 D7 v2 的 ①~⑥,拿掉 ⑤ 低通)
 N_FFT, HOP, LIFTER = 1024, 128, 30
 CONS_TOP = 35               # 子音幀 = 非靜音且 3 kHz 以上能量比為句內前 35%
-CONS_DB, CONS_HZ, CONS_MASK = 24.0, 2000, 0.03
-SMEAR_S, NEUTRAL, CONTRAST = 0.12, 0.3, 0.3
+CONS_MASK = 0.03            # 子音遮罩平滑長度(秒)
+LEN_W = 1.0                 # ① 子音包絡往前後母音包絡內插的權重(× c)
+C_ATT = 16.0                # ① 子音幀整幀衰減(dB,× c)
+SM_S = 0.16                 # ② 轉接區幅度譜移動平均長度(秒,× c)
+SM_OUT = 0.2                # ② 轉接區以外的平滑權重
+TRANS_PAD = 0.05            # ② 轉接區向前後擴張(秒)
+VALLEY_DB = 3.0             # ② 能量谷:比 150 ms 平滑能量低 3 dB 以上
+NEU_C = 0.3                 # ③ 往母音平均包絡靠的權重(× c)
+CONTRAST = 0.3              # ④ 音節對比降低(沿用)
+TILT_MAX = 12.0             # ⑤ 長期頻譜傾斜補償的上下限(dB)
 WORD_XFADE = 0.02           # 字詞清晰度區段邊緣交叉淡化(D8)
 # 語調(D11)
 F0_MIN, F0_MAX = 70, 400
@@ -452,7 +460,7 @@ def connect(y, sr, p, chars):
     return _xfade_join(np.split(z, bounds), ov)
 
 
-# --- 清晰度(D7 v2:咬字含糊程度) ---
+# --- 清晰度(咬字含糊程度;修訂 1 R1-1 方案 C) ---
 
 def _stft(y):
     import librosa
@@ -481,41 +489,79 @@ def _envelope(mag):
     return np.fft.rfft(cep, axis=0).real[:mag.shape[0]]
 
 
-def _consonant(y, sr, c):
-    """① 子音弱化:子音幀的 2 kHz 以上衰減 c × 24 dB(遮罩 30 ms 平滑)。"""
+def _classify(mag, sr):
+    """以 STFT 幅度譜分類幀:回 (freqs, active, cons, vow);子音幀 = 非靜音且 3 kHz 以上能量比為句內前
+    CONS_TOP%,母音幀 = 非靜音且不是子音幀。"""
+    freqs, hf, _, active = _frame_info(mag, sr)
+    if not active.any():
+        z = np.zeros(mag.shape[1], bool)
+        return freqs, active, z, z
+    cons = active & (hf >= np.percentile(hf[active], 100 - CONS_TOP))
+    return freqs, active, cons, active & ~cons
+
+
+def _lenite(y, sr, c):
+    """① 子音弱化(弱化而非削除):子音幀的倒頻譜包絡往前後最近的母音幀包絡(依距離線性內插)靠
+    c × LEN_W,保留子音本身的細部(雜訊)與原相位;先還原為原幀能量,再整幀衰減 c × C_ATT dB
+    (只在子音遮罩內,遮罩 CONS_MASK 平滑)。回 (處理後訊號, 子音遮罩)。"""
     from scipy.ndimage import uniform_filter1d
     S = _stft(y)
-    freqs, hf, _, active = _frame_info(np.abs(S), sr)
-    if not active.any():
-        return y
-    m = (active & (hf >= np.percentile(hf[active], 100 - CONS_TOP))).astype(float)
-    m = uniform_filter1d(m, size=max(1, int(CONS_MASK * sr / HOP)), mode="nearest")
-    att = 10 ** (-(c * CONS_DB) * m / 20)
-    gain = np.where((freqs >= CONS_HZ)[:, None], att[None, :], 1.0)
-    return _rms_match(_istft(S * gain, len(y)), y)
+    mag = np.abs(S)
+    _, _, cons, vow = _classify(mag, sr)
+    m = uniform_filter1d(cons.astype(float), size=max(1, int(CONS_MASK * sr / HOP)), mode="nearest")
+    if vow.sum() < 2:
+        return y, np.zeros(mag.shape[1])
+    E = _envelope(mag)
+    idx = np.where(vow)[0]
+    t = np.arange(mag.shape[1])
+    k = np.searchsorted(idx, t)
+    a = idx[np.maximum(k - 1, 0)]
+    b = idx[np.minimum(k, len(idx) - 1)]
+    w = np.where(b != a, (t - a) / np.where(b != a, b - a, 1), 0.0)
+    w = np.clip(w, 0, 1)
+    Ev = (1 - w)[None, :] * E[:, a] + w[None, :] * E[:, b]
+    lw = c * LEN_W * m
+    new = np.exp(np.log(mag + 1e-7) + lw[None, :] * (Ev - E))
+    e0 = (mag ** 2).sum(0)
+    e1 = (new ** 2).sum(0) + 1e-20
+    new *= np.sqrt(e0 / e1)[None, :] * 10 ** (-(c * C_ATT) * m / 20)[None, :]
+    return _rms_match(_istft(new * np.exp(1j * np.angle(S)), len(y)), y), m
 
 
-def _smear(y, sr, c):
-    """② 頻譜時間平滑:幅度譜沿時間 c × 120 ms 移動平均,相位用原音。"""
-    from scipy.ndimage import uniform_filter1d
-    w = max(1, int(round(c * SMEAR_S * sr / HOP)))
+def _smear_transitions(y, sr, c, m):
+    """② 轉接處時間平滑:轉接區(子音遮罩 > 0.2 的幀,或比 150 ms 平滑能量低 VALLEY_DB 以上的非靜音能量谷,
+    兩者再向前後各擴 TRANS_PAD)以權重 1 做 c × SM_S 的幅度譜移動平均,其他地方權重 SM_OUT;
+    權重本身以 30 ms 平滑;相位用原音。"""
+    from scipy.ndimage import binary_dilation, uniform_filter1d
+    w = max(1, int(round(c * SM_S * sr / HOP)))
     if w <= 1:
         return y
     S = _stft(y)
-    mag = uniform_filter1d(np.abs(S), size=w, axis=1, mode="nearest")
-    return _rms_match(_istft(mag * np.exp(1j * np.angle(S)), len(y)), y)
+    mag = np.abs(S)
+    _, _, edb, active = _frame_info(mag, sr)
+    sm = uniform_filter1d(edb, size=max(1, int(0.15 * sr / HOP)), mode="nearest")
+    valley = (edb < sm - VALLEY_DB) & active
+    zone = binary_dilation((m[:mag.shape[1]] > 0.2) | valley, iterations=max(1, int(TRANS_PAD * sr / HOP)))
+    wt = uniform_filter1d(np.where(zone, 1.0, SM_OUT), size=max(1, int(0.03 * sr / HOP)), mode="nearest")
+    Ms = uniform_filter1d(mag, size=w, axis=1, mode="nearest")
+    new = mag * (1 - wt) + Ms * wt
+    return _rms_match(_istft(new * np.exp(1j * np.angle(S)), len(y)), y)
 
 
-def _neutral(y, sr, c):
-    """③ 共振峰中性化:每幀包絡往全句平均包絡內插 c × 0.3。"""
+def _neutral_vowel(y, sr, c):
+    """③ 共振峰中性化(輔助):每幀包絡往母音幀的平均包絡靠 c × NEU_C,並保持每幀能量不變
+    (不改變整體頻譜傾斜);靜音幀不動。"""
     S = _stft(y)
     mag = np.abs(S)
-    _, _, _, active = _frame_info(mag, sr)
-    if not active.any():
+    _, active, _, vow = _classify(mag, sr)
+    if not vow.any():
         return y
     env = _envelope(mag)
-    gain = np.exp(c * NEUTRAL * (env[:, active].mean(1, keepdims=True) - env))
+    gain = np.exp(c * NEU_C * (env[:, vow].mean(1, keepdims=True) - env))
     gain[:, ~active] = 1.0
+    e0 = (mag ** 2).sum(0)
+    e1 = ((mag * gain) ** 2).sum(0) + 1e-20
+    gain *= np.sqrt(e0 / e1)[None, :]
     return _rms_match(_istft(S * gain, len(y)), y)
 
 
@@ -530,20 +576,38 @@ def _contrast(y, sr, c):
     return _rms_match(_istft(S * 10 ** (gdb / 20)[None, :], len(y)), y)
 
 
+def _tilt_comp(z, y, sr):
+    """⑤ 長期頻譜傾斜補償(取代 D7 v2 的低通):以原音 y 判定的母音幀,比較原音與處理後 z 的長期平均功率譜,
+    於 1/3 八度平滑(60 Hz 以下以 60 Hz 計)後取差值,上下各限 TILT_MAX dB,作為全句的固定 EQ 套回;
+    ⑥ 最後 RMS 對齊原音。"""
+    Sy, Sz = _stft(y), _stft(z)
+    my = np.abs(Sy)
+    freqs, _, _, vow = _classify(my, sr)
+    if vow.sum() < 3:
+        return _rms_match(z, y)
+    ly = (my[:, vow] ** 2).mean(1)
+    lz = (np.abs(Sz[:, vow]) ** 2).mean(1)
+    g = np.zeros_like(freqs)
+    for i, f in enumerate(freqs):
+        f = max(f, 60.0)
+        sel = (freqs >= f / 2 ** (1 / 6)) & (freqs <= f * 2 ** (1 / 6))
+        g[i] = 10 * np.log10(ly[sel].mean() + 1e-20) - 10 * np.log10(lz[sel].mean() + 1e-20)
+    g = np.clip(g, -TILT_MAX, TILT_MAX)
+    return _rms_match(_istft(Sz * (10 ** (g / 20))[:, None], len(z)), y)
+
+
 def clarity(y, sr, p):
-    """清晰度 p(0–100):100 不處理;c = 1 − p/100,依序 ①~④,p < 25 時 ⑤ 2 階低通,⑥ RMS 對齊原音。"""
+    """清晰度 p(0–100,修訂 1 方案 C):100 不處理(回傳輸入本身);c = 1 − p/100,依序
+    ① 子音弱化 → ② 轉接處時間平滑 → ③ 共振峰中性化 → ④ 音節對比降低 → ⑤ 長期頻譜傾斜補償 → ⑥ RMS 對齊原音。
+    不使用低通;輸出長度不變。"""
     if p >= 100 or len(y) < N_FFT:
         return y
-    from scipy.signal import butter, sosfiltfilt
     c = 1 - p / 100
-    z = _consonant(y, sr, c)
-    z = _smear(z, sr, c)
-    z = _neutral(z, sr, c)
+    z, m = _lenite(y, sr, c)
+    z = _smear_transitions(z, sr, c, m)
+    z = _neutral_vowel(z, sr, c)
     z = _contrast(z, sr, c)
-    if p < 25:
-        fc = min(8000 * (5000 / 8000) ** (1 - 4 * p / 100), sr / 2 * 0.95)
-        z = sosfiltfilt(butter(2, fc, btype="low", fs=sr, output="sos"), z)
-    return _rms_match(z, y)
+    return _tilt_comp(z, y, sr)
 
 
 def word_clarity(base, y, sr, spans, chars):

@@ -62,9 +62,12 @@
                                皆為 ProjectError 的子類別
   startup_cleanup(now) -> {"trash_removed", "tmp_cleared", "warnings"}
   (CHG-20261029-01 T1)PROSODY_DEFAULTS / TRIM_PARAMS / POST_VERSION
+  (修訂 1 T10)POST_ALGO = {"clarity": 2, "pitch": 2}:後製鍵的演算法標記(R1-11)
   post_params(segment) -> dict 後製參數(null 一律取程式常數):trim、connect、clarity、word_clarity、pitch
   post_key(segment) -> str     SHA-256(JSON 陣列 [audio.id, POST_VERSION, 裁切參數, connect, clarity,
-                               word_clarity, pitch]);語速、停頓不在內。自錄音檔(audio 沒有 key)丟 ProjectError
+                               word_clarity, pitch] + 演算法標記);演算法標記只在用到時附加(清晰度 < 100%
+                               或有字詞清晰度附 clarity、有語調附 pitch,合為一個物件),只有裁切或連音時不附加、
+                               鍵與修訂前相同。語速、停頓不在內。自錄音檔(audio 沒有 key)丟 ProjectError
   is_post_fresh(segment)       post 存在且 post.key == post_key(segment)(只比對資料,不看檔案)
   is_default_post(segment)     連音 0%、清晰度 100%、沒有字詞清晰度、沒有語調(後製結果 = 裁切結果)
   subdir(name, sub, create=False) -> Path
@@ -134,6 +137,9 @@ FUSION_MIN, FUSION_MAX = 2, 4     # 合音字數(使用者 2026-10-29:不超過�
 MAX_FUSION_OFF = 32                # fusion_off 每句上限(D41)
 FUSION_SOURCES = ("rule", "lexicon", "manual")
 POST_VERSION = 1
+# 修訂 1(R1-11):後製演算法標記。清晰度改方案 C、語調改 PCHIP 混合後,用到的部分附加於後製鍵,
+# 讓有清晰度或語調的既有後製失效重做;只有裁切或連音的片段鍵不變。POST_VERSION 維持 1。
+POST_ALGO = {"clarity": 2, "pitch": 2}
 # 裁切參數(D2):-40 dBFS 樣本峰值門檻、前後各留 30 ms、10 ms 淡入淡出
 TRIM_PARAMS = {"threshold_db": -40, "keep_ms": 30, "fade_ms": 10}
 ASSET_EXTS = {
@@ -383,15 +389,26 @@ def is_default_post(segment: dict) -> bool:
 
 
 def post_key(segment: dict) -> str:
-    """後製鍵 = SHA-256(JSON 陣列 [audio.id, POST_VERSION, 裁切參數, connect, clarity, word_clarity, pitch])。
+    """後製鍵 = SHA-256(JSON 陣列 [audio.id, POST_VERSION, 裁切參數, connect, clarity, word_clarity, pitch]
+    + 演算法標記)。
 
-    語速、停頓不在鍵內(語速另以變速檔快取)。只對合成片段(audio 帶 key)有意義,其他丟 ProjectError。"""
+    演算法標記(修訂 1 R1-11)只在用到時附加為陣列最後一項:清晰度 < 100% 或有字詞清晰度時含
+    `"clarity": POST_ALGO["clarity"]`、有語調時含 `"pitch": POST_ALGO["pitch"]`(兩者合為一個物件);
+    都沒有時不附加,鍵與修訂前相同。語速、停頓不在鍵內(語速另以變速檔快取)。
+    只對合成片段(audio 帶 key)有意義,其他丟 ProjectError。"""
     audio = segment.get("audio")
     if not isinstance(audio, dict) or "key" not in audio:
         raise ProjectError("只有合成的片段有後製(自錄音檔不做後製)")
     p = post_params(segment)
     parts = [audio["id"], POST_VERSION, p["trim"], p["connect"], p["clarity"],
              [[w["start"], w["end"], w["value"]] for w in p["word_clarity"]], p["pitch"]]
+    algo = {}
+    if p["clarity"] < 100 or p["word_clarity"]:
+        algo["clarity"] = POST_ALGO["clarity"]
+    if p["pitch"] is not None:
+        algo["pitch"] = POST_ALGO["pitch"]
+    if algo:
+        parts.append(algo)
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
