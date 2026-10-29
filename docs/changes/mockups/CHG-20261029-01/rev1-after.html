@@ -81,7 +81,7 @@ input[type=range] { width:100%; accent-color:var(--accent); }
   <div class="sec">
     <p class="sec-title">語調</p>
     <div class="pct-row"><span class="k">圓弧</span><input type="range" min="0" max="100" value="100" aria-label="圓弧(百分比)"><output>100%</output><button class="btn">預設</button></div>
-    <p class="hint">折線轉角的圓弧程度:0% 為直線折角,100% 為最圓滑;曲線一律經過每個關鍵點</p>
+    <p class="hint">折線轉角的圓弧程度:0% 為直線折角,100% 為最圓滑;曲線一律經過每個實際套用的點(含放大後的峰谷與自動補點)</p>
     <div class="kv"><span class="k">關鍵點</span><span>5 個 <span class="muted new-mark">· 自動補點 3 個(虛線,不可拖曳)</span></span></div>
     <button class="btn wide">清除語調</button>
   </div>
@@ -116,13 +116,13 @@ input[type=range] { width:100%; accent-color:var(--accent); }
     <span><svg width="16" height="16"><path d="M8 2 L14 8 L8 14 L2 8 Z" fill="#fff" stroke="#333"/></svg> 關鍵點(使用者設定,可拖曳,±6 半音)</span>
     <span><svg width="16" height="16"><path d="M8 2 L14 8 L8 14 L2 8 Z" fill="none" stroke="#fff" stroke-dasharray="2 2" style="stroke:#333"/></svg> 放大後的峰谷(×1.2,自動,不可拖曳)</span>
     <span><svg width="16" height="16"><circle cx="8" cy="8" r="5" fill="none" stroke="#333" stroke-dasharray="2 2"/></svg> 自動補點:峰前預降 −1、谷前升點 +1 半音(已吸附到有聲處)</span>
-    <span><svg width="26" height="10"><path d="M1 5 L25 5" stroke="#333" stroke-width="2"/></svg> 實際套用的語調曲線(經過每一個點)</span>
+    <span><svg width="26" height="10"><path d="M1 5 L25 5" stroke="#333" stroke-width="2"/></svg> 實際套用的語調曲線(經過每個實際套用的點(含放大後的峰谷與自動補點))</span>
     <span><svg width="26" height="10"><path d="M1 5 L25 5" stroke="#333" stroke-dasharray="4 3"/></svg> 原音高(0 半音)</span>
   </div>
   <p class="note">自動補點與放大後的峰谷由後製結果回傳(post.pitch_points),畫面與 worker 實際套用的曲線相同;後製完成前先以同一公式在瀏覽器試算(不含吸附)並以淡色顯示。縱軸改以 ±7.2 半音繪製。</p>
 </section>
 
-<!-- (4) 圓弧程度對照:修訂前(二次貝茲,不經過關鍵點)與修訂 1(PCHIP 混合,一律經過關鍵點) -->
+<!-- (4) 圓弧程度對照:修訂前(二次貝茲,不經過關鍵點)與修訂 1(PCHIP 混合,一律經過每個實際套用的點(含放大後的峰谷與自動補點)) -->
 <section class="panel" id="rev1-roundness" style="width:1100px">
   <h2 class="panel-title">圓弧程度對照(同一組關鍵點 0、+3、−2、+2、0 半音)</h2>
   <div class="cmp" id="cmp"></div>
