@@ -6,6 +6,8 @@
 
 > 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 T1~T9 與修正為準):新增專案資料(`projects/`:Project、Segment、Annotation、ImageClip、Asset,`schema_version: 1`);設定資料庫升為 schema 2、新增 `voice_defaults` 表;畫布存檔保留 `steps` 的規則(取代「目前不保留 `steps`」)。
 
+> 2026-10-30 依 CHG-20261029-01 修訂 1 結構文件更新(以整合分支 `chg/CHG-20261029-01-rev1-impl` 的 T10~T14 為準):Segment 的 `fusions[].display`、`post.pitch_points` 兩個選填欄位(`schema_version` 仍為 2);後製鍵附加演算法標記。
+
 〔觀察〕持久化資料有五類:設定資料庫 `config/studio.db`(使用者資料,不入 git)、工作流程 JSON(`workflows/`)、專案資料 `projects/`(使用者資料,不入 git;CHG-20261022-04)、`outputs/` 下的產出檔與上傳檔、程式內常數。流程執行中的文字(文案、標題、prompt)只存在伺服器記憶體中的執行事件(最近 20 次 run)與瀏覽器畫布上,另存工作流程時隨節點參數或釘住的編輯值寫入 JSON。
 
 ## 實體 / 資料表
@@ -146,7 +148,7 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,�
 
 ## CHG-20261029-01:專案檔 schema 2、後製檔、設定資料庫 schema 3
 
-〔觀察〕以下為 CHG-20261029-01 T1、T3、T7、T8 的資料變更(程式為準:`project.py`、`tts_service.py`、`settings.py`)。
+〔觀察〕以下為 CHG-20261029-01 T1、T3、T7、T8 與修訂 1 T10~T12 的資料變更(程式為準:`project.py`、`tts_service.py`、`settings.py`)。
 
 **專案檔 `schema_version: 2`**(v1 載入時在記憶體補預設值,存檔寫成 v2,舊檔照例移入 `history/`;3 以上拒絕)。Segment 新增:
 
@@ -156,11 +158,11 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,�
 | `clarity` | null 或 0~100 整數 | 清晰度(咬字含糊程度);null = 100% |
 | `word_clarity` | `[{start, end, value}]` | 字詞清晰度;`[start, end)` 為句內漢字、不重疊、≤ 32 段 |
 | `pitch` | null 或 `{points: [{pos, semi}], roundness}` | 語調折線;2~16 點、pos 0~1(0.01)嚴格遞增、semi −6~+6(0.1);roundness null = 50% |
-| `post` | null 或 `{id, key, seconds, trim}` | 伺服器產生的後製結果;`key` = 後製鍵,`seconds` = 後製後長度(變速前),`trim` = 裁掉的秒數;PATCH 不接受 |
-| `fusions` | `[{index, length, zhuyin, source}]` | 合音;length 2~4、zhuyin 為 1~length−1 個音節(半形空白分隔)、source ∈ rule / lexicon / manual;範圍內都是漢字、不重疊、≤ 16 組、範圍內不得有聲調標註 |
+| `post` | null 或 `{id, key, seconds, trim, pitch_points?}` | 伺服器產生的後製結果;`key` = 後製鍵,`seconds` = 後製後長度(變速前),`trim` = 裁掉的秒數;`pitch_points`(修訂 1,選填)= worker 實際套用的語調內部點 `[[位置, 半音], …]`,2–30 點、位置 0–1 嚴格遞增、半音 ±7.2,只在有語調且 worker 回傳合格時寫入(快取命中時沿用同一後製鍵已寫入的值,沒有則不帶);PATCH 不接受 |
+| `fusions` | `[{index, length, zhuyin, source, display?}]` | 合音;length 2~4、zhuyin 為 1~length−1 個音節(半形空白分隔)、source ∈ rule / lexicon / manual;範圍內都是漢字、不重疊、≤ 16 組、範圍內不得有聲調標註;`display`(修訂 1,選填)為空字串或 1~4 個漢字,由詞庫套用時寫入詞庫當時的顯示字(規則與手動為空字串),有值時合成以它取代整個範圍送模型、不加注音,缺少視同空字串(舊專案檔不補欄位、送模型的文字不變);加上或改變 `display` 即改變 `tts_text` 與合成快取鍵 |
 | `fusion_off` | `[{index, length}]` | 停用的合音位置(≤ 32 筆);與 `fusions` 同一範圍互斥;文字改動時兩者依位移調整、與改動範圍重疊者清除 |
 
-**後製鍵**:SHA-256(JSON 陣列 [audio.id, 後製版本號 1, 裁切參數, connect, clarity, word_clarity, pitch]);語速、停頓不在鍵內。
+**後製鍵**:SHA-256(JSON 陣列 [audio.id, 後製版本號 `POST_VERSION` 1, 裁切參數, connect, clarity, word_clarity, pitch] + 演算法標記);演算法標記(修訂 1,`project.POST_ALGO = {"clarity": 2, "pitch": 2}`)只在清晰度 < 100% 或有字詞清晰度(`clarity`)、有語調(`pitch`)時附加為陣列最後一項的物件,只有裁切或連音的片段鍵與修訂前相同;語速、停頓不在鍵內。修訂 1 只新增上列兩個選填欄位,`schema_version` 仍為 2,舊專案檔不需轉換。
 
 **`projects/<名稱>/audio/`** 新增:裁切檔與後製檔 `<後製鍵前 32 碼>.wav`(預設參數的後製檔即裁切檔);變速檔改以後製檔為基礎 `<後製 id>-s<語速×100>.wav`。合成檔 `<audio.id>.wav` 不改寫;後製檔與變速檔不自動刪除。
 
