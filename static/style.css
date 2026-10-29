@@ -441,7 +441,7 @@ body {
 .tl-tick { position: absolute; top: 0; height: 22px; padding: 3px 0 0 3px; border-left: 1px solid var(--line); font-size: 11px; color: var(--muted); white-space: nowrap; }
 .tl-lane { position: relative; border-bottom: 1px solid #eef0f3; }
 .tl-lane-cues { height: 40px; }
-.tl-lane-voice { height: 48px; }
+.tl-lane-voice { height: 78px; }   /* CHG-20261029-01 D17:容納語調折線 */
 .tl-lane-images { height: 52px; border-bottom: none; }
 .tl-seg, .tl-cue, .tl-img {
   position: absolute; top: 5px; bottom: 5px; padding: 0 5px; border-radius: 4px; overflow: hidden;
@@ -540,3 +540,18 @@ body {
 .clarity-bar { position: absolute; left: 2px; bottom: 1px; height: 3px; max-width: calc(100% - 4px); background: #9aa3ad; border-radius: 2px; }
 .clarity-bar.is-own { background: #8a4fd1; }
 .word-popup { width: 260px; }
+
+/* CHG-20261029-01 T6:語調折線(參考剪輯軟體的關鍵影格線) */
+#tl-voice .tl-seg { align-items: flex-start; padding-top: 3px; }
+.tl-pitch { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.tl-pitch.is-editable { pointer-events: all; cursor: crosshair; }
+.tl-pitch-zero { stroke: rgba(255, 255, 255, .7); stroke-dasharray: 4 3; stroke-width: 1; }
+.tl-pitch-tick { stroke: rgba(255, 255, 255, .8); stroke-width: 1; }
+.tl-pitch-line { fill: none; stroke: #fff; stroke-width: 1; opacity: .75; }
+.tl-pitch.is-editable .tl-pitch-line { stroke-width: 2; opacity: 1; }
+.tl-pitch-key { fill: #fff; stroke: #1d2733; stroke-width: 1; cursor: grab; }
+.tl-pitch-key.is-active { fill: #ffd23f; }
+.tl-pitch-label { fill: #fff; font-size: 10px; }
+.tl-word-clarity rect { fill: rgba(138, 79, 209, .35); stroke: #c9a8f0; stroke-dasharray: 3 2; }
+.tl-word-clarity text { fill: #fff; font-size: 10px; }
+.tl-pitch-zero, .tl-pitch-tick, .tl-pitch-line, .tl-pitch-label, .tl-word-clarity { pointer-events: none; }
