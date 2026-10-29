@@ -446,7 +446,7 @@ def fusion_steps(page, expect, begin, settings, toast, problems: list) -> None:
     begin("設定 › 合音詞庫:列出 6 筆預設詞")
     page.locator('.subnav-link[data-sub="fusion"]').click()
     rows = page.locator("#fusion-rows tr[data-word]")
-    expect(rows).to_have_count(6)
+    expect(rows).to_have_count(len(settings.FUSION_DEFAULTS))
 
     begin("合音詞庫:匯出 JSON 的內容等於 GET /api/settings/fusions")
     with page.expect_download() as dl:
@@ -465,7 +465,7 @@ def fusion_steps(page, expect, begin, settings, toast, problems: list) -> None:
     page.locator("#fusion-new-word").fill("然後")
     page.locator("#fusion-new-zhuyin").fill("ㄖㄢˊ")
     page.locator("#fusion-add").click()
-    expect(rows).to_have_count(7)
+    expect(rows).to_have_count(len(settings.FUSION_DEFAULTS) + 1)
 
     begin("合音詞庫:匯入不一致的檔案 → 警告、圖例與五欄差異表")
     words = [dict(w, zhuyin="ㄓㄠˋ") if w["word"] == "知道" else w for w in exported["words"] if w["word"] != "我們"]
@@ -516,7 +516,7 @@ def fusion_steps(page, expect, begin, settings, toast, problems: list) -> None:
     expect(rej.locator(".fusion-keep")).to_have_count(0)
     reasons = page.locator("#fusion-reject-reasons .reject-line")
     expect(reasons).to_have_count(1)
-    expect(reasons.first).to_have_text("然後:注音不是單一合法音節")
+    expect(reasons.first).to_have_text("然後:注音不是合法音節(多個音節以半形空白分隔)")
     expect(page.locator("#fusion-apply")).to_have_count(0)            # 只差被拒詞條 → 一致,不給確認
     no_popup()
 

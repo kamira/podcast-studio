@@ -411,6 +411,11 @@
       holder.after(el("p", "muted tone-hint", "拖曳選取字詞設定清晰度(橫條長度 = 清晰度,紫色為個別設定)"));
       return;
     }
+    if (ToneMode.mode === "fusion") {
+      mountFusionChars(holder, seg);
+      holder.after(el("p", "muted tone-hint", "拖曳選取相鄰 2~4 個漢字合音(字幕仍顯示原文;套用後重新合成這一句)"));
+      return;
+    }
     holder.querySelectorAll(".tone-char[data-index]").forEach(function (c) {
       const index = Number(c.dataset.index);
       const ch = Array.from(seg.text)[index];
@@ -799,7 +804,7 @@
   // 聲調區的模式:念法(注音彈出框)/ 清晰度(拖曳選取字詞)
   const ToneMode = {
     mode: "tone",
-    modes: [["tone", "念法"], ["clarity", "清晰度"]],
+    modes: [["tone", "念法"], ["clarity", "清晰度"], ["fusion", "合音"]],
 
     bar(holder, seg) {
       const bar = el("div", "tone-modes");
@@ -814,6 +819,7 @@
           this.mode = m[0];
           Tone.close();
           WordPopup.close();
+          FusionPopup.close();
           S.Props.render();
         });
         bar.appendChild(b);
@@ -974,6 +980,522 @@
     if ((view.post_stale || []).length) Post.run(null);
   }
 
+  // ---------- 合音(CHG-20261029-01 T9;D23~D28、D37~D41) ----------
+  //
+  // 聲調區「合音」模式:拖曳選取相鄰 2~4 個漢字 → 彈出框(兩字:詞庫值或規則推導;3~4 字:詞庫值,
+  // 否則列出相鄰兩字的選項只合併一對,D37)→ 可改注音、存入合音詞庫、套用(該句改送標註文字,重新合成)。
+  // 文稿框輸入時的浮動窗提示(D40):打出的文字含啟用中的詞庫詞時,於該詞附近顯示「可使用合音」與「啟用」、✕;
+  // 浮動窗不取得焦點;✕ 的位置記在片段 fusion_dismissed(D41)。字幕、文稿、時間軸一律顯示原文。
+
+  const FUSION_MAX = 4;
+  const INITIALS = "ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙ";
+  const SOURCE_LABEL = { lexicon: "詞庫", rule: "規則", manual: "手動" };
+
+  // n 字合音的注音:1~n−1 個以單一半形空白分隔、worker 認得的音節(純函式)
+  function fusionZhuyinOk(z, n) {
+    const parts = String(z || "").split(" ");
+    return parts.length >= 1 && parts.length <= n - 1 && parts.every(zhuyinOk);
+  }
+
+  // 套用一組合音後的 fusions(移除與它重疊者;依起點排序)(純函式)
+  function withFusion(list, item) {
+    const end = item.index + item.length;
+    const out = (list || []).filter(function (f) { return f.index + f.length <= item.index || f.index >= end; })
+      .map(function (f) { return { index: f.index, length: f.length, zhuyin: f.zhuyin, source: f.source }; });
+    out.push({ index: item.index, length: item.length, zhuyin: item.zhuyin, source: item.source });
+    out.sort(function (a, b) { return a.index - b.index; });
+    return out;
+  }
+
+  // 詞庫詞比對(同 fusion.suggest:4 → 3 → 2 字、每層由左至右、不重疊;exclude 為不提示的字元索引)(純函式)
+  function matchLexicon(text, lexicon, exclude) {
+    const chars = Array.from(text || "");
+    const used = new Set(exclude || []);
+    const out = [];
+    for (let n = FUSION_MAX; n >= 2; n--) {
+      let i = 0;
+      while (i <= chars.length - n) {
+        const word = chars.slice(i, i + n).join("");
+        let free = true;
+        for (let k = i; k < i + n; k++) if (used.has(k) || !isHanzi(chars[k])) free = false;
+        if (free && Object.prototype.hasOwnProperty.call(lexicon, word)) {
+          out.push({ index: i, length: n, word: word, zhuyin: lexicon[word] });
+          for (let k = i; k < i + n; k++) used.add(k);
+          i += n;
+          continue;
+        }
+        i += 1;
+      }
+    }
+    return out.sort(function (a, b) { return a.index - b.index; });
+  }
+
+  // 片段中不再提示的字元索引:已套用合音、聲調標註、關閉紀錄
+  function fusionExcluded(seg) {
+    const out = [];
+    (seg.fusions || []).forEach(function (f) { for (let k = 0; k < f.length; k++) out.push(f.index + k); });
+    (seg.annotations || []).forEach(function (a) { out.push(a.index); });
+    (seg.fusion_dismissed || []).forEach(function (d) { for (let k = 0; k < d.length; k++) out.push(d.index + k); });
+    return out;
+  }
+
+  const Lexicon = {
+    words: null,
+    async load(force) {
+      if (this.words && !force) return this.words;
+      const r = await S.api("GET", "/api/settings/fusions");
+      const out = {};
+      if (r.ok && r.data && Array.isArray(r.data.words)) {
+        r.data.words.forEach(function (w) { if (w.enabled) out[w.word] = w.zhuyin; });
+      }
+      this.words = out;
+      return out;
+    },
+  };
+
+  // 句子的逐字注音:G2PW 自動注音(Tone.cache)再疊上聲調標註
+  async function sentenceZhuyin(seg) {
+    let list = Tone.cache[seg.text];
+    if (!list) {
+      const r = await S.api("POST", "/api/annotate", { text: seg.text });
+      if (!r.ok || !r.data || !Array.isArray(r.data.zhuyin)) return null;
+      list = r.data.zhuyin;
+      Tone.cache[seg.text] = list;
+    }
+    const out = list.slice();
+    (seg.annotations || []).forEach(function (a) { out[a.index] = a.zhuyin; });
+    return out;
+  }
+
+  function splitInitial(z) {
+    const body = String(z || "").replace(/^˙/, "");
+    return INITIALS.indexOf(body.charAt(0)) !== -1 ? body.charAt(0) : "";
+  }
+
+  async function resynthOne(okText) {
+    if (S.Voice && !S.Voice.running && !Store.busy && !S.isRunning()) {
+      S.toast(okText + ",這一句重新合成中…");
+      await S.Voice.synth();
+    } else {
+      S.toast(okText + ";目前有工作在執行,結束後請按「逐句合成」重新合成這一句");
+    }
+  }
+
+  const FusionPopup = {
+    box: null,
+    seg: null,
+    range: null,
+    info: null,
+    edited: false,
+
+    build() {
+      const box = el("div", "tone-popup fusion-popup");
+      box.id = "fusion-popup";
+      box.setAttribute("role", "dialog");
+      box.setAttribute("aria-modal", "false");
+      box.setAttribute("aria-labelledby", "fusion-title");
+      box.hidden = true;
+      const head = el("div", "tone-head");
+      this.title = el("strong", "tone-title", "");
+      this.title.id = "fusion-title";
+      const close = el("button", "btn btn-small tone-close", "×");
+      close.type = "button";
+      close.setAttribute("aria-label", "關閉");
+      close.addEventListener("click", () => this.close());
+      head.append(this.title, close);
+      this.derive = el("p", "tone-auto fusion-derive", "");
+      this.options = el("div", "fusion-options");
+      this.options.setAttribute("role", "radiogroup");
+      this.options.setAttribute("aria-label", "合併哪兩個字");
+      const custom = el("label", "tone-custom");
+      custom.appendChild(el("span", "", "合音注音:"));
+      this.input = document.createElement("input");
+      this.input.type = "text";
+      this.input.className = "tone-input fusion-input";
+      this.input.maxLength = 24;
+      this.input.autocomplete = "off";
+      this.input.spellcheck = false;
+      this.input.setAttribute("aria-label", "合音注音(多個音節以半形空白分隔)");
+      this.input.addEventListener("input", () => {
+        this.edited = true;
+        this.sync();
+      });
+      custom.appendChild(this.input);
+      this.error = el("p", "tone-error", "");
+      this.error.setAttribute("role", "alert");
+      const actions = el("div", "tone-actions");
+      this.saveBtn = el("button", "btn btn-small", "存入合音詞庫");
+      this.saveBtn.type = "button";
+      this.saveBtn.addEventListener("click", () => this.saveLexicon());
+      this.applyBtn = el("button", "btn btn-small btn-primary", "套用");
+      this.applyBtn.type = "button";
+      this.applyBtn.addEventListener("click", () => this.apply());
+      actions.append(this.saveBtn, this.applyBtn);
+      box.append(head, this.derive, this.options, custom, this.error, actions);
+      box.addEventListener("keydown", (e) => { if (e.key === "Escape") this.close(); });
+      document.body.appendChild(box);
+      document.addEventListener("pointerdown", (e) => {
+        if (!box.hidden && !box.contains(e.target) && !(e.target.closest && e.target.closest(".tone-char"))) this.close();
+      });
+      this.box = box;
+    },
+
+    async open(seg, start, end, anchor) {
+      if (!this.box) this.build();
+      this.seg = seg;
+      this.range = [start, end];
+      this.edited = false;
+      this.info = null;
+      const chars = Array.from(seg.text);
+      const word = chars.slice(start, end).join("");
+      const n = end - start;
+      this.title.textContent = "合音「" + word + "」";
+      this.options.replaceChildren();
+      this.input.value = "";
+      this.error.textContent = "";
+      this.box.hidden = false;
+      const r = anchor ? anchor.getBoundingClientRect() : { left: 100, bottom: 100 };
+      this.box.style.left = Math.max(8, r.left + window.scrollX) + "px";
+      this.box.style.top = Math.max(8, r.bottom + window.scrollY + 6) + "px";
+      if (n > FUSION_MAX || !chars.slice(start, end).every(isHanzi) || n < 2) {
+        this.derive.textContent = n < 2 ? "合音需要相鄰 2 個以上的漢字" : "合音最多 " + FUSION_MAX + " 個漢字(不可含標點)";
+        this.input.disabled = true;
+        this.applyBtn.disabled = true;
+        this.saveBtn.disabled = true;
+        return;
+      }
+      this.input.disabled = false;
+      this.derive.textContent = "查詢注音中…";
+      this.applyBtn.disabled = true;
+      this.saveBtn.disabled = true;
+      const zh = await sentenceZhuyin(seg);
+      if (this.seg !== seg) return;
+      const res = await S.api("POST", "/api/fusion/suggest", { text: seg.text, zhuyin: zh || undefined,
+                                                              index: start, length: n });
+      if (this.seg !== seg) return;
+      if (!res.ok || !res.data || !res.data.fusion) {
+        this.derive.textContent = "無法取得合音建議(" + S.errorText(res) + "),可直接輸入注音";
+        this.sync();
+        return;
+      }
+      const f = res.data.fusion;
+      this.info = f;
+      if (n === 2) {
+        if (f.lexicon) this.derive.textContent = "詞庫:" + f.lexicon + (f.rule ? "(規則為 " + f.rule + ")" : "");
+        else if (f.zhuyin) {
+          const rest = String(f.b || "").replace(/^˙/, "").slice(splitInitial(f.b).length);
+          this.derive.textContent = (splitInitial(f.a) || "(零聲母)") + " + " + rest + " → " + f.reason + " → " + f.zhuyin;
+        } else this.derive.textContent = "不合音:" + f.reason;
+      } else if (f.lexicon) {
+        this.derive.textContent = "詞庫:" + f.lexicon;
+      } else {
+        this.derive.textContent = "選一對相鄰的字合併,其餘字維持原讀音";
+        (f.options || []).forEach((o, k) => {
+          const lab = el("label", "tone-choice fusion-option");
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "fusion-option";
+          radio.value = String(k);
+          radio.disabled = !o.combined;
+          radio.checked = k === f.default;
+          radio.addEventListener("change", () => {
+            this.input.value = o.combined || "";
+            this.edited = false;
+            this.sync();
+          });
+          const pair = chars.slice(start + o.offset, start + o.offset + o.length).join("");
+          lab.append(radio, el("span", "", pair + ":" + (o.zhuyin ? (SOURCE_LABEL[o.source] || "") + " " + o.zhuyin
+            : "跳過(" + o.reason + ")")));
+          this.options.appendChild(lab);
+        });
+      }
+      this.input.value = f.zhuyin || "";
+      this.sync();
+    },
+
+    source() {
+      if (this.edited) return "manual";
+      return (this.info && this.info.source) || "manual";
+    },
+
+    sync() {
+      const n = this.range ? this.range[1] - this.range[0] : 0;
+      const z = this.input.value.trim();
+      const ok = fusionZhuyinOk(z, n);
+      this.error.textContent = z && !ok ? "合音注音須為 1~" + (n - 1) + " 個音節(以半形空白分隔),音節數少於字數" : "";
+      this.applyBtn.disabled = !ok;
+      this.saveBtn.disabled = !ok;
+    },
+
+    close() {
+      if (!this.box || this.box.hidden) return;
+      this.box.hidden = true;
+      this.seg = null;
+    },
+
+    async saveLexicon() {
+      const seg = this.seg;
+      if (!seg) return;
+      const word = Array.from(seg.text).slice(this.range[0], this.range[1]).join("");
+      const z = this.input.value.trim();
+      const lex = await Lexicon.load(true);
+      if (Object.prototype.hasOwnProperty.call(lex, word) && !window.confirm("「" + word + "」已在合音詞庫中,要覆寫嗎?")) return;
+      const r = await S.api("PUT", "/api/settings/fusions/" + encodeURIComponent(word), { zhuyin: z, enabled: true });
+      if (!r.ok) {
+        this.error.textContent = "無法存入合音詞庫:" + S.errorText(r);
+        return;
+      }
+      await Lexicon.load(true);
+      S.toast("已存入合音詞庫:「" + word + "」→ " + z);
+    },
+
+    async apply() {
+      const seg = this.seg;
+      if (!seg) return;
+      const [s, e] = this.range;
+      const z = this.input.value.trim();
+      this.applyBtn.disabled = true;
+      const r = await Store.patchSegment(seg.id, { fusions: withFusion(seg.fusions, { index: s, length: e - s,
+        zhuyin: z, source: this.source() }) });
+      if (!r.ok) {
+        this.applyBtn.disabled = false;
+        this.error.textContent = "無法套用:" + S.errorText(r);
+        return;
+      }
+      this.close();
+      await resynthOne("已套用合音");
+    },
+  };
+
+  async function removeFusion(seg, index) {
+    const r = await Store.patchSegment(seg.id, { fusions: (seg.fusions || []).filter(function (f) { return f.index !== index; }) });
+    if (!r.ok) {
+      S.toast("無法移除合音:" + S.errorText(r), true);
+      return;
+    }
+    await resynthOne("已移除合音");
+  }
+
+  // 合音模式:已套用的合音以框線標示並列出(可 ✕ 移除);拖曳選取 2~4 個漢字開彈出框
+  function mountFusionChars(holder, seg) {
+    const chars = Array.from(seg.text);
+    holder.classList.add("is-fusion-mode");
+    const fused = {};
+    (seg.fusions || []).forEach(function (f) { for (let k = 0; k < f.length; k++) fused[f.index + k] = f; });
+    holder.querySelectorAll(".tone-char[data-index]").forEach(function (c) {
+      const i = Number(c.dataset.index);
+      if (fused[i]) {
+        c.classList.add("is-fused");
+        if (fused[i].index === i) c.classList.add("is-fused-start");
+      }
+      if (isHanzi(chars[i])) c.classList.add("is-selectable");
+    });
+    const list = el("ul", "fusion-list");
+    (seg.fusions || []).forEach(function (f) {
+      const li = el("li", "fusion-item");
+      li.appendChild(el("span", "", chars.slice(f.index, f.index + f.length).join("") + " → " + f.zhuyin
+        + "(" + (SOURCE_LABEL[f.source] || f.source) + ")"));
+      const x = el("button", "btn btn-small", "✕");
+      x.type = "button";
+      x.setAttribute("aria-label", "移除合音「" + chars.slice(f.index, f.index + f.length).join("") + "」");
+      x.addEventListener("click", function () { removeFusion(seg, f.index); });
+      li.appendChild(x);
+      list.appendChild(li);
+    });
+    holder.after(list);
+    if (isExternal(seg)) return;
+    let sel = null;
+    const mark = function () {
+      holder.querySelectorAll(".tone-char").forEach(function (c) {
+        const i = Number(c.dataset.index);
+        c.classList.toggle("is-range", !!sel && i >= Math.min(sel.a, sel.b) && i <= Math.max(sel.a, sel.b));
+      });
+    };
+    const at = function (x, y) {
+      const t = document.elementFromPoint(x, y);
+      const c = t && t.closest ? t.closest(".tone-char[data-index]") : null;
+      return c && holder.contains(c) ? Number(c.dataset.index) : null;
+    };
+    const move = function (e) {
+      const i = at(e.clientX, e.clientY);
+      if (i !== null && sel) {
+        sel.b = i;
+        mark();
+      }
+    };
+    const up = function () {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      if (!sel) return;
+      const s = Math.min(sel.a, sel.b);
+      const e = Math.max(sel.a, sel.b) + 1;
+      sel = null;
+      FusionPopup.open(seg, s, e, holder.querySelector('.tone-char[data-index="' + s + '"]'));
+    };
+    holder.addEventListener("pointerdown", function (e) {
+      const i = at(e.clientX, e.clientY);
+      if (i === null || !isHanzi(chars[i]) || e.button !== 0) return;
+      e.preventDefault();
+      sel = { a: i, b: i };
+      mark();
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up);
+    });
+  }
+
+  // ---------- 文稿框輸入時的合音提示(D40、D41) ----------
+
+  // 文稿中各片段的位置(同 studio_server._spans:依序往後找)
+  function segmentSpans(script, segments) {
+    const out = [];
+    let cur = 0;
+    segments.forEach(function (s) {
+      const i = script.indexOf(s.text, cur);
+      if (i < 0) {
+        out.push(null);
+        return;
+      }
+      out.push([i, i + s.text.length]);
+      cur = i + s.text.length;
+    });
+    return out;
+  }
+
+  const TypingHint = {
+    box: null,
+    cand: null,
+    ta: null,
+
+    init() {
+      const ta = document.getElementById("script-text");
+      if (!ta) return;
+      this.ta = ta;
+      const box = el("div", "fusion-hint");
+      box.id = "fusion-hint";
+      box.setAttribute("role", "status");
+      box.hidden = true;
+      this.text = el("span", "fusion-hint-text", "");
+      const lab = el("label", "fusion-hint-enable");
+      this.check = document.createElement("input");
+      this.check.type = "checkbox";
+      this.check.tabIndex = -1;
+      this.check.setAttribute("aria-label", "啟用這個合音");
+      lab.append(this.check, el("span", "", "啟用"));
+      const x = el("button", "btn btn-small fusion-hint-close", "✕");
+      x.type = "button";
+      x.tabIndex = -1;
+      x.setAttribute("aria-label", "關閉合音提示");
+      box.append(this.text, lab, x);
+      // 不取得焦點:滑鼠按下時不讓焦點離開文稿框
+      box.addEventListener("mousedown", function (e) { e.preventDefault(); });
+      this.check.addEventListener("change", () => { if (this.check.checked) this.enable(); });
+      x.addEventListener("click", () => this.dismiss());
+      document.body.appendChild(box);
+      this.box = box;
+      ["input", "click", "keyup"].forEach((ev) => ta.addEventListener(ev, () => this.update()));
+      Store.on(() => this.update());
+    },
+
+    // 游標附近的候選:目前文稿中(排除已套用、標註、關閉紀錄)由詞庫比對,取範圍包含游標或剛打完的一個
+    async update() {
+      const ta = this.ta;
+      if (!ta || !Store.view || ta.offsetParent === null) {
+        this.hide();
+        return;
+      }
+      const lex = await Lexicon.load();
+      const text = ta.value;
+      const caret = ta.selectionStart;
+      const segs = Store.view.project.segments;
+      const spans = segmentSpans(text, segs);
+      const exclude = [];
+      segs.forEach(function (s, k) {
+        const sp = spans[k];
+        if (sp) fusionExcluded(s).forEach(function (i) { exclude.push(sp[0] + i); });
+      });
+      const hits = matchLexicon(text, lex, exclude);
+      const hit = hits.find(function (h) { return caret >= h.index && caret <= h.index + h.length; });
+      if (!hit) {
+        this.hide();
+        return;
+      }
+      this.cand = hit;
+      this.text.textContent = "可使用合音:" + hit.word + " → " + hit.zhuyin;
+      this.check.checked = false;
+      this.place(hit.index + hit.length);
+      this.box.hidden = false;
+    },
+
+    hide() {
+      if (this.box) this.box.hidden = true;
+      this.cand = null;
+    },
+
+    // 以鏡像元素量出文稿框中第 index 個字的位置
+    place(index) {
+      const ta = this.ta;
+      const cs = getComputedStyle(ta);
+      const mirror = el("div", "fusion-mirror");
+      ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "paddingTop", "paddingLeft",
+        "paddingRight", "paddingBottom", "borderTopWidth", "borderLeftWidth", "boxSizing", "whiteSpace",
+        "wordBreak", "overflowWrap"].forEach(function (k) { mirror.style[k] = cs[k]; });
+      mirror.style.width = ta.clientWidth + "px";
+      mirror.textContent = ta.value.slice(0, index);
+      const mark = el("span", "", "|");
+      mirror.appendChild(mark);
+      document.body.appendChild(mirror);
+      const mr = mirror.getBoundingClientRect();
+      const kr = mark.getBoundingClientRect();
+      mirror.remove();
+      const r = ta.getBoundingClientRect();
+      const left = r.left + (kr.left - mr.left) + window.scrollX;
+      const top = r.top + (kr.bottom - mr.top) - ta.scrollTop + window.scrollY + 4;
+      this.box.style.left = Math.max(8, Math.min(left, window.scrollX + document.documentElement.clientWidth - 280)) + "px";
+      this.box.style.top = Math.max(8, top) + "px";
+    },
+
+    // 候選所在的片段與句內索引(文稿未存檔時先存檔並分句)
+    async locate() {
+      const cand = this.cand;
+      if (!cand) return null;
+      if (S.ScriptPanel && S.ScriptPanel.dirty && !(await S.ScriptPanel.save())) return null;
+      const segs = Store.view.project.segments;
+      const spans = segmentSpans(Store.view.project.script, segs);
+      for (let k = 0; k < segs.length; k++) {
+        const sp = spans[k];
+        if (sp && cand.index >= sp[0] && cand.index + cand.length <= sp[1]) {
+          return { seg: segs[k], index: cand.index - sp[0], length: cand.length, zhuyin: cand.zhuyin };
+        }
+      }
+      return null;
+    },
+
+    async enable() {
+      const at = await this.locate();
+      if (!at) {
+        S.toast("找不到這個詞所在的句子", true);
+        return;
+      }
+      const r = await Store.patchSegment(at.seg.id, { fusions: withFusion(at.seg.fusions, { index: at.index,
+        length: at.length, zhuyin: at.zhuyin, source: "lexicon" }) });
+      this.hide();
+      if (!r.ok) {
+        S.toast("無法套用合音:" + S.errorText(r), true);
+        return;
+      }
+      S.toast("已套用合音,這一句需要重新合成");
+    },
+
+    async dismiss() {
+      const at = await this.locate();
+      this.hide();
+      if (!at) return;
+      const list = (at.seg.fusion_dismissed || []).concat([{ index: at.index, length: at.length }]);
+      const r = await Store.patchSegment(at.seg.id, { fusion_dismissed: list });
+      if (!r.ok) S.toast("無法記錄:" + S.errorText(r), true);
+    },
+  };
+
   // ---------- 掛上鉤子 ----------
 
   S.hook("voice-row", function (a) {
@@ -1013,11 +1535,14 @@
   Store.on(function (view) {
     Tone.close();
     WordPopup.close();
+    FusionPopup.close();
     autoPost(view);
   });
+  TypingHint.init();
 
   S.Edit = { Tone: Tone, speedOptions: speedOptions, pauseFromDrag: pauseFromDrag, edgeFromDrag: edgeFromDrag,
     gapBox: gapBox, GAP_HIT: GAP_HIT, Post: Post, patchAndPost: patchAndPost, ToneMode: ToneMode,
     WordPopup: WordPopup, withWordClarity: withWordClarity, charClarity: charClarity, semiText: semiText,
-    PROSODY_DEFAULTS: PROSODY_DEFAULTS };
+    PROSODY_DEFAULTS: PROSODY_DEFAULTS, FusionPopup: FusionPopup, TypingHint: TypingHint, Lexicon: Lexicon,
+    matchLexicon: matchLexicon, withFusion: withFusion, fusionZhuyinOk: fusionZhuyinOk };
 })();

@@ -585,3 +585,19 @@ tr.diff-del td:first-child { text-decoration: none; }
   .diff-del { background: rgba(201, 60, 55, .4); }
   .diff-rej { background: rgba(154, 163, 173, .35); }
 }
+
+/* CHG-20261029-01 T9:合音模式、輸入時提示與時間軸徽章 */
+.tone-chars.is-fusion-mode .tone-char { user-select: none; }
+.tone-char.is-fused { outline: 1px solid #2f6fd6; background: #eaf1fd; border-bottom: 2px dotted #2f6fd6; }
+.fusion-list { list-style: none; margin: 4px 0; padding: 0; display: grid; gap: 2px; font-size: 12px; }
+.fusion-item { display: flex; gap: 6px; align-items: center; }
+.fusion-popup { width: 300px; }
+.fusion-options { display: grid; gap: 2px; font-size: 13px; }
+.fusion-input { width: 160px; }
+.fusion-hint {
+  position: absolute; z-index: 40; display: flex; gap: 8px; align-items: center; padding: 4px 8px;
+  background: #fff; border: 1px solid var(--accent); border-radius: 6px; box-shadow: 0 2px 8px rgba(0, 0, 0, .15); font-size: 12px;
+}
+.fusion-hint-enable { display: flex; gap: 2px; align-items: center; }
+.fusion-mirror { position: absolute; left: -9999px; top: 0; visibility: hidden; white-space: pre-wrap; overflow-wrap: break-word; }
+.tl-badge { position: absolute; right: 4px; bottom: 3px; font-size: 10px; padding: 0 4px; border-radius: 3px; background: rgba(0, 0, 0, .35); }

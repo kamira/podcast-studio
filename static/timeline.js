@@ -389,6 +389,11 @@
             "#" + no + " " + seg.text + "(" + (ls.end - ls.start).toFixed(1) + " 秒)");
           b.dataset.segment = ls.id;
           if (seg.audio && !("key" in seg.audio)) b.classList.add("is-external");
+          if ((seg.fusions || []).length) {   // CHG-20261029-01 T9:送模型的文字含合音(字幕仍為原文)
+            const badge = el("span", "tl-badge", "⟲ 合音 " + seg.fusions.length);
+            badge.title = "送模型的文字含合音(字幕仍為原文)";
+            b.appendChild(badge);
+          }
           lanes.voice.appendChild(b);
           prev = ls;
         } else {
