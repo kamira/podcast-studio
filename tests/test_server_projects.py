@@ -929,3 +929,178 @@ def test_race_annotate_tmp_dir_swapped_after_open_writes_stay_inside(env, monkey
     assert r.status_code == 200, r.text
     assert list(elsewhere.iterdir()) == []
     assert list((env.repo / "outputs" / ".tmp-moved").iterdir()) == []
+
+
+# ---------- CHG-20261029-01 T4:連音、清晰度、語調的 API 與 POST /post ----------
+
+FAKE_SHAPE = textwrap.dedent('''
+    # 替身 shape worker:輸入照抄成輸出(去掉開頭 connect% × 0.1 秒);呼叫記到 shape.log
+    import json, os, sys, time, wave
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    args = sys.argv[1:]
+    jobs_path, out = args[args.index("--jobs") + 1], args[args.index("--out") + 1]
+    with open(jobs_path, encoding="utf-8") as f:
+        body = json.load(f)
+    with open(os.path.join(HERE, "shape.log"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(body["jobs"], ensure_ascii=False) + "\\n")
+    if os.path.exists(os.path.join(HERE, "shape_delay")):
+        time.sleep(float(open(os.path.join(HERE, "shape_delay")).read()))
+    for job in body["jobs"]:
+        with wave.open(os.path.join(out, job["input"]), "rb") as r:
+            params, frames = r.getparams(), r.readframes(r.getnframes())
+        cut = int(job["connect"] / 100 * 0.1 * params.framerate) * params.sampwidth
+        with wave.open(os.path.join(out, job["id"] + ".wav"), "wb") as w:
+            w.setparams(params)
+            w.writeframes(frames[cut:])
+        print(json.dumps({"id": job["id"], "seconds": 0}), flush=True)
+''')
+
+
+@pytest.fixture
+def shaped(env, monkeypatch):
+    (env.fake / "shape.py").write_text(FAKE_SHAPE, encoding="utf-8")
+    monkeypatch.setattr(tts, "_shape_argv", lambda jobs, out: [sys.executable, str(env.fake / "shape.py"),
+                                                               "shape", "--jobs", str(jobs), "--out", str(out)])
+    return env
+
+
+def shape_calls(env) -> list:
+    p = env.fake / "shape.log"
+    return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()] if p.exists() else []
+
+
+def synth_all(client):
+    create(client)
+    r = client.post(f"/api/projects/{NAME}/synth", headers=auth())
+    assert r.status_code == 200, r.text
+    events = read_sse(client, r.json()["run_id"])
+    assert events[-1]["status"] == "ok", events
+    return get(client)
+
+
+def post(client, body=None, name=NAME, headers=None):
+    return client.post(f"/api/projects/{name}/post", json=body if body is not None else {},
+                       headers=auth() if headers is None else headers)
+
+
+def test_合成後每句已裁切且post有效(client, shaped):
+    view = synth_all(client)
+    assert view["post_stale"] == []
+    for s in view["project"]["segments"]:
+        assert s["post"] and s["post"]["key"] == pj.post_key(s)
+    assert shape_calls(shaped) == []
+
+
+def test_PATCH連音後POST_post只重做後製_新長度寫回(client, shaped):
+    view = synth_all(client)
+    sid = view["project"]["segments"][0]["id"]
+    before = view["project"]["segments"][0]["post"]["seconds"]
+    calls = len(shaped.worker_calls())
+    r = patch_segment(client, sid, {"connect": 50})
+    assert r.status_code == 200, r.text
+    assert r.json()["post_stale"] == [sid]
+    r = post(client, {"segments": [sid]})
+    assert r.status_code == 200, r.text
+    seg = r.json()["project"]["segments"][0]
+    assert seg["connect"] == 50 and seg["post"]["seconds"] == pytest.approx(before - 0.05, abs=0.002)
+    assert r.json()["post"]["processed"] == [sid] and r.json()["post_stale"] == []
+    assert len(shaped.worker_calls()) == calls and len(shape_calls(shaped)) == 1   # synth 0 次、shape 1 次
+    lay = next(x for x in r.json()["layout"]["segments"] if x["id"] == sid)
+    assert lay["end"] - lay["start"] == pytest.approx(seg["post"]["seconds"] / 1.15, abs=0.002)
+    m = client.get(f"/api/projects/{NAME}/media/{seg['post']['id']}")          # 預覽可取得後製檔
+    assert m.status_code == 200 and m.headers["content-type"] == "audio/wav"
+    assert pj.load(NAME).segments[0]["post"] == seg["post"]
+    assert post(client).json()["post"] == {"processed": [], "cached": []}       # 沒有過期片段
+
+
+def test_POST_post缺Token或錯誤Origin為403(client, shaped):
+    synth_all(client)
+    assert post(client, headers={"Origin": ORIGIN}).status_code == 403
+    assert post(client, headers={"Origin": "http://evil.example", "X-Studio-Token": TOKEN}).status_code == 403
+
+
+def test_synth進行中POST_post為409(client, shaped):
+    create(client)
+    (shaped.fake / "conf.json").write_text(json.dumps({"delay": 1.0}), encoding="utf-8")
+    r = client.post(f"/api/projects/{NAME}/synth", headers=auth())
+    assert r.status_code == 200
+    r2 = post(client)
+    assert r2.status_code == 409 and "執行中" in r2.json()["error"]
+    read_sse(client, r.json()["run_id"])
+
+
+@pytest.mark.parametrize("body", [{"connect": 101}, {"clarity": -1}, {"connect": "50"},
+                                  {"pitch": {"points": [{"pos": 0, "semi": 7}, {"pos": 1, "semi": 0}],
+                                             "roundness": 50}},
+                                  {"word_clarity": [{"start": 12, "end": 30, "value": 40}]},
+                                  {"pitch": {"points": [{"pos": 0, "semi": 0}], "roundness": 50}}])
+def test_不合法數值為422_繁中且不含路徑(client, shaped, body):
+    view = create(client)
+    sid = view["project"]["segments"][0]["id"]
+    r = patch_segment(client, sid, body)
+    assert r.status_code == 422
+    assert no_abs_path(r.text, shaped) and any("一" <= c <= "鿿" for c in r.json()["error"])
+    assert pj.load(NAME).segments[0]["connect"] is None
+
+
+def test_PATCH_post欄位為422(client, shaped):
+    view = create(client)
+    sid = view["project"]["segments"][0]["id"]
+    r = patch_segment(client, sid, {"post": {"id": "a" * 32, "key": "a" * 64, "seconds": 1, "trim": 0}})
+    assert r.status_code == 422 and "post" in r.json()["error"]
+
+
+@pytest.mark.parametrize("bad", ["../x", "ABCDEF01", "abc", 12])
+def test_POST_post片段id格式不合為404(client, shaped, bad):
+    synth_all(client)
+    assert post(client, {"segments": [bad]}).status_code == 404
+    assert post(client, {"segments": ["0123456789abcdef"]}).status_code == 404     # 格式對、但不存在
+    assert post(client, {"segments": "x"}).status_code == 422
+    assert post(client, {"other": 1}).status_code == 422
+
+
+def test_自錄音檔PATCH連音為422(client, shaped):
+    view = record_all(client)
+    sid = view["project"]["segments"][0]["id"]
+    r = patch_segment(client, sid, {"connect": 30})
+    assert r.status_code == 422 and "自錄音檔不做後製" in r.json()["error"]
+    assert patch_segment(client, sid, {"connect": None}).status_code == 200      # 清除仍可
+    r = post(client, {"segments": [sid]})
+    assert r.status_code == 200 and r.json()["post"] == {"processed": [], "cached": []}
+
+
+def test_改文字清除字詞清晰度_保留語調(client, shaped):
+    view = create(client, script="大家好，歡迎收聽夜市的味道。")
+    sid = view["project"]["segments"][0]["id"]
+    pitch = {"points": [{"pos": 0, "semi": 0}, {"pos": 1, "semi": 3}], "roundness": 20}
+    r = patch_segment(client, sid, {"word_clarity": [{"start": 8, "end": 10, "value": 40}], "pitch": pitch})
+    assert r.status_code == 200, r.text
+    r = patch_segment(client, sid, {"text": "大家好，歡迎收聽士林夜市。"})
+    s = r.json()["project"]["segments"][0]
+    assert s["word_clarity"] == [] and s["pitch"] == pitch
+
+
+def test_匯出前自動補做過期的後製(client, shaped):
+    view = synth_all(client)
+    sid = view["project"]["segments"][1]["id"]
+    patch_segment(client, sid, {"clarity": 40})
+    r = client.post(f"/api/projects/{NAME}/render", headers=auth())
+    assert r.status_code == 200, r.text
+    events = read_sse(client, r.json()["run_id"])
+    assert events[-1]["status"] == "ok", events
+    assert [e["id"] for e in events if e["type"] == "post"] == [sid]
+    assert len(shape_calls(shaped)) == 1 and shape_calls(shaped)[0][0]["clarity"] == 40
+    assert pj.is_post_fresh(pj.load(NAME).segments[1])
+
+
+def test_開啟舊專案時回報需補做的片段(client, shaped):
+    view = synth_all(client)
+    proj = pj.load(NAME)
+    for s in proj.segments:
+        s["post"] = None                                # 模擬 v1 升級來的專案(沒有後製)
+    pj.save(proj)
+    v = get(client)
+    assert v["post_stale"] == [s["id"] for s in view["project"]["segments"]]
+    r = post(client)
+    assert r.status_code == 200 and r.json()["post_stale"] == []
+    assert sorted(r.json()["post"]["cached"]) == sorted(v["post_stale"])          # 裁切檔已在快取
