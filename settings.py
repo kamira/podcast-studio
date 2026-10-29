@@ -47,7 +47,7 @@ voice_defaults = {"speed", "pause_comma", "pause_sentence", "pause_paragraph"}(�
 交易內再讀版本),只建 fusion_words、fusion_settings 表並寫入 FUSION_DEFAULTS 與匯入上限預設值,meta.schema_version 改為 3;不改 roles、
 review_seats、voice_defaults。失敗即 rollback 維持 v2,load() 照常回傳設定並帶 `_warnings`
 (WARN_DB_UPGRADE3),合音詞庫暫用程式內預設詞。v1 資料庫在同一個交易內連升兩版。版本大於 3 不讀不寫。
-回滾 v3:備份後 `BEGIN IMMEDIATE; DROP TABLE fusion_words; UPDATE meta SET value = '2' WHERE
+回滾 v3:備份後 `BEGIN IMMEDIATE; DROP TABLE fusion_words; DROP TABLE fusion_settings; UPDATE meta SET value = '2' WHERE
 key = 'schema_version'; COMMIT;`(使用者執行或核准後執行;之前先匯出合音詞庫 JSON)。
 合音詞庫介面:load_fusions()、fusion_lexicon()、fusions_version()、save_fusion()、delete_fusion()、
 restore_fusion()、export_fusions(fmt)、parse_fusion_file()、preview_import()、apply_import()(見檔尾)。
