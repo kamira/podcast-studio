@@ -596,7 +596,8 @@ tr.diff-del td:first-child { text-decoration: none; }
 .fusion-input { width: 160px; }
 .fusion-wrap { position: relative; }
 .fusion-mirror { position: absolute; pointer-events: none; overflow: hidden; color: transparent; background: transparent; margin: 0; }
-.fusion-mirror .mk { text-decoration-line: underline; text-decoration-style: wavy; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.fusion-mirror .mk, .prop-text .mk { text-decoration-line: underline; text-decoration-style: wavy; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.prop-text .mk { cursor: pointer; }
 .mk.mark-pending { text-decoration-color: #e0b000; }
 .mk.mark-on { text-decoration-color: #2e9e5b; }
 .mk.mark-off { text-decoration-color: #c93c37; }

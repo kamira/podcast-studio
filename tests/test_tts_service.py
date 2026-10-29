@@ -788,3 +788,48 @@ def test_兩片段加15秒停頓匯出後silencedetect量得15秒(shaped, monkey
                         "-af", "silencedetect=noise=-40dB:d=0.3", "-f", "null", "-"], capture_output=True, timeout=120)
     found = [float(x) for x in _re.findall(r"silence_duration: ([\d.]+)", r.stderr.decode("utf-8", "replace"))]
     assert len(found) == 1 and found[0] == pytest.approx(1.5, abs=0.1), found
+
+
+def test_後製檔不在_視為過期_匯出前重做且長度與layout一致(shaped, monkeypatch):
+    """(DIR-5 修正 M-3)post 資料仍有效但後製檔已被刪:stale_post 列為過期;依匯出流程補做後
+    後製檔重新產生、變速來源為後製檔,匯出長度與 timeline.layout() 一致(句尾不被截掉)。"""
+    import re as _re
+
+    import imageio_ffmpeg
+    import timeline
+    p = padded_project(shaped)
+    p.defaults["speed"] = 1.0
+    p.segments[0]["connect"] = 50
+    tts.ensure_post(p, shaped.emit)
+    pj.save(p)
+    p = pj.load("夜市的味道")
+    s0 = p.segments[0]
+    adir = pj.subdir("夜市的味道", "audio")
+    (adir / f"{s0['post']['id']}.wav").unlink()
+    assert pj.is_post_fresh(s0)                       # 只比對資料仍相符
+    assert [s["id"] for s in tts.stale_post(p)] == [s0["id"]]
+    stale = [s["id"] for s in tts.stale_post(p)]      # 同 studio_server 匯出 work():stale_post → post_fn
+    out = tts.post_process(p, stale, shaped.emit)
+    assert out["processed"] == [s0["id"]]
+    assert (adir / f"{s0['post']['id']}.wav").is_file() and tts.stale_post(p) == []
+    assert tts.ensure_post(p, shaped.emit) == {"processed": [], "cached": []}
+    assert tts.apply_speed(s0, p).name == f"{s0['post']['id']}.wav"
+    lay = timeline.layout(p)
+    out_dir = Path(taiwan_ai.ROOT) / "outputs"
+    monkeypatch.setattr(taiwan_ai, "OUT", out_dir)
+    mp4, _ = media.render_timeline(p, lay)
+    r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-hide_banner", "-i", str(mp4),
+                        "-f", "null", "-"], capture_output=True, timeout=120)
+    h, m, sec = _re.findall(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr.decode("utf-8", "replace"))[0]
+    assert int(h) * 3600 + int(m) * 60 + float(sec) == pytest.approx(lay["duration"], abs=0.1)
+    # 匯出音源(後製檔)與 layout 的片段長度相同,句尾不會被 layout 長度截掉
+    src = adir / f"{s0['post']['id']}.wav"
+    assert media.wav_seconds(src) == pytest.approx(lay["segments"][0]["end"] - lay["segments"][0]["start"], abs=0.002)
+
+
+def test_後製檔不在_自錄音檔與未合成片段仍不列過期(shaped):
+    p = padded_project(shaped, n=1)
+    p.segments[0]["audio"] = {"id": "e" * 16, "seconds": 1.0}
+    assert tts.stale_post(p) == []
+    p.segments[0]["audio"] = None
+    assert tts.stale_post(p) == []

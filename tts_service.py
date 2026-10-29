@@ -557,8 +557,19 @@ def shape_job(segment: dict, out_id: str, input_id: str) -> dict:
 
 
 def stale_post(project) -> list[dict]:
-    """後製過期的合成片段(post 為 null、參數改過或音檔改過);自錄音檔與未合成的片段不算。"""
-    return [s for s in project.segments if _synthesized(s) and not pj.is_post_fresh(s)]
+    """後製過期的合成片段(post 為 null、參數改過或音檔改過);自錄音檔與未合成的片段不算。
+
+    (CHG-20261029-01 DIR-5 修正 M-3)post 資料仍有效但後製檔 `audio/<post.id>.wav` 已不在,也算過期:
+    匯出前補做、專案檢視的 post_stale 與開啟時補做(D20)都會重做後製,時間軸長度與匯出音源維持同一份後製檔。"""
+    segs = [s for s in project.segments if _synthesized(s)]
+    if not segs:
+        return []
+    adir = _audio_fd(project, create=False)
+    try:
+        return [s for s in segs if not pj.is_post_fresh(s) or not _regular_in(adir, f"{s['post']['id']}.wav")]
+    finally:
+        if adir is not None:
+            os.close(adir)
 
 
 def post_process(project, segment_ids, emit) -> dict:
@@ -571,7 +582,8 @@ def post_process(project, segment_ids, emit) -> dict:
     wanted = None if segment_ids is None else set(segment_ids)
     segs = [s for s in project.segments if _synthesized(s) and (wanted is None or s["id"] in wanted)]
     if wanted is None:
-        segs = [s for s in segs if not pj.is_post_fresh(s)]
+        stale = {s["id"] for s in stale_post(project)}
+        segs = [s for s in segs if s["id"] in stale]
     result = {"processed": [], "cached": []}
     if not segs:
         return result

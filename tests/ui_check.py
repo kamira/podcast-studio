@@ -602,7 +602,9 @@ CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png", "settings-fusion.png")
 STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ",
                # CHG-20261029-01 T9:合音規則推導需要的字
                "是": "ㄕˋ", "這": "ㄓㄜˋ", "樣": "ㄧㄤˋ", "不": "ㄅㄨˋ", "知": "ㄓ", "道": "ㄉㄠˋ", "就": "ㄐㄧㄡˋ",
-               "你": "ㄋㄧˇ", "嗎": "˙ㄇㄚ", "啊": "˙ㄚ", "攤": "ㄊㄢ", "販": "ㄈㄢˋ"}
+               "你": "ㄋㄧˇ", "嗎": "˙ㄇㄚ", "啊": "˙ㄚ", "攤": "ㄊㄢ", "販": "ㄈㄢˋ",
+               # DIR-5 修正 M-4:不在詞庫的「那裡」以規則推導
+               "那": "ㄋㄚˋ", "裡": "ㄌㄧˇ"}
 
 # 替身 worker:參數格式同 breezy_worker.py synth;每句寫一個真的 16 kHz 正弦波 WAV,
 # stdout 逐句印 {"id", "seconds"};呼叫紀錄寫到同目錄的 calls.log(一行一次呼叫)。
@@ -911,9 +913,9 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     check(s4["fusions"] == [] and s4["audio"] is None, f"該句應沒有合音且需重新合成:{s4}")
     check(not any(c.get("fusions") for c in proj().segments if "不道" in c["text"]), "不應殘留合音")
 
-    begin("合音模式:準備三句並合成(停用詞庫的「這樣」,以規則推導)")
+    begin("合音模式:準備五句並合成(停用詞庫的「這樣」,以規則推導)")
     settings.save_fusion("這樣", "ㄐㄧㄤˋ", False)
-    ta.fill(SCRIPT_EDITED + "是這樣啊，你不知道嗎。就是這家攤販。就是這樣。")
+    ta.fill(SCRIPT_EDITED + "是這樣啊，你不知道嗎。就是這家攤販。就是這樣。那裡很好。他也不知道。")
     page.locator("#script-synth").click()
     wait_until(lambda: seg_with("是這樣啊，你不知道嗎。") and seg_with("是這樣啊，你不知道嗎。")["audio"]
                and not page.evaluate("window.Studio.Voice.running"), "三句應已合成", timeout=30)
@@ -948,6 +950,51 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     check("是這[:ㄐㄧㄤˋ]啊" in sent and "樣" not in sent, f"送模型的文字不符:{sent}")
     cue = page.locator(f'#tl-cues .tl-cue[data-segment="{s1["id"]}"]')
     expect(cue.first).to_contain_text("是這樣啊")
+
+    begin("合音模式:選不在詞庫的「那裡」以規則推導 ㄋㄧˇ,套用後 source 為 rule、送模型含 那[:ㄋㄧˇ] 不含「裡」")
+    s5 = seg_with("那裡很好。")
+    select_seg(s5["id"])
+    drag_chars(0, 1)
+    expect(fpop).to_be_visible()
+    expect(fpop.locator(".fusion-input")).to_have_value("ㄋㄧˇ")
+    n = len(calls())
+    fpop.get_by_role("button", name="套用").click()
+    wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
+    check(seg_with("那裡很好。")["fusions"] == [{"index": 0, "length": 2, "zhuyin": "ㄋㄧˇ", "source": "rule"}],
+          f"fusions 不符:{seg_with('那裡很好。')['fusions']}")
+    sent = calls()[-1][0]["text"]
+    check("那[:ㄋㄧˇ]" in sent and "裡" not in sent, f"送模型的文字不符:{sent}")
+    expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s5["id"]}"]').first).to_contain_text("那裡很好")
+
+    begin("合音模式:詞庫有停用的「攤販」時按「存入合音詞庫」先確認覆寫;取消不變、接受才寫入")
+    settings.save_fusion("攤販", "ㄈㄢ", False)
+    s2 = seg_with("就是這家攤販。")
+    select_seg(s2["id"])
+    drag_chars(4, 5)
+    expect(fpop).to_be_visible()
+    finput = fpop.locator(".fusion-input")
+    expect(finput).not_to_have_value("")             # 等規則推導預填完成
+    z = finput.input_value()
+    check(z and z != "ㄈㄢ", f"預填的合音注音應與詞庫中停用的值不同:{z}")
+    asked = []    # 對話框事件要靠 Playwright 呼叫才會分派,等待時以 page.wait_for_timeout 推進
+    page.once("dialog", lambda d: (asked.append(d.message), d.dismiss()))
+    fpop.get_by_role("button", name="存入合音詞庫").click()
+    wait_until(lambda: page.wait_for_timeout(50) or len(asked) == 1, "停用中的既有詞也應先跳覆寫確認")
+    check("攤販" in asked[0] and "覆寫" in asked[0], f"確認訊息不符:{asked}")
+    page.wait_for_timeout(300)
+
+    def lex_tanfan():
+        return {w["word"]: w for w in settings.load_fusions()["words"]}["攤販"]
+
+    check(lex_tanfan()["zhuyin"] == "ㄈㄢ" and lex_tanfan()["enabled"] is False,
+          f"取消確認後詞庫不應改變:{lex_tanfan()}")
+    page.once("dialog", lambda d: (asked.append(d.message), d.accept()))
+    fpop.get_by_role("button", name="存入合音詞庫").click()
+    wait_until(lambda: page.wait_for_timeout(50) or len(asked) == 2, "再按一次應再跳覆寫確認")
+    wait_until(lambda: page.wait_for_timeout(50) or lex_tanfan()["zhuyin"] == z, "接受確認後應寫入新注音")
+    check(lex_tanfan()["enabled"] is True, "接受確認後應啟用")
+    page.keyboard.press("Escape")
+    settings.delete_fusion("攤販")
 
     begin("合音模式:選三字「不知道」預填詞庫值 ㄅㄨˋ ㄗㄠˋ,套用後送模型含 不[:ㄅㄨˋ]知[:ㄗㄠˋ] 不含「道」")
     select_seg(s1["id"])
@@ -988,6 +1035,49 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(fpop.locator(".fusion-input")).to_have_value("ㄐㄧㄡˋ ㄕˋ ㄐㄧㄤˋ")
     page.keyboard.press("Escape")
     settings.save_fusion("是這樣", "ㄕˋ ㄐㄧㄤˋ", True)
+
+    begin("合音模式:選預設詞「這樣」(詞庫啟用)套用後 source 為 lexicon、送模型含 [:ㄐㄧㄤˋ] 不含「樣」、字幕仍為原文")
+    select_seg(s3["id"])
+    drag_chars(2, 3)
+    expect(fpop).to_be_visible()
+    expect(fpop.locator(".fusion-input")).to_have_value("ㄐㄧㄤˋ")
+    expect(fpop.locator(".fusion-derive")).to_contain_text("詞庫")
+    n = len(calls())
+    fpop.get_by_role("button", name="套用").click()
+    wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
+    check(seg_with("就是這樣。")["fusions"] == [{"index": 2, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "lexicon"}],
+          f"fusions 不符:{seg_with('就是這樣。')['fusions']}")
+    sent = calls()[-1][0]["text"]
+    check("[:ㄐㄧㄤˋ]" in sent and "樣" not in sent, f"送模型的文字不符:{sent}")
+    expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s3["id"]}"]').first).to_contain_text("就是這樣")
+
+    begin("屬性面板句子文字:「不知道」顯示黃色波浪底線,點擊開同一個浮動窗;停用變紅、再點選啟用變綠")
+    s6 = seg_with("他也不知道。")
+    page.locator(f'#tl-voice [data-segment="{s6["id"]}"]').first.click()
+    ptext = page.locator("#props-body .prop-text")
+    expect(ptext).to_have_text("他也不知道。")
+    pmk = ptext.locator(".mk")
+    expect(pmk).to_have_count(1)
+    expect(pmk).to_have_text("不知道")
+    expect(pmk).to_have_class(re.compile(r"\bmark-pending\b"))
+    deco = pmk.evaluate("e => getComputedStyle(e).textDecorationStyle")
+    check(deco == "wavy", f"屬性面板的標記應為波浪底線,實際 {deco}")
+    expect(pop).to_be_hidden()
+    pmk.click()
+    expect(pop).to_be_visible()
+    expect(pop).to_contain_text("不知道 → ㄅㄨˋ ㄗㄠˋ")
+    pop.locator("#fusion-pop-off").click()
+    wait_until(lambda: seg_with("他也不知道。")["fusion_off"] == [{"index": 2, "length": 3}]
+               and seg_with("他也不知道。")["fusions"] == [], "屬性面板選停用應寫入 fusion_off")
+    expect(page.locator("#props-body .prop-text .mk")).to_have_class(re.compile(r"\bmark-off\b"))
+    page.locator("#props-body .prop-text .mk").click()
+    expect(pop).to_be_visible()
+    pop.locator("#fusion-pop-on").click()
+    wait_until(lambda: seg_with("他也不知道。")["fusions"] == [
+        {"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}]
+        and seg_with("他也不知道。")["fusion_off"] == [], "屬性面板選啟用應寫入 fusions")
+    expect(page.locator("#props-body .prop-text .mk")).to_have_class(re.compile(r"\bmark-on\b"))
+    expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s6["id"]}"]').first).to_contain_text("他也不知道")
 
 
 def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems: list) -> None:

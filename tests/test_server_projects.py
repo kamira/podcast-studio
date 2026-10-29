@@ -1093,6 +1093,25 @@ def test_匯出前自動補做過期的後製(client, shaped):
     assert pj.is_post_fresh(pj.load(NAME).segments[1])
 
 
+def test_後製檔不在_post_stale回報且匯出前重做(client, shaped):
+    """(DIR-5 修正 M-3)post 資料有效但後製檔被刪:專案檢視列入 post_stale,匯出前補做並重新產生後製檔。"""
+    view = synth_all(client)
+    sid = view["project"]["segments"][1]["id"]
+    patch_segment(client, sid, {"clarity": 40})
+    assert post(client).status_code == 200
+    proj = pj.load(NAME)
+    pid = proj.segments[1]["post"]["id"]
+    f = pj.subdir(NAME, "audio") / f"{pid}.wav"
+    f.unlink()
+    assert get(client)["post_stale"] == [sid]
+    r = client.post(f"/api/projects/{NAME}/render", headers=auth())
+    assert r.status_code == 200, r.text
+    events = read_sse(client, r.json()["run_id"])
+    assert events[-1]["status"] == "ok", events
+    assert [e["id"] for e in events if e["type"] == "post"] == [sid]
+    assert f.is_file() and get(client)["post_stale"] == []
+
+
 def test_開啟舊專案時回報需補做的片段(client, shaped):
     view = synth_all(client)
     proj = pj.load(NAME)

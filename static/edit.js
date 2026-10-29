@@ -1040,16 +1040,23 @@
     return out;
   }
 
+  // words:啟用中的詞(供建議);all:完整詞庫含停用詞(判斷詞是否已存在,D32)
   const Lexicon = {
     words: null,
+    all: null,
     async load(force) {
       if (this.words && !force) return this.words;
       const r = await S.api("GET", "/api/settings/fusions");
       const out = {};
+      const all = {};
       if (r.ok && r.data && Array.isArray(r.data.words)) {
-        r.data.words.forEach(function (w) { if (w.enabled) out[w.word] = w.zhuyin; });
+        r.data.words.forEach(function (w) {
+          all[w.word] = w.zhuyin;
+          if (w.enabled) out[w.word] = w.zhuyin;
+        });
       }
       this.words = out;
+      this.all = all;
       return out;
     },
   };
@@ -1239,7 +1246,8 @@
       if (!seg) return;
       const word = Array.from(seg.text).slice(this.range[0], this.range[1]).join("");
       const z = this.input.value.trim();
-      const lex = await Lexicon.load(true);
+      await Lexicon.load(true);
+      const lex = Lexicon.all || {};
       if (Object.prototype.hasOwnProperty.call(lex, word) && !window.confirm("「" + word + "」已在合音詞庫中,要覆寫嗎?")) return;
       const r = await S.api("PUT", "/api/settings/fusions/" + encodeURIComponent(word), { zhuyin: z, enabled: true });
       if (!r.ok) {
@@ -1580,6 +1588,56 @@
       });
     },
 
+    // 屬性面板句子文字的標記(D40,DIR-5 修正 U-1):規則同文稿框,座標為句內索引(逐字)
+    segMarks(seg) {
+      const lex = this.lexicon;
+      const chars = Array.from(seg.text || "");
+      const word = function (i, n) { return chars.slice(i, i + n).join(""); };
+      const out = [];
+      (seg.fusions || []).forEach(function (f) {
+        const e = lex[word(f.index, f.length)];
+        out.push({ index: f.index, len: f.length, state: "on", zhuyin: f.zhuyin,
+                   display: e && e.zhuyin === f.zhuyin ? e.display : "" });
+      });
+      (seg.fusion_off || []).forEach(function (d) {
+        const e = lex[word(d.index, d.length)];
+        out.push({ index: d.index, len: d.length, state: "off", zhuyin: e ? e.zhuyin : "", display: e ? e.display : "" });
+      });
+      const exclude = [];
+      out.forEach(function (d) { for (let k = 0; k < d.len; k++) exclude.push(d.index + k); });
+      (seg.annotations || []).forEach(function (a) { exclude.push(a.index); });
+      const flat = {};
+      Object.keys(lex).forEach(function (w) { flat[w] = lex[w].zhuyin; });
+      matchLexicon(seg.text, flat, exclude).forEach(function (h) {
+        out.push({ index: h.index, len: h.length, state: "pending", zhuyin: h.zhuyin,
+                   display: lex[h.word] ? lex[h.word].display : "" });
+      });
+      out.forEach(function (m) { m.segId = seg.id; m.word = word(m.index, m.len); });
+      return out.sort(function (a, b) { return a.index - b.index; });
+    },
+
+    // 把屬性面板的句子文字換成帶標記的文字;點擊標記開同一個浮動窗(#fusion-pop)
+    mountProps(box, seg) {
+      if (!box || !seg || !this.pop) return;
+      const chars = Array.from(seg.text || "");
+      box.replaceChildren();
+      let pos = 0;
+      this.segMarks(seg).forEach((m) => {
+        if (m.index < pos || m.index + m.len > chars.length) return;
+        if (m.index > pos) box.appendChild(document.createTextNode(chars.slice(pos, m.index).join("")));
+        const sp = el("span", "mk mark-" + m.state, m.word);
+        sp.dataset.index = String(m.index);
+        sp.dataset.len = String(m.len);
+        sp.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.openPop(m, sp.getBoundingClientRect());
+        });
+        box.appendChild(sp);
+        pos = m.index + m.len;
+      });
+      if (pos < chars.length) box.appendChild(document.createTextNode(chars.slice(pos).join("")));
+    },
+
     onClick() {
       const ta = this.ta;
       if (this.composing || ta.selectionStart !== ta.selectionEnd) return;
@@ -1595,7 +1653,8 @@
 
     openPop(m, rect) {
       this.target = m;
-      this.popTitle.textContent = this.text.slice(m.start, m.start + m.len) + ARROW + m.zhuyin;
+      const word = m.segId ? m.word : this.text.slice(m.start, m.start + m.len);
+      this.popTitle.textContent = word + ARROW + m.zhuyin;
       this.pop.hidden = false;
       this.pop.style.left = (rect.left + window.scrollX) + "px";
       this.pop.style.top = (rect.bottom + window.scrollY + 8) + "px";
@@ -1611,18 +1670,23 @@
       const m = this.target;
       this.closePop();
       if (!m || !m.zhuyin) return;
-      if (S.ScriptPanel && S.ScriptPanel.dirty && !(await S.ScriptPanel.save())) return;
-      const view = Store.view;
-      const spans = segmentSpans(view.project.script, view.project.segments);
       let seg = null;
       let at = -1;
-      view.project.segments.forEach(function (s, k) {
-        const sp = spans[k];
-        if (sp && m.start >= sp[0] && m.start + m.len <= sp[1]) {
-          seg = s;
-          at = m.start - sp[0];
-        }
-      });
+      if (m.segId) {
+        seg = Store.segment(m.segId);
+        at = m.index;
+      } else {
+        if (S.ScriptPanel && S.ScriptPanel.dirty && !(await S.ScriptPanel.save())) return;
+        const view = Store.view;
+        const spans = segmentSpans(view.project.script, view.project.segments);
+        view.project.segments.forEach(function (s, k) {
+          const sp = spans[k];
+          if (sp && m.start >= sp[0] && m.start + m.len <= sp[1]) {
+            seg = s;
+            at = m.start - sp[0];
+          }
+        });
+      }
       if (!seg) {
         S.toast("找不到這個詞所在的句子", true);
         return;
@@ -1655,6 +1719,7 @@
     mountTone(box.querySelector('[data-hook="tone"]'), a.segment);
     mountProsody(box.querySelector('[data-hook="prosody"]'), a.segment);
     mountPitchProps(box.querySelector('[data-hook="pitch-props"]'), a.segment);
+    ScriptMarks.mountProps(box.querySelector(".prop-text"), a.segment);
   });
 
   S.hook("image-props", function (a) {
