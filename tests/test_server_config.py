@@ -564,3 +564,131 @@ def test_studio_server_never_touches_db_or_json_directly():
     r = subprocess.run(["grep", "-n", r"sqlite3\|models\.json", str(REPO / "studio_server.py")],
                        capture_output=True, text=True)
     assert r.stdout == ""
+
+
+# ---------- CHG-20261029-01 T8:合音詞庫端點 ----------
+
+def fusion_rows(root: Path) -> list:
+    con = sqlite3.connect(db(root))
+    try:
+        return con.execute("SELECT word, zhuyin, enabled, source FROM fusion_words ORDER BY word").fetchall()
+    finally:
+        con.close()
+
+
+def preview(client, raw: bytes, headers=None):
+    return client.post("/api/settings/fusions/import/preview", files={"file": ("詞庫.json", raw, "application/json")},
+                       headers=auth() if headers is None else headers)
+
+
+def apply(client, body, headers=None):
+    return client.post("/api/settings/fusions/import/apply", json=body,
+                       headers=auth() if headers is None else headers)
+
+
+def fusion_file(words) -> bytes:
+    return json.dumps({"format": "podcast-studio-fusions", "version": 1, "words": words},
+                      ensure_ascii=False).encode("utf-8")
+
+
+def test_合音詞庫列表_新增_刪除預設詞422(client, root):
+    r = client.get("/api/settings/fusions")
+    assert r.status_code == 200 and len(r.json()["words"]) == 6 and len(r.json()["version"]) == 64
+    r = client.put("/api/settings/fusions/然後", json={"zhuyin": "ㄖㄢˊ", "enabled": True}, headers=auth())
+    assert r.status_code == 200 and ("然後", "ㄖㄢˊ", 1, "custom") in fusion_rows(root)
+    r = client.delete("/api/settings/fusions/知道", headers=auth())
+    assert r.status_code == 422 and "預設詞不可刪除" in r.json()["error"]
+    assert client.delete("/api/settings/fusions/然後", headers=auth()).status_code == 200
+    assert client.delete("/api/settings/fusions/然後", headers=auth()).status_code == 404
+    assert client.put("/api/settings/fusions/知道", json={"zhuyin": "ㄓㄧ", "enabled": True},
+                      headers=auth()).status_code == 422
+    assert client.put("/api/settings/fusions/x", json={"zhuyin": "ㄓ", "enabled": True},
+                      headers=auth()).status_code == 404
+    client.put("/api/settings/fusions/知道", json={"zhuyin": "ㄓㄠˋ", "enabled": False}, headers=auth())
+    r = client.put("/api/settings/fusions/知道", json={"restore": True}, headers=auth())
+    assert r.status_code == 200 and ("知道", "ㄗㄠˋ", 1, "default") in fusion_rows(root)
+
+
+def test_缺Token的寫入與匯入回403(client, root):
+    no = {"Origin": ORIGIN}
+    assert client.put("/api/settings/fusions/然後", json={"zhuyin": "ㄖㄢˊ", "enabled": True},
+                      headers=no).status_code == 403
+    assert preview(client, fusion_file([]), headers=no).status_code == 403
+    assert apply(client, {"preview_id": "x", "base_version": "y", "apply": "all"}, headers=no).status_code == 403
+    assert not db(root).exists()
+
+
+def test_匯出JSON與CSV_匯出內容等於列表(client):
+    r = client.get("/api/settings/fusions/export?format=json")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert json.loads(r.content)["words"] == client.get("/api/settings/fusions").json()["words"]
+    r = client.get("/api/settings/fusions/export?format=csv")
+    lines = r.content.decode("utf-8").splitlines()
+    assert lines[0] == "word,zhuyin,enabled,source" and len(lines) == 7
+    assert all(not ln[0] in "=+-@" for ln in lines)
+    assert client.get("/api/settings/fusions/export?format=xml").status_code == 422
+
+
+def test_一致的預覽_apply回409(client, root):
+    raw = client.get("/api/settings/fusions/export?format=json").content
+    r = preview(client, raw)
+    assert r.status_code == 200 and r.json()["status"] == "same" and r.json()["changes"] == []
+    r2 = apply(client, {"preview_id": r.json()["preview_id"], "base_version": r.json()["base_version"],
+                        "apply": "all"})
+    assert r2.status_code == 409
+
+
+def test_預覽套用_代號單次有效_版本不符409(client, root):
+    client.put("/api/settings/fusions/然後", json={"zhuyin": "ㄖㄢˊ", "enabled": True}, headers=auth())
+    words = [w for w in json.loads(client.get("/api/settings/fusions/export?format=json").content)["words"]
+             if w["word"] not in ("然後", "我們")]
+    p = preview(client, fusion_file(words)).json()
+    assert {(c["word"], c["kind"]) for c in p["changes"]} == {("然後", "delete"), ("我們", "disable")}
+    assert len(p["preview_id"]) == 32
+    body = {"preview_id": p["preview_id"], "base_version": p["base_version"], "keep": ["我們"]}
+    r = apply(client, body)
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] == ["然後"] and r.json()["kept"] == ["我們"]
+    assert apply(client, body).status_code == 409                      # 同一代號第二次
+    # 預覽後另一個請求改了詞庫 → 409、詞庫不變
+    p = preview(client, fusion_file(words)).json()
+    client.put("/api/settings/fusions/知道", json={"zhuyin": "ㄓㄠˋ", "enabled": True}, headers=auth())
+    before = fusion_rows(root)
+    r = apply(client, {"preview_id": p["preview_id"], "base_version": p["base_version"], "apply": "all"})
+    assert r.status_code == 409 and "重新預覽" in r.json()["error"]
+    assert fusion_rows(root) == before
+
+
+def test_過期代號回409(client, root, monkeypatch):
+    words = [{"word": "好像", "zhuyin": "ㄏㄠˇ", "enabled": True}]
+    p = preview(client, fusion_file(words)).json()
+    monkeypatch.setattr(ss.time, "monotonic", lambda: 10 ** 9)
+    r = apply(client, {"preview_id": p["preview_id"], "base_version": p["base_version"], "apply": "all"})
+    assert r.status_code == 409
+
+
+@pytest.mark.parametrize("raw,status", [
+    (b"x" * (300 * 1024), 413),
+    ("{}".encode("utf-16"), 422),
+    (b"{\"format\": ", 422),
+    (fusion_file([{"word": chr(0x4E00 + i) + "好", "zhuyin": "ㄏㄠˇ", "enabled": True} for i in range(1001)]), 422),
+])
+def test_整檔不合法回413或422且詞庫不變(client, root, raw, status):
+    client.put("/api/settings/fusions/然後", json={"zhuyin": "ㄖㄢˊ", "enabled": True}, headers=auth())
+    before = fusion_rows(root)
+    r = preview(client, raw)
+    assert r.status_code == status, r.text
+    assert fusion_rows(root) == before
+
+
+def test_被拒詞條列在rejected含word與reason(client):
+    words = [{"word": "怎麼樣", "zhuyin": "ㄗㄤˇ", "enabled": True}, {"word": "好像", "zhuyin": "ㄓㄧ", "enabled": True}]
+    r = preview(client, fusion_file(words)).json()
+    assert [(x["word"], x["reason"]) for x in r["rejected"]] == [("怎麼樣", "詞須為兩個漢字"),
+                                                                ("好像", "注音不是單一合法音節")]
+    assert r["rejected"][0]["row"] == 1
+
+
+def test_合音建議讀設定資料庫的詞庫(client):
+    r = client.post("/api/fusion/suggest", json={"text": "我也不知道"}, headers=auth())
+    assert r.json()["suggestions"] == [{"index": 3, "zhuyin": "ㄗㄠˋ", "source": "lexicon"}]

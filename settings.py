@@ -32,11 +32,22 @@
 load() 與 save() 的回傳 / 輸入結構(CHG-20261022-04 T8 起):{"roles", "review_seats", "voice_defaults"};
 voice_defaults = {"speed", "pause_comma", "pause_sentence", "pause_paragraph"}(鍵同 project.DEFAULTS)。
 
-資料庫(schema v2;CHG-20261022-04 T8 由 v1 升級):
+資料庫(schema v3;CHG-20261022-04 T8 由 v1 升級為 v2;CHG-20261029-01 T8 由 v2 升級為 v3):
   meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)        schema_version、imported_from、imported_at
   roles(role TEXT PRIMARY KEY, config TEXT NOT NULL)      config 為該角色鍵值的 JSON
   review_seats(seat TEXT PRIMARY KEY, model TEXT NOT NULL)
   voice_defaults(key TEXT PRIMARY KEY, value REAL NOT NULL)   (v2 新增)語速與三種停頓預設
+  fusion_words(word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, enabled INTEGER NOT NULL, source TEXT NOT NULL)
+                                                         (v3 新增)合音詞庫;source ∈ default / custom
+
+升級 v2 → v3(CHG-20261029-01 D29):同 v1 → v2 的流程(初始化鎖、鎖內再探測、單一 BEGIN IMMEDIATE 交易、
+交易內再讀版本),只建 fusion_words 表並寫入 FUSION_DEFAULTS,meta.schema_version 改為 3;不改 roles、
+review_seats、voice_defaults。失敗即 rollback 維持 v2,load() 照常回傳設定並帶 `_warnings`
+(WARN_DB_UPGRADE3),合音詞庫暫用程式內預設詞。v1 資料庫在同一個交易內連升兩版。版本大於 3 不讀不寫。
+回滾 v3:備份後 `BEGIN IMMEDIATE; DROP TABLE fusion_words; UPDATE meta SET value = '2' WHERE
+key = 'schema_version'; COMMIT;`(使用者執行或核准後執行;之前先匯出合音詞庫 JSON)。
+合音詞庫介面:load_fusions()、fusion_lexicon()、fusions_version()、save_fusion()、delete_fusion()、
+restore_fusion()、export_fusions(fmt)、parse_fusion_file()、preview_import()、apply_import()(見檔尾)。
 
 升級 v1 → v2(安全影響 prod-migration):load() 唯讀探測到 schema_version = 1 時,取初始化鎖、
 在鎖內再唯讀探測一次,仍為 1 才以讀寫模式開啟,於單一 `BEGIN IMMEDIATE` 交易內:交易內再讀一次
@@ -73,6 +84,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -90,9 +102,10 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "models.json"  # 只作一次性匯入來源(T3 起移出 git)
 DB_PATH = Path("config") / "studio.db"  # 相對於 ROOT
 
-SCHEMA_VERSION = "2"           # CHG-20261022-04 T8:新增 voice_defaults 表(1 → 2)
+SCHEMA_VERSION = "3"           # CHG-20261029-01 T8:新增 fusion_words 表(2 → 3)
+SCHEMA_V2 = "2"                # CHG-20261022-04 T8:新增 voice_defaults 表(1 → 2)
 SCHEMA_V1 = "1"
-KNOWN_SCHEMA_VERSIONS = frozenset({SCHEMA_V1, SCHEMA_VERSION})
+KNOWN_SCHEMA_VERSIONS = frozenset({SCHEMA_V1, SCHEMA_V2, SCHEMA_VERSION})
 IMPORTED_FROM = "config/models.json"
 BUSY_TIMEOUT_MS = 5000
 
@@ -121,6 +134,7 @@ WARN_UNSAFE_PATH = "設定檔路徑不安全(符號連結或位於 repo 外),已
 WARN_DB_UNREADABLE = "設定資料庫無法讀取,已使用預設值"
 WARN_DB_VERSION = "設定資料庫版本不明,已使用預設值"
 WARN_DB_UPGRADE = "設定資料庫升級失敗(仍為第 1 版),語音預設暫用程式內預設值"
+WARN_DB_UPGRADE3 = "設定資料庫升級失敗(仍為第 2 版),合音詞庫暫用程式內預設詞"
 
 # 語音預設(CHG-20261022-04 T8;鍵與範圍同 project.DEFAULTS、project.normalize_speed / normalize_pause)
 VOICE_KEYS = ("speed", "pause_comma", "pause_sentence", "pause_paragraph")
@@ -356,11 +370,14 @@ _NEW = "new"      # 沒有任何資料表的資料庫(剛由本模組建立,或�
 # 版本已知時 _schema_state() 回傳版本字串本身(SCHEMA_V1 或 SCHEMA_VERSION)
 
 _VOICE_TABLE = "CREATE TABLE IF NOT EXISTS voice_defaults (key TEXT PRIMARY KEY, value REAL NOT NULL)"
+_FUSION_TABLE = ("CREATE TABLE IF NOT EXISTS fusion_words (word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, "
+                 "enabled INTEGER NOT NULL, source TEXT NOT NULL)")
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS roles (role TEXT PRIMARY KEY, config TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS review_seats (seat TEXT PRIMARY KEY, model TEXT NOT NULL)",
     _VOICE_TABLE,
+    _FUSION_TABLE,
 )
 
 
@@ -645,18 +662,30 @@ def _upgrade_v1_v2(con: sqlite3.Connection) -> None:
     """
     con.execute(_VOICE_TABLE)
     _write_voice(con, DEFAULTS["voice_defaults"])
+    con.execute("UPDATE meta SET value = ? WHERE key = ?", (SCHEMA_V2, "schema_version"))
+
+
+def _upgrade_v2_v3(con: sqlite3.Connection) -> None:
+    """schema 2 → 3(CHG-20261029-01 D29):只新增 fusion_words 表、寫入預設詞、把 meta.schema_version 改為 3。
+
+    不動 roles、review_seats、voice_defaults 的任何列;只在 BEGIN IMMEDIATE 交易內呼叫,失敗由 _immediate() rollback。
+    """
+    _write_fusion_defaults(con)
     con.execute("UPDATE meta SET value = ? WHERE key = ?", (SCHEMA_VERSION, "schema_version"))
 
 
 def _upgrade_body(con: sqlite3.Connection) -> None:
-    """升級交易本體:在交易內重新讀版本,另一行程已升級(版本 2)就略過,只升一次。"""
+    """升級交易本體:在交易內重新讀版本,另一行程已升級就略過,只升一次(v1 連升兩版)。"""
     if _schema_state(con) == SCHEMA_V1:
         _upgrade_v1_v2(con)
+    if _schema_state(con) == SCHEMA_V2:
+        _upgrade_v2_v3(con)
 
 
 def _create_schema(con: sqlite3.Connection) -> None:
     for sql in _SCHEMA:
         con.execute(sql)
+    _write_fusion_defaults(con)
 
 
 def _immediate(con: sqlite3.Connection, body) -> None:
@@ -697,8 +726,8 @@ def _save_body(cfg: dict):
                         ("schema_version", SCHEMA_VERSION))
             if "voice_defaults" not in cfg:
                 _write_voice(con, DEFAULTS["voice_defaults"])
-        elif state == SCHEMA_V1:
-            _upgrade_v1_v2(con)   # 升級與存入在同一個交易內
+        elif state in (SCHEMA_V1, SCHEMA_V2):
+            _upgrade_body(con)    # 升級與存入在同一個交易內
         _write_config(con, cfg)
     return body
 
@@ -752,15 +781,21 @@ def _load_known(db: Path, extra_warning: str | None = None) -> dict:
 
 
 def _load_v1(db: Path) -> dict:
-    """第 1 版資料庫:在初始化鎖內重新唯讀探測,仍為第 1 版才以 BEGIN IMMEDIATE 單一交易升級。
+    """舊版(第 1、2 版)資料庫:在初始化鎖內重新唯讀探測,仍為舊版才以 BEGIN IMMEDIATE 單一交易升級。
 
     鎖內重新探測、交易內再讀一次版本,網頁與 MCP 同時第一次 load() 時只升一次。
     取不到鎖或路徑不安全 → 預設值 + `_warnings`(同其他路徑);期間版本變成不明 → 同版本不明;
     升級交易失敗 → rollback(資料庫維持 v1),回傳 v1 的 roles、review_seats + 程式內語音預設 + `_warnings`。
     """
+    def failed():
+        try:
+            still = _probe(db)
+        except _DbError:
+            still = SCHEMA_V1
+        return _load_known(db, WARN_DB_UPGRADE if still == SCHEMA_V1 else WARN_DB_UPGRADE3)
     try:
         with _init_lock():
-            if _probe(db) == SCHEMA_V1:
+            if _probe(db) in (SCHEMA_V1, SCHEMA_V2):
                 con = _open_rw(db)
                 try:
                     _immediate(con, _upgrade_body)
@@ -769,14 +804,14 @@ def _load_v1(db: Path) -> dict:
     except _DbError as e:
         if e.args[0] in (WARN_UNSAFE_PATH, WARN_DB_VERSION):
             return _fallback(e.args[0])
-        return _load_known(db, WARN_DB_UPGRADE)
+        return failed()
     except Exception:
-        return _load_known(db, WARN_DB_UPGRADE)
+        return failed()
     return _load_known(db)
 
 
 def _load_existing(db: Path, state: str) -> dict:
-    if state == SCHEMA_V1:
+    if state in (SCHEMA_V1, SCHEMA_V2):
         return _load_v1(db)
     return _load_known(db)
 
@@ -968,3 +1003,367 @@ def save(cfg) -> None:
             _create_or_import(db, _save_body(cfg), imported_ok=False)
     except _DbError as e:  # 非 SQLite、損壞或版本不明 → 不寫入、不覆寫、不重建
         raise ValueError([e.args[0]]) from None
+
+
+# ---- 合音詞庫(CHG-20261029-01 T8;D29~D31) ----
+#
+# 表 fusion_words(word TEXT PRIMARY KEY, zhuyin TEXT NOT NULL, enabled INTEGER NOT NULL, source TEXT NOT NULL)
+# source ∈ default(程式常數 FUSION_DEFAULTS,可編輯 / 停用 / 還原,不可刪除)/ custom(可刪除)。
+# 寫入一律經 _fusion_txn():與 save() 相同的路徑檢查;資料庫不存在或仍是舊版時在初始化鎖內建立 / 升級,
+# 與本次寫入在同一個 BEGIN IMMEDIATE 交易內;任何例外 rollback。
+#
+# 匯入(D30,差異預覽 + 逐項保留):preview_import(檔案位元組) 只讀不寫;apply_import(...) 在交易內
+# 重算詞庫版本(SHA-256(依 word 排序的全部列之 JSON)),與預覽時不同即丟 FusionsChanged。
+
+FUSION_DEFAULTS = (
+    ("這樣", "ㄐㄧㄤˋ", True),
+    ("那樣", "ㄋㄧㄤˋ", True),
+    ("知道", "ㄗㄠˋ", True),
+    ("什麼", "ㄕㄚˊ", True),
+    ("我們", "ㄨㄣˇ", True),
+    ("不要", "ㄅㄧㄠˋ", False),
+)
+FUSION_FORMAT = "podcast-studio-fusions"
+FUSION_FORMAT_VERSION = 1
+FUSION_MAX_BYTES = 256 * 1024
+FUSION_MAX_ROWS = 1000
+FUSION_CSV_HEADER = ("word", "zhuyin", "enabled", "source")
+WARN_FUSION_FALLBACK = "設定資料庫無法使用,合音詞庫暫用程式內預設詞"
+
+
+class FusionError(ValueError):
+    """合音詞庫操作被拒(訊息繁中);status 為對應的 HTTP 狀態碼。"""
+
+    def __init__(self, message: str, status: int = 422):
+        super().__init__(message)
+        self.status = status
+
+
+class FusionsChanged(FusionError):
+    """套用匯入時詞庫版本與預覽時不同(409)。"""
+
+    def __init__(self, message: str = "詞庫在預覽後被修改,請重新預覽"):
+        super().__init__(message, 409)
+
+
+def _fusion_default_rows() -> list[dict]:
+    return sorted(({"word": w, "zhuyin": z, "enabled": e, "source": "default"} for w, z, e in FUSION_DEFAULTS),
+                  key=lambda r: r["word"])
+
+
+def _write_fusion_defaults(con: sqlite3.Connection) -> None:
+    con.execute(_FUSION_TABLE)
+    con.executemany("INSERT OR IGNORE INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
+                    [(w, z, 1 if e else 0, "default") for w, z, e in FUSION_DEFAULTS])
+
+
+def _fusion_rows(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute("SELECT word, zhuyin, enabled, source FROM fusion_words ORDER BY word").fetchall()
+    return [{"word": w, "zhuyin": z, "enabled": bool(e), "source": s} for w, z, e, s in rows]
+
+
+def _version_of(rows: list[dict]) -> str:
+    data = [[r["word"], r["zhuyin"], bool(r["enabled"]), r["source"]] for r in sorted(rows, key=lambda r: r["word"])]
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _hanzi(ch: str) -> bool:
+    cp = ord(ch)
+    return (0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF or 0xF900 <= cp <= 0xFAFF
+            or 0x20000 <= cp <= 0x323AF)
+
+
+def check_fusion_word(word, zhuyin, enabled) -> str | None:
+    """D31 詞條驗證;合格回 None,否則回繁中原因。"""
+    import fusion
+    if not isinstance(word, str) or len(word) != 2 or not all(_hanzi(c) for c in word):
+        return "詞須為兩個漢字"
+    if not isinstance(zhuyin, str) or not fusion.is_syllable(zhuyin):
+        return "注音不是單一合法音節"
+    if not isinstance(enabled, bool):
+        return "啟用必須是 true 或 false"
+    return None
+
+
+def _read_fusions_db(db: Path) -> list[dict]:
+    con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000,
+                          isolation_level=None)
+    try:
+        return _fusion_rows(con)
+    finally:
+        con.close()
+
+
+def load_fusions() -> dict:
+    """合音詞庫:{"words": [{"word", "zhuyin", "enabled", "source"}](依 word 排序), "version": SHA-256}。
+
+    資料庫不存在 → 程式內預設詞(不建立資料庫);舊版資料庫 → 經 load() 升級後再讀;升級失敗、路徑不安全、
+    版本不明或讀取失敗 → 程式內預設詞並帶 `_warnings`。"""
+    def fallback(msg):
+        rows = _fusion_default_rows()
+        return {"words": rows, "version": _version_of(rows), "_warnings": [msg]}
+    if _db_path_error():
+        return fallback(WARN_UNSAFE_PATH)
+    db = _db_file()
+    if not db.exists():
+        rows = _fusion_default_rows()
+        return {"words": rows, "version": _version_of(rows)}
+    try:
+        state = _probe(db)
+        if state in (SCHEMA_V1, SCHEMA_V2):
+            load()
+            state = _probe(db)
+        if state == _NEW:
+            rows = _fusion_default_rows()
+            return {"words": rows, "version": _version_of(rows)}
+        if state != SCHEMA_VERSION:
+            return fallback(WARN_FUSION_FALLBACK)
+        rows = _read_fusions_db(db)
+    except (_DbError, sqlite3.Error):
+        return fallback(WARN_FUSION_FALLBACK)
+    return {"words": rows, "version": _version_of(rows)}
+
+
+def fusion_lexicon() -> dict:
+    """啟用中的合音詞:{兩字詞: 合音注音}(合音建議與彈出框預填用)。"""
+    return {r["word"]: r["zhuyin"] for r in load_fusions()["words"] if r["enabled"]}
+
+
+def fusions_version() -> str:
+    return load_fusions()["version"]
+
+
+def _fusion_txn(op):
+    """在目前版本的資料庫上以單一 BEGIN IMMEDIATE 交易執行 op(con) 並回傳其結果。
+
+    資料庫不存在、沒有表或仍為舊版時,在初始化鎖內建立(寫入程式內預設設定)/ 升級後,於同一個交易內執行 op。
+    路徑不安全、非 SQLite、版本不明 → FusionError(500 類,訊息繁中)。"""
+    if _db_path_error():
+        raise FusionError(WARN_UNSAFE_PATH, 500)
+    try:
+        os.close(safe_fs.open_dir(ROOT.resolve(), ["config"], create=True))
+    except OSError:
+        raise FusionError(WARN_UNSAFE_PATH, 500) from None
+    if _db_path_error():
+        raise FusionError(WARN_UNSAFE_PATH, 500)
+    db = _db_file()
+    out = {}
+
+    def body(con):
+        state = _schema_state(con)
+        if state == _NEW:
+            _save_body(copy.deepcopy(DEFAULTS))(con)
+        elif state in (SCHEMA_V1, SCHEMA_V2):
+            _upgrade_body(con)
+        out["v"] = op(con)
+    try:
+        if db.exists() and _probe(db) == SCHEMA_VERSION:
+            con = _open_rw(db)
+            try:
+                _immediate(con, body)
+            finally:
+                con.close()
+        else:
+            with _init_lock():
+                _create_or_import(db, body, imported_ok=False)
+    except _DbError as e:
+        raise FusionError(e.args[0], 500) from None
+    return out.get("v")
+
+
+def save_fusion(word, zhuyin, enabled) -> dict:
+    """新增或修改一個詞(已存在者保留來源;新詞來源為 custom)。不合格丟 FusionError(422)。"""
+    reason = check_fusion_word(word, zhuyin, enabled)
+    if reason:
+        raise FusionError(f"「{word if isinstance(word, str) else ''}」:{reason}")
+
+    def op(con):
+        row = con.execute("SELECT source FROM fusion_words WHERE word = ?", (word,)).fetchone()
+        source = row[0] if row else ("default" if word in {w for w, _, _ in FUSION_DEFAULTS} else "custom")
+        con.execute("INSERT OR REPLACE INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
+                    (word, zhuyin, 1 if enabled else 0, source))
+        return {"word": word, "zhuyin": zhuyin, "enabled": enabled, "source": source}
+    return _fusion_txn(op)
+
+
+def delete_fusion(word) -> None:
+    """刪除自訂詞;預設詞不可刪(FusionError 422),不存在 FusionError(404)。"""
+    def op(con):
+        row = con.execute("SELECT source FROM fusion_words WHERE word = ?", (word,)).fetchone()
+        if row is None:
+            raise FusionError("詞庫沒有這個詞", 404)
+        if row[0] == "default":
+            raise FusionError("預設詞不可刪除,只能停用或還原")
+        con.execute("DELETE FROM fusion_words WHERE word = ? AND source = ?", (word, "custom"))
+    _fusion_txn(op)
+
+
+def restore_fusion(word) -> dict:
+    """把預設詞還原為程式常數值;自訂詞或不存在丟 FusionError。"""
+    defaults = {w: (z, e) for w, z, e in FUSION_DEFAULTS}
+    if word not in defaults:
+        raise FusionError("只有預設詞可以還原")
+    z, e = defaults[word]
+
+    def op(con):
+        con.execute("INSERT OR REPLACE INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
+                    (word, z, 1 if e else 0, "default"))
+        return {"word": word, "zhuyin": z, "enabled": e, "source": "default"}
+    return _fusion_txn(op)
+
+
+def export_fusions(fmt: str) -> bytes:
+    """匯出 JSON 或 CSV(UTF-8;含預設與自訂;依 word 排序)。"""
+    rows = load_fusions()["words"]
+    if fmt == "json":
+        body = {"format": FUSION_FORMAT, "version": FUSION_FORMAT_VERSION,
+                "words": [{"word": r["word"], "zhuyin": r["zhuyin"], "enabled": r["enabled"], "source": r["source"]}
+                          for r in rows]}
+        return (json.dumps(body, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+    if fmt == "csv":
+        lines = [",".join(FUSION_CSV_HEADER)]
+        lines += [f"{r['word']},{r['zhuyin']},{'true' if r['enabled'] else 'false'},{r['source']}" for r in rows]
+        return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+    raise FusionError("匯出格式只能是 json 或 csv")
+
+
+def _parse_bool(v):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.strip().lower() in ("true", "1"):
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("false", "0"):
+        return False
+    return None
+
+
+def parse_fusion_file(raw: bytes) -> list[dict]:
+    """解析匯入檔(JSON 或 CSV)成 [{"row", "word", "zhuyin", "enabled"}](未驗證詞條)。
+
+    整檔不合法一律丟 FusionError:超過 256 KB(413)、不是 UTF-8、JSON / CSV 結構錯誤、format 或 version
+    不符、超過 1000 筆(422)。"""
+    import csv
+    import io
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > FUSION_MAX_BYTES:
+        raise FusionError(f"檔案超過 {FUSION_MAX_BYTES // 1024} KB", 413)
+    try:
+        text = bytes(raw).decode("utf-8")
+    except UnicodeDecodeError:
+        raise FusionError("檔案不是 UTF-8 編碼") from None
+    text = text.lstrip("﻿")
+    out = []
+    if text.lstrip().startswith("{"):
+        try:
+            body = json.loads(text)
+        except (ValueError, RecursionError):
+            raise FusionError("JSON 格式錯誤") from None
+        if not isinstance(body, dict) or set(body) != {"format", "version", "words"}:
+            raise FusionError("JSON 結構不符(需要 format、version、words)")
+        if body["format"] != FUSION_FORMAT or body["version"] != FUSION_FORMAT_VERSION \
+                or isinstance(body["version"], bool):
+            raise FusionError("檔案的 format 或 version 不符")
+        words = body["words"]
+        if not isinstance(words, list):
+            raise FusionError("JSON 結構不符(words 必須是陣列)")
+        if len(words) > FUSION_MAX_ROWS:
+            raise FusionError(f"詞條超過 {FUSION_MAX_ROWS} 筆")
+        for n, it in enumerate(words, 1):
+            if not isinstance(it, dict) or not {"word", "zhuyin", "enabled"} <= set(it) \
+                    or not set(it) <= set(FUSION_CSV_HEADER) \
+                    or any(isinstance(v, (dict, list)) for v in it.values()):
+                raise FusionError(f"JSON 結構不符(第 {n} 筆)")
+            out.append({"row": n, "word": it["word"], "zhuyin": it["zhuyin"], "enabled": it["enabled"]})
+        return out
+    try:
+        rows = list(csv.reader(io.StringIO(text, newline="")))
+    except csv.Error:
+        raise FusionError("CSV 格式錯誤") from None
+    rows = [r for r in rows if r]
+    if not rows or [c.strip() for c in rows[0]] != list(FUSION_CSV_HEADER):
+        raise FusionError("CSV 表頭必須是 word,zhuyin,enabled,source")
+    if len(rows) - 1 > FUSION_MAX_ROWS:
+        raise FusionError(f"詞條超過 {FUSION_MAX_ROWS} 筆")
+    for n, r in enumerate(rows[1:], 1):
+        if len(r) != 4:
+            raise FusionError(f"CSV 第 {n} 筆不是四個欄位")
+        b = _parse_bool(r[2])
+        out.append({"row": n, "word": r[0].strip(), "zhuyin": r[1].strip(), "enabled": b if b is not None else r[2]})
+    return out
+
+
+def preview_import(raw: bytes) -> dict:
+    """差異預覽(只讀不寫):{"status": same | diff, "base_version", "changes": [{id, word, kind, old, new}],
+    "unchanged": 筆數, "rejected": [{row, word, reason}]}。
+
+    kind:add(檔案有、詞庫沒有)、update(注音或啟用不同)、disable(詞庫的啟用預設詞不在檔案中)、
+    delete(詞庫的自訂詞不在檔案中)。被拒絕的詞不產生更動,詞庫中同一個詞的原資料保留。"""
+    items = parse_fusion_file(raw)
+    current = load_fusions()
+    have = {r["word"]: r for r in current["words"]}
+    rejected, seen, valid = [], set(), {}
+    for it in items:
+        word = it["word"] if isinstance(it["word"], str) else ""
+        reason = check_fusion_word(it["word"], it["zhuyin"], it["enabled"])
+        if reason is None and word in seen:
+            reason = "同一個詞重複出現"
+        if reason:
+            rejected.append({"row": it["row"], "word": word[:20], "reason": reason})
+            seen.add(word)
+            valid.pop(word, None)
+            continue
+        seen.add(word)
+        valid[word] = {"zhuyin": it["zhuyin"], "enabled": it["enabled"]}
+    changes, unchanged = [], 0
+    for word, new in valid.items():
+        old = have.get(word)
+        if old is None:
+            changes.append({"id": word, "word": word, "kind": "add", "old": None, "new": new})
+        elif old["zhuyin"] != new["zhuyin"] or old["enabled"] != new["enabled"]:
+            changes.append({"id": word, "word": word, "kind": "update",
+                            "old": {"zhuyin": old["zhuyin"], "enabled": old["enabled"]}, "new": new})
+        else:
+            unchanged += 1
+    for word, old in have.items():
+        if word in seen:
+            continue   # 檔案內(含被拒絕的詞):不產生刪除 / 停用
+        o = {"zhuyin": old["zhuyin"], "enabled": old["enabled"]}
+        if old["source"] == "custom":
+            changes.append({"id": word, "word": word, "kind": "delete", "old": o, "new": None})
+        elif old["enabled"]:
+            changes.append({"id": word, "word": word, "kind": "disable", "old": o,
+                            "new": {"zhuyin": old["zhuyin"], "enabled": False}})
+        else:
+            unchanged += 1
+    order = {"add": 0, "update": 1, "disable": 2, "delete": 3}
+    changes.sort(key=lambda c: (order[c["kind"]], c["word"]))
+    return {"status": "diff" if changes else "same", "base_version": current["version"], "changes": changes,
+            "unchanged": unchanged, "rejected": rejected}
+
+
+def apply_import(changes: list, base_version: str, apply_all: bool, keep=()) -> dict:
+    """套用預覽的更動:apply_all 時全部套用,否則 keep 中的詞維持現值。交易內重算詞庫版本,
+    與 base_version 不同丟 FusionsChanged(409)。實際寫入 0 筆時不開寫入交易(仍比對版本)。"""
+    keep = set() if apply_all else set(keep or ())
+    todo = [c for c in changes if c["word"] not in keep]
+    kept = [c["word"] for c in changes if c["word"] in keep]
+    if not todo:
+        if fusions_version() != base_version:
+            raise FusionsChanged()
+        return {"applied": [], "kept": kept}
+    defaults = {w for w, _, _ in FUSION_DEFAULTS}
+
+    def op(con):
+        if _version_of(_fusion_rows(con)) != base_version:
+            raise FusionsChanged()
+        for c in todo:
+            w, kind, new = c["word"], c["kind"], c["new"]
+            if kind == "add":
+                con.execute("INSERT INTO fusion_words (word, zhuyin, enabled, source) VALUES (?, ?, ?, ?)",
+                            (w, new["zhuyin"], 1 if new["enabled"] else 0, "default" if w in defaults else "custom"))
+            elif kind in ("update", "disable"):
+                con.execute("UPDATE fusion_words SET zhuyin = ?, enabled = ? WHERE word = ?",
+                            (new["zhuyin"], 1 if new["enabled"] else 0, w))
+            elif kind == "delete":
+                con.execute("DELETE FROM fusion_words WHERE word = ? AND source = ?", (w, "custom"))
+        return {"applied": [c["word"] for c in todo], "kept": kept}
+    return _fusion_txn(op)

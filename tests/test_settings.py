@@ -260,7 +260,7 @@ def test_只有合法JSON時第一次load匯入且之後只讀資料庫(env):
     assert got == c and "_warnings" not in got
     assert db(env).is_file()
     meta = dict(query(env, "SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "2"   # CHG-20261022-04 T8(修訂 3):一次性匯入直接建為 v2
+    assert meta["schema_version"] == "3"   # CHG-20261022-04 T8(修訂 3):一次性匯入直接建為 v2
     assert meta["imported_from"] == "config/models.json"
     assert meta["imported_at"]
     assert settings.CONFIG_PATH.read_bytes() == json_before  # 原檔不刪不改
@@ -899,7 +899,7 @@ def _voice_rows(root: Path) -> dict:
 def test_DEFAULTS含語音預設且與專案模組一致(env):
     import project
     assert settings.DEFAULTS["voice_defaults"] == VOICE_DEFAULTS == project.DEFAULTS
-    assert settings.SCHEMA_VERSION == "2"
+    assert settings.SCHEMA_VERSION == "3"
 
 
 def test_v1資料庫第一次load升為v2且既有列不變_語音預設為預設值(env):
@@ -911,7 +911,7 @@ def test_v1資料庫第一次load升為v2且既有列不變_語音預設為預�
     assert "_warnings" not in got
     assert got == {**c, "voice_defaults": VOICE_DEFAULTS}
     meta = dict(query(env, "SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "2"
+    assert meta["schema_version"] == "3"
     assert meta["imported_at"] == "2026-10-26T00:00:00+00:00"   # 其他 meta 不動
     assert table_rows(env) == before   # roles、review_seats 內容不變
     assert _voice_rows(env) == VOICE_DEFAULTS
@@ -958,11 +958,11 @@ def test_升級交易中途丟例外時仍為v1且回傳帶警告(env, monkeypat
     monkeypatch.setattr(settings, fail_at, original)
     got = settings.load()
     assert "_warnings" not in got and got["voice_defaults"] == VOICE_DEFAULTS
-    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
 
 
 def test_版本3的資料庫照舊不讀不寫(env):
-    _rollback_journal_db(db(env), "3")
+    _rollback_journal_db(db(env), "4")
     before = sha(db(env))
     got = settings.load()
     assert got.pop("_warnings") == [settings.WARN_DB_VERSION]
@@ -978,7 +978,7 @@ def test_v1資料庫上save在同一交易內升級並存入(env):
     c = changed()
     c["voice_defaults"] = {"speed": 1.3, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.0}
     settings.save(c)
-    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
     assert settings.load() == c
 
 
@@ -1044,7 +1044,7 @@ def test_save省略語音預設時保留資料庫內的值(env):
 
 def test_新建資料庫沒帶語音預設時寫入預設值(env):
     settings.save({k: v for k, v in changed().items() if k != "voice_defaults"})
-    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
     assert _voice_rows(env) == VOICE_DEFAULTS
 
 
@@ -1065,7 +1065,7 @@ def test_T8以前格式的models_json匯入為v2且語音預設為預設值(env)
     got = settings.load()
     assert "_warnings" not in got
     assert got == {**old, "voice_defaults": VOICE_DEFAULTS}
-    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
     assert _voice_rows(env) == VOICE_DEFAULTS
 
 
@@ -1102,7 +1102,7 @@ def test_兩個子行程同時觸發升級只升一次(env, round_):
         assert "database is locked" not in err and "[settings]" not in err
         assert json.loads(out) == {**c, "voice_defaults": VOICE_DEFAULTS}   # 皆沒有 _warnings
     assert (env / "upgrades.log").read_text().splitlines() == ["x"]
-    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
     assert table_rows(env) == before
     assert _voice_rows(env) == VOICE_DEFAULTS
 
@@ -1167,3 +1167,239 @@ def test_save時config目錄在檢查後被換成連結_不建立也不寫外部
     with pytest.raises(ValueError):
         settings.save(changed())
     assert list(outside.iterdir()) == []
+
+
+# ---- CHG-20261029-01 T8:合音詞庫(schema 3、匯入差異預覽與套用) ----
+
+def _v2_db(root: Path, c: dict) -> None:
+    """建立 CHG-20261022-04 T8 格式的 v2 資料庫(meta、roles、review_seats、voice_defaults)。"""
+    _v1_db(db(root), c)
+    con = sqlite3.connect(db(root))
+    with con:
+        con.execute("CREATE TABLE voice_defaults (key TEXT PRIMARY KEY, value REAL NOT NULL)")
+        con.executemany("INSERT INTO voice_defaults (key, value) VALUES (?, ?)",
+                        list(dict(VOICE_DEFAULTS, speed=1.3).items()))
+        con.execute("UPDATE meta SET value = ? WHERE key = ?", ("2", "schema_version"))
+    con.close()
+
+
+def _all_rows(root: Path) -> dict:
+    return {t: query(root, f"SELECT * FROM {t} ORDER BY 1") for t in ("roles", "review_seats", "voice_defaults")}
+
+
+def _fusion_rows(root: Path) -> list:
+    return query(root, "SELECT word, zhuyin, enabled, source FROM fusion_words ORDER BY word")
+
+
+def test_v2資料庫開啟後升為3_既有三表逐列不變_預設詞6筆(env):
+    c = changed()
+    _v2_db(env, c)
+    before = _all_rows(env)
+    got = settings.load()
+    assert "_warnings" not in got and got["voice_defaults"]["speed"] == 1.3
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
+    assert _all_rows(env) == before
+    rows = _fusion_rows(env)
+    assert len(rows) == 6 and {r[0] for r in rows} == {w for w, _, _ in settings.FUSION_DEFAULTS}
+    assert ("不要", "ㄅㄧㄠˋ", 0, "default") in rows and ("知道", "ㄗㄠˋ", 1, "default") in rows
+
+
+def test_v2升級中途丟例外時維持v2_回預設詞庫帶警告(env, monkeypatch, capsys):
+    _v2_db(env, changed())
+    before = _all_rows(env)
+    real = settings._write_fusion_defaults
+
+    def boom(con):
+        real(con)
+        raise RuntimeError("模擬升級中途失敗")
+    monkeypatch.setattr(settings, "_write_fusion_defaults", boom)
+    got = settings.load()
+    assert got.pop("_warnings") == [settings.WARN_DB_UPGRADE3]
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert "fusion_words" not in _tables(env) and _all_rows(env) == before
+    fz = settings.load_fusions()
+    assert fz["_warnings"] and len(fz["words"]) == 6
+    monkeypatch.setattr(settings, "_write_fusion_defaults", real)
+    assert "_warnings" not in settings.load()
+    assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
+
+
+def test_版本4的資料庫合音詞庫不讀不寫(env):
+    _rollback_journal_db(db(env), "4")
+    before = sha(db(env))
+    assert settings.load_fusions()["_warnings"]
+    with pytest.raises(settings.FusionError):
+        settings.save_fusion("然後", "ㄖㄢˊ", True)
+    assert sha(db(env)) == before
+
+
+def test_資料庫不存在時讀預設詞_寫入時建立資料庫(env):
+    got = settings.load_fusions()
+    assert [r["word"] for r in got["words"]] == sorted(w for w, _, _ in settings.FUSION_DEFAULTS)
+    assert not db(env).exists()
+    settings.save_fusion("然後", "ㄖㄢˊ", True)
+    assert ("然後", "ㄖㄢˊ", 1, "custom") in _fusion_rows(env)
+    assert settings.load() == settings.DEFAULTS            # 建庫時寫入程式內預設設定
+
+
+def test_CRUD_預設詞可編輯停用還原不可刪_自訂詞可刪(env):
+    settings.save(changed())
+    settings.save_fusion("知道", "ㄓㄠˋ", False)
+    assert ("知道", "ㄓㄠˋ", 0, "default") in _fusion_rows(env)
+    with pytest.raises(settings.FusionError) as e:
+        settings.delete_fusion("知道")
+    assert e.value.status == 422
+    settings.restore_fusion("知道")
+    assert ("知道", "ㄗㄠˋ", 1, "default") in _fusion_rows(env)
+    settings.save_fusion("然後", "ㄖㄢˊ", True)
+    settings.delete_fusion("然後")
+    assert "然後" not in {r[0] for r in _fusion_rows(env)}
+    with pytest.raises(settings.FusionError) as e:
+        settings.delete_fusion("然後")
+    assert e.value.status == 404
+    for bad in (("三個字", "ㄖㄢˊ", True), ("然後", "ㄓㄧ", True), ("然後", "ㄖㄢˊ", "true"), ("然,", "ㄖㄢˊ", True)):
+        with pytest.raises(settings.FusionError):
+            settings.save_fusion(*bad)
+
+
+def _export(fmt="json") -> bytes:
+    return settings.export_fusions(fmt)
+
+
+def test_匯出JSON再預覽_一致且零寫入(env):
+    settings.save(changed())
+    settings.save_fusion("然後", "ㄖㄢˊ", True)
+    raw = _export()
+    body = json.loads(raw)
+    assert body["format"] == "podcast-studio-fusions" and body["version"] == 1 and len(body["words"]) == 7
+    before = (db(env).read_bytes(), db(env).stat().st_mtime_ns)
+    for fmt in ("json", "csv"):
+        p = settings.preview_import(_export(fmt))
+        assert p["status"] == "same" and p["changes"] == [] and p["rejected"] == [] and p["unchanged"] == 7
+    assert (db(env).read_bytes(), db(env).stat().st_mtime_ns) == before
+
+
+def test_改一筆後預覽只有一筆update(env):
+    settings.save(changed())
+    raw = _export()
+    settings.save_fusion("那樣", "ㄋㄧㄤˋ", False)
+    p = settings.preview_import(raw)
+    assert p["status"] == "diff"
+    assert p["changes"] == [{"id": "那樣", "word": "那樣", "kind": "update",
+                             "old": {"zhuyin": "ㄋㄧㄤˋ", "enabled": False},
+                             "new": {"zhuyin": "ㄋㄧㄤˋ", "enabled": True}}]
+    raw_csv = _export("csv")
+    settings.save_fusion("那樣", "ㄋㄧㄤˋ", True)
+    p = settings.preview_import(raw_csv)
+    assert [(c["word"], c["kind"], c["new"]["enabled"]) for c in p["changes"]] == [("那樣", "update", False)]
+
+
+def _file(words: list[dict]) -> bytes:
+    return json.dumps({"format": "podcast-studio-fusions", "version": 1, "words": words},
+                      ensure_ascii=False).encode("utf-8")
+
+
+def _words_without(*drop) -> list[dict]:
+    return [w for w in json.loads(_export())["words"] if w["word"] not in drop]
+
+
+def test_檔案缺自訂詞與預設詞_刪除與停用_預覽不寫_套用全部(env):
+    settings.save(changed())
+    settings.save_fusion("然後", "ㄖㄢˊ", True)
+    raw = _file(_words_without("然後", "我們"))
+    before = _fusion_rows(env)
+    p = settings.preview_import(raw)
+    kinds = {(c["word"], c["kind"]) for c in p["changes"]}
+    assert kinds == {("然後", "delete"), ("我們", "disable")}
+    assert _fusion_rows(env) == before
+    out = settings.apply_import(p["changes"], p["base_version"], True)
+    assert sorted(out["applied"]) == ["我們", "然後"] and out["kept"] == []
+    rows = {r[0]: r for r in _fusion_rows(env)}
+    assert "然後" not in rows and rows["我們"][2] == 0
+
+
+def test_keep的詞維持原值_其他照寫(env):
+    settings.save(changed())
+    settings.save_fusion("然後", "ㄖㄢˊ", True)
+    words = _words_without("然後", "我們") + [{"word": "好像", "zhuyin": "ㄏㄠˇ", "enabled": True}]
+    before = {r[0]: r for r in _fusion_rows(env)}
+    p = settings.preview_import(_file(words))
+    out = settings.apply_import(p["changes"], p["base_version"], False, ["然後", "我們"])
+    assert out["applied"] == ["好像"] and sorted(out["kept"]) == ["我們", "然後"]
+    rows = {r[0]: r for r in _fusion_rows(env)}
+    assert rows["然後"] == before["然後"] and rows["我們"] == before["我們"]
+    assert rows["好像"] == ("好像", "ㄏㄠˇ", 1, "custom")
+
+
+def test_預覽後詞庫被改_套用丟FusionsChanged且不變(env):
+    settings.save(changed())
+    p = settings.preview_import(_file(_words_without("我們")))
+    settings.save_fusion("知道", "ㄓㄠˋ", True)
+    before = _fusion_rows(env)
+    with pytest.raises(settings.FusionsChanged):
+        settings.apply_import(p["changes"], p["base_version"], True)
+    assert _fusion_rows(env) == before
+
+
+def test_被拒絕的詞不產生更動_原資料保留(env):
+    settings.save(changed())
+    settings.save_fusion("然後", "ㄖㄢˊ", True)
+    words = _words_without("然後") + [{"word": "然後", "zhuyin": "ㄓㄧ", "enabled": True},
+                                      {"word": "怎麼樣", "zhuyin": "ㄗㄤˇ", "enabled": True}]
+    p = settings.preview_import(_file(words))
+    assert p["status"] == "same" and p["changes"] == []
+    assert [(r["word"], r["reason"]) for r in p["rejected"]] == [("然後", "注音不是單一合法音節"),
+                                                                 ("怎麼樣", "詞須為兩個漢字")]
+    assert all(set(r) == {"row", "word", "reason"} for r in p["rejected"])
+
+
+@pytest.mark.parametrize("raw,status", [
+    (b"x" * (256 * 1024 + 1), 413),
+    ("{\"format\": \"podcast-studio-fusions\", \"version\": 1, \"words\": []}".encode("utf-16"), 422),
+    (b"{\"format\": 1", 422),
+    (b"{\"format\": \"other\", \"version\": 1, \"words\": []}", 422),
+    (b"{\"format\": \"podcast-studio-fusions\", \"version\": 2, \"words\": []}", 422),
+    (b"{\"format\": \"podcast-studio-fusions\", \"version\": 1, \"words\": {}}", 422),
+    (b"{\"format\": \"podcast-studio-fusions\", \"version\": 1, \"words\": [[1]]}", 422),
+    ("word,zhuyin\n這樣,ㄐㄧㄤˋ\n".encode("utf-8"), 422),
+    ("word,zhuyin,enabled,source\n這樣,ㄐㄧㄤˋ,true\n".encode("utf-8"), 422),
+])
+def test_整檔不合法一律拒絕(env, raw, status):
+    settings.save(changed())
+    before = _fusion_rows(env)
+    with pytest.raises(settings.FusionError) as e:
+        settings.preview_import(raw)
+    assert e.value.status == status
+    assert _fusion_rows(env) == before
+
+
+def test_1001筆整檔拒絕_1000筆可以(env):
+    words = [{"word": chr(0x4E00 + i) + chr(0x5000 + i), "zhuyin": "ㄏㄠˇ", "enabled": True} for i in range(1001)]
+    with pytest.raises(settings.FusionError) as e:
+        settings.preview_import(_file(words))
+    assert e.value.status == 422
+    assert len(settings.preview_import(_file(words[:1000]))["changes"]) >= 1000
+
+
+def test_apply中途丟例外時rollback(env, monkeypatch):
+    settings.save(changed())
+    settings.save_fusion("然後", "ㄖㄢˊ", True)
+    p = settings.preview_import(_file(_words_without("然後", "我們")))
+    before = _fusion_rows(env)
+    real_txn = settings._fusion_txn
+
+    def txn(op):
+        def wrapped(con):
+            op(con)
+            assert "然後" not in {r["word"] for r in settings._fusion_rows(con)}   # 交易內已刪
+            raise RuntimeError("模擬寫入後失敗")
+        return real_txn(wrapped)
+    monkeypatch.setattr(settings, "_fusion_txn", txn)
+    with pytest.raises(RuntimeError):
+        settings.apply_import(p["changes"], p["base_version"], True)
+    assert _fusion_rows(env) == before
+
+
+def test_fusion_lexicon只含啟用者(env):
+    lex = settings.fusion_lexicon()
+    assert lex["知道"] == "ㄗㄠˋ" and "不要" not in lex
