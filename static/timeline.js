@@ -11,6 +11,7 @@
 //   .tl-gap[data-after=<片段 id>](片段之後的空隙)、.tl-img .tl-edge[data-edge=start|end]、
 //   屬性面板的 [data-hook=speed|pause|tone|image-range]。本檔只負責顯示與選取。
 // (CHG-20261029-01 T6)預覽播放後製檔(Store.audioId);選取的語音片段上疊語調折線(PitchEdit)。
+// (修訂 1 T13)語調曲線改為 PCHIP 混合(R1-6),並畫出自動補點與放大後的峰谷(R1-7、R1-10)。
 "use strict";
 
 (function () {
@@ -51,49 +52,177 @@
   }
   // 預覽排程結束
 
-  // ---------- 語調折線(CHG-20261029-01 T6) ----------
+  // ---------- 語調折線(CHG-20261029-01 T6;修訂 1 T13) ----------
   //
-  // 選取的語音片段上疊一層 SVG:水平虛線為原音高(0 半音)、上下界 ±6 半音;菱形為關鍵點,點與點之間以線段
-  // 相連,中間點的轉角依「圓弧」以二次貝茲(Q)圓滑化(D10);第一點之前、最後一點之後維持端點值(D9)。
-  // 另畫估計字界刻度(依漢字數均分,僅供參考)與字詞清晰度斜線區段。未選取的片段只顯示細線。
-  // 操作(D17):點兩下新增、拖曳改位置與音高(不越過相鄰點)、選取後按 Delete / Backspace 刪除
-  // (剩 2 點時再刪即清除語調)。放開後 PATCH pitch,再只重做這一句的後製(edit.js 的 patchAndPost)。
+  // 選取的語音片段上疊一層 SVG:水平虛線為原音高(0 半音)、縱軸 ±7.2 半音(R1-9),±6 半音處畫淡色參考線;
+  // 實心菱形為使用者關鍵點(可拖曳 / 刪除,限 ±6 半音)。實際套用的曲線(R1-6)= (1 − r) × 折線 + r × PCHIP,
+  // r = 圓弧 / 100,一定經過每個實際套用的點(含放大後的峰谷與自動補點);第一點之前、最後一點之後維持端點值(D9)。
+  // 實際套用的點(R1-7、R1-10):後製有效且帶 post.pitch_points 時以它為準(worker 吸附有聲幀後的結果);
+  // 後製過期、進行中,或後製有效但沒有 pitch_points(快取命中且專案內沒有同鍵的紀錄)時,以 expandPoints()
+  // 同一公式試算(不含吸附)並以淡色畫。放大後的峰谷畫成虛線菱形並以虛線連到使用者菱形、自動補點畫成虛線圓,
+  // 兩者都不可選取、不可拖曳。另畫估計字界刻度(依漢字數均分,僅供參考)與字詞清晰度斜線區段。
+  // 未選取的片段只顯示細線。操作(D17):點兩下新增、拖曳改位置與音高(不越過相鄰點)、選取後按
+  // Delete / Backspace 刪除(剩 2 點時再刪即清除語調)。放開後 PATCH pitch,再只重做這一句的後製
+  // (edit.js 的 patchAndPost)。
 
   // SVG 命名空間(只是 XML 命名空間識別字,不會發出任何請求);分段組字串,避免靜態檢查把它當成外部位址
   const SVG_NS = ["http:", "/", "/www.w3.org/2000/svg"].join("");
-  const PITCH_SEMI = 6;
+  const PITCH_SEMI = 6;            // 使用者關鍵點上下限(D9)
+  const PITCH_AXIS = 7.2;          // 縱軸與內部點上限(R1-9:6 × 1.2)
   const PITCH_PAD = 6;
   const PITCH_MAX_POINTS = 16;
+  // R1-7 的固定參數(同 breezy_worker.py 的 PREDIP_SEMI、PEAK_GAIN、PREDIP_FRAC、POINT_DIGITS)
+  const PREDIP_SEMI = 1.0;
+  const PEAK_GAIN = 1.2;
+  const PREDIP_FRAC = 0.3;
+  const POINT_SCALE = 1e6;         // 內部點取到小數 6 位
+  const PATH_STEP = 2;             // 曲線取樣間距(像素)
 
   function semiToY(semi, h) {
-    return h / 2 - (semi / PITCH_SEMI) * (h / 2 - PITCH_PAD);
+    return h / 2 - (semi / PITCH_AXIS) * (h / 2 - PITCH_PAD);
   }
 
   function yToSemi(y, h) {
-    const v = ((h / 2 - y) / (h / 2 - PITCH_PAD)) * PITCH_SEMI;
+    const v = ((h / 2 - y) / (h / 2 - PITCH_PAD)) * PITCH_AXIS;
     return Math.max(-PITCH_SEMI, Math.min(PITCH_SEMI, Math.round(v * 10) / 10));
   }
 
-  // 折線 + 圓弧 → SVG path 的 d(純函式;tests/test_static.py 以 JS 執行環境實跑)。
-  // points [{pos 0–1, semi}]、roundness 0–100(null = 50)、w × h 像素
-  function pitchPath(points, roundness, w, h) {
-    const r = (roundness === null || roundness === undefined ? 50 : roundness) / 100;
-    const P = points.map(function (p) { return [p.pos * w, semiToY(p.semi, h)]; });
-    const f = function (q) { return q[0].toFixed(1) + " " + q[1].toFixed(1); };
-    let d = "M 0.0 " + P[0][1].toFixed(1) + " L " + f(P[0]);
-    for (let i = 1; i < P.length - 1; i++) {
-      const p0 = P[i - 1], p1 = P[i], p2 = P[i + 1];
-      if (r > 0) {
-        const a = [p1[0] + (p0[0] - p1[0]) * r / 2, p1[1] + (p0[1] - p1[1]) * r / 2];
-        const b = [p1[0] + (p2[0] - p1[0]) * r / 2, p1[1] + (p2[1] - p1[1]) * r / 2];
-        d += " L " + f(a) + " Q " + f(p1) + " " + f(b);
-      } else {
-        d += " L " + f(p1);
+  // [{pos, semi}] 或 [[pos, semi]] → [[pos, semi]]
+  function pairs(points) {
+    return (points || []).map(function (p) { return Array.isArray(p) ? [Number(p[0]), Number(p[1])] : [Number(p.pos), Number(p.semi)]; });
+  }
+
+  function round6(v) {
+    return Math.round(v * POINT_SCALE) / POINT_SCALE;
+  }
+
+  function clipInner(v) {
+    return Math.max(-PITCH_AXIS, Math.min(PITCH_AXIS, v));
+  }
+
+  // 自動補點試算(純函式;同 breezy_worker.expand_points,不含吸附有聲幀)。points 為使用者關鍵點。
+  // 回傳 {points: 全部內部點, auto: 自動補點, amplified: 放大後的峰谷},每點為 [位置, 半音]。
+  function expandPoints(points) {
+    const pts = pairs(points);
+    if (!pts.length) return { points: [], auto: [], amplified: [] };
+    const out = [[pts[0][0], pts[0][1]]];
+    const auto = [];
+    const amp = [];
+    const last = pts.length - 1;
+    for (let i = 1; i < pts.length; i++) {
+      const x0 = pts[i - 1][0], y0 = pts[i - 1][1], x1 = pts[i][0], y1 = pts[i][1];
+      const peak = i > 0 && i < last && y1 > 0 && y1 > y0;
+      const valley = i > 0 && i < last && y1 < 0 && y1 < y0;
+      if (!peak && !valley) {
+        out.push([x1, y1]);
+        continue;
       }
+      const pos = x1 - PREDIP_FRAC * (x1 - x0);
+      const lin = y0 + (y1 - y0) * (pos - x0) / (x1 - x0);
+      const q = [round6(pos), round6(clipInner(peak ? lin - PREDIP_SEMI : lin + PREDIP_SEMI))];
+      out.push(q);
+      auto.push(q.slice());
+      const a = [x1, round6(clipInner(y1 * PEAK_GAIN))];
+      out.push(a);
+      amp.push(a.slice());
     }
-    const last = P[P.length - 1];
-    d += " L " + f(last) + " L " + w.toFixed(1) + " " + last[1].toFixed(1);
+    return { points: out, auto: auto, amplified: amp };
+  }
+
+  // PCHIP 的各點導數(純函式;同 scipy PchipInterpolator:內部點相鄰斜率異號或為 0 時為 0,
+  // 否則為加權調和平均;端點為三點公式並保形;只有 2 點時為直線)
+  function pchipSlopes(x, y) {
+    const n = x.length;
+    const h = [];
+    const d = [];
+    const m = new Array(n).fill(0);
+    for (let i = 0; i < n - 1; i++) {
+      h.push(x[i + 1] - x[i]);
+      d.push((y[i + 1] - y[i]) / h[i]);
+    }
+    if (n < 2) return m;
+    if (n === 2) {
+      m[0] = m[1] = d[0];
+      return m;
+    }
+    for (let k = 1; k < n - 1; k++) {
+      if (d[k - 1] * d[k] <= 0) continue;
+      const w1 = 2 * h[k] + h[k - 1];
+      const w2 = h[k] + 2 * h[k - 1];
+      m[k] = (w1 + w2) / (w1 / d[k - 1] + w2 / d[k]);
+    }
+    const edge = function (h0, h1, d0, d1) {
+      let v = ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+      if (Math.sign(v) !== Math.sign(d0)) v = 0;
+      else if (Math.sign(d0) !== Math.sign(d1) && Math.abs(v) > Math.abs(3 * d0)) v = 3 * d0;
+      return v;
+    };
+    m[0] = edge(h[0], h[1], d[0], d[1]);
+    m[n - 1] = edge(h[n - 2], h[n - 3], d[n - 2], d[n - 3]);
+    return m;
+  }
+
+  // 語調曲線在位置 t(0–1)的半音(純函式;R1-6,同 breezy_worker._curve):
+  // f(t) = (1 − r) × 折線(t) + r × PCHIP(t);t 限在第一點與最後一點之間。pts 為實際套用的內部點 [[pos, semi]]
+  function pitchCurve(pts, roundness, t, slopes) {
+    const r = (roundness === null || roundness === undefined ? 50 : roundness) / 100;
+    const n = pts.length;
+    if (n === 1) return pts[0][1];
+    const tt = Math.min(Math.max(t, pts[0][0]), pts[n - 1][0]);
+    let i = 0;
+    while (i < n - 2 && tt > pts[i + 1][0]) i++;
+    const x0 = pts[i][0], x1 = pts[i + 1][0], y0 = pts[i][1], y1 = pts[i + 1][1];
+    const hh = x1 - x0;
+    const s = hh > 0 ? (tt - x0) / hh : 0;
+    const lin = y0 + (y1 - y0) * s;
+    if (r <= 0) return lin;
+    const m = slopes || pchipSlopes(pts.map(function (p) { return p[0]; }), pts.map(function (p) { return p[1]; }));
+    const s2 = s * s, s3 = s2 * s;
+    const pc = (2 * s3 - 3 * s2 + 1) * y0 + (s3 - 2 * s2 + s) * hh * m[i] + (-2 * s3 + 3 * s2) * y1 + (s3 - s2) * hh * m[i + 1];
+    return (1 - r) * lin + r * pc;
+  }
+
+  // 實際套用的點 + 圓弧 → SVG path 的 d(純函式)。points 為內部點([[pos, semi]] 或 [{pos, semi}]),
+  // roundness 0–100(null = 50)、w × h 像素。每個點都是 path 的頂點(曲線一定經過),點與點之間每 2 px 取樣。
+  function pitchPath(points, roundness, w, h) {
+    const P = pairs(points);
+    if (!P.length) return "";
+    const m = pchipSlopes(P.map(function (p) { return p[0]; }), P.map(function (p) { return p[1]; }));
+    const f = function (x, semi) { return x.toFixed(1) + " " + semiToY(semi, h).toFixed(1); };
+    let d = "M 0.0 " + semiToY(P[0][1], h).toFixed(1) + " L " + f(P[0][0] * w, P[0][1]);
+    for (let i = 1; i < P.length; i++) {
+      const xa = P[i - 1][0] * w;
+      const xb = P[i][0] * w;
+      const steps = Math.max(1, Math.ceil((xb - xa) / PATH_STEP));
+      for (let k = 1; k < steps; k++) {
+        const x = xa + (xb - xa) * k / steps;
+        d += " L " + f(x, pitchCurve(P, roundness, x / w, m));
+      }
+      d += " L " + f(xb, P[i][1]);
+    }
+    d += " L " + w.toFixed(1) + " " + semiToY(P[P.length - 1][1], h).toFixed(1);
     return d;
+  }
+
+  // 片段實際套用的語調點與畫法(R1-10):{points, auto, amplified, estimate}
+  // 後製有效、不在後製中且帶 post.pitch_points → 以 worker 的結果為準;否則前端試算(estimate = true,淡色)
+  function pitchModel(seg, userPoints) {
+    const user = pairs(userPoints || (seg.pitch ? seg.pitch.points : []));
+    const est = expandPoints(user);
+    const running = !!(S.Edit && S.Edit.Post && S.Edit.Post.running.has(seg.id));
+    const pp = seg.post && Array.isArray(seg.post.pitch_points) ? seg.post.pitch_points : null;
+    if (userPoints || running || !pp || !Store.postFresh(seg)) {
+      return { points: est.points, auto: est.auto, amplified: est.amplified, estimate: true };
+    }
+    const turns = est.amplified.map(function (q) { return q[0]; });
+    const auto = [];
+    const amp = [];
+    pp.forEach(function (q) {
+      const at = function (x) { return Math.abs(x - q[0]) < 1e-6; };
+      if (!user.some(function (u) { return at(u[0]); })) auto.push([q[0], q[1]]);
+      else if (turns.some(at)) amp.push([q[0], q[1]]);
+    });
+    return { points: pairs(pp), auto: auto, amplified: amp, estimate: false };
   }
 
   function svgEl(tag, attrs) {
@@ -139,6 +268,10 @@
         svg.setAttribute("role", "group");
         svg.setAttribute("aria-label", "語調折線(點兩下新增關鍵點)");
         svg.appendChild(svgEl("line", { class: "tl-pitch-zero", x1: 0, y1: h / 2, x2: w, y2: h / 2 }));
+        [PITCH_SEMI, -PITCH_SEMI].forEach(function (v) {
+          const y = semiToY(v, h);
+          svg.appendChild(svgEl("line", { class: "tl-pitch-limit", x1: 0, y1: y, x2: w, y2: y }));
+        });
         const chars = Array.from(seg.text);
         const units = [];
         chars.forEach(function (ch, i) { if (isHanziChar(ch)) units.push(i); });
@@ -160,11 +293,14 @@
           svg.appendChild(g);
         });
       }
-      if (seg.pitch) {
-        svg.appendChild(svgEl("path", { class: "tl-pitch-line", d: pitchPath(seg.pitch.points, seg.pitch.roundness, w, h) }));
+      const model = seg.pitch ? pitchModel(seg) : null;
+      if (model) {
+        svg.appendChild(svgEl("path", { class: "tl-pitch-line" + (model.estimate ? " is-estimate" : ""),
+          d: pitchPath(model.points, seg.pitch.roundness, w, h) }));
       }
       block.appendChild(svg);
       if (!editable) return;
+      if (model) this.drawApplied(svg, model, seg.pitch.points, w, h);
       (seg.pitch ? seg.pitch.points : []).forEach((p, i) => {
         const x = p.pos * w;
         const y = semiToY(p.semi, h);
@@ -179,8 +315,10 @@
         const p = seg.pitch && seg.pitch.points[this.sel.index];
         if (p) {
           const t = svgEl("text", { class: "tl-pitch-label", x: Math.min(w - 120, Math.max(2, p.pos * w + 8)), y: 12 });
+          const a = model ? model.amplified.find(function (q) { return Math.abs(q[0] - p.pos) < 1e-6; }) : null;
           t.textContent = "#" + (this.sel.index + 1) + " · " + Math.round(p.pos * 100) + "% · "
-            + (S.Edit ? S.Edit.semiText(p.semi) : p.semi);
+            + (S.Edit ? S.Edit.semiText(p.semi) : p.semi)
+            + (a ? "(套用 " + (a[1] > 0 ? "+" : a[1] < 0 ? "−" : "") + Math.abs(a[1]).toFixed(1) + ")" : "");
           svg.appendChild(t);
         }
       }
@@ -190,6 +328,31 @@
         e.stopPropagation();
         const r = svg.getBoundingClientRect();
         this.add(seg, Math.round(((e.clientX - r.left) / w) * 100) / 100, yToSemi(e.clientY - r.top, h));
+      });
+    },
+
+    // 放大後的峰谷(虛線菱形 + 連到使用者菱形的虛線 + 套用值)與自動補點(虛線圓);不可選取、不可拖曳。
+    // 重畫時先移除舊的,插在使用者菱形之前(菱形在最上層)
+    drawApplied(svg, model, userPoints, w, h) {
+      svg.querySelectorAll(".tl-pitch-auto, .tl-pitch-amp, .tl-pitch-amp-link, .tl-pitch-amp-label")
+        .forEach(function (e) { e.remove(); });
+      const before = svg.querySelector(".tl-pitch-key");
+      const put = function (e) { svg.insertBefore(e, before); };
+      const est = model.estimate ? " is-estimate" : "";
+      const user = pairs(userPoints);
+      model.amplified.forEach(function (q) {
+        const u = user.find(function (p) { return Math.abs(p[0] - q[0]) < 1e-6; });
+        const x = q[0] * w;
+        const y = semiToY(q[1], h);
+        if (u) put(svgEl("line", { class: "tl-pitch-amp-link" + est, x1: x, y1: semiToY(u[1], h), x2: x, y2: y }));
+        put(svgEl("rect", { class: "tl-pitch-amp" + est, x: x - 5, y: y - 5, width: 10, height: 10,
+          transform: "rotate(45 " + x + " " + y + ")" }));
+        const t = svgEl("text", { class: "tl-pitch-amp-label" + est, x: Math.max(2, x - 36), y: y + 4 });
+        t.textContent = (q[1] > 0 ? "+" : q[1] < 0 ? "−" : "") + Math.abs(q[1]).toFixed(1);
+        put(t);
+      });
+      model.auto.forEach(function (q) {
+        put(svgEl("circle", { class: "tl-pitch-auto" + est, cx: q[0] * w, cy: semiToY(q[1], h), r: 5 }));
       });
     },
 
@@ -248,7 +411,12 @@
         key.setAttribute("x", String(x - 5));
         key.setAttribute("y", String(y - 5));
         key.setAttribute("transform", "rotate(45 " + x + " " + y + ")");
-        if (line) line.setAttribute("d", pitchPath(pts, seg.pitch.roundness, w, h));
+        const est = pitchModel(seg, pts);
+        if (line) {
+          line.setAttribute("d", pitchPath(est.points, seg.pitch.roundness, w, h));
+          line.classList.add("is-estimate");
+        }
+        this.drawApplied(svg, est, pts, w, h);
       };
       const up = (ev) => {
         key.removeEventListener("pointermove", move);
@@ -803,6 +971,9 @@
   S.Timeline = Timeline;
   S.PitchEdit = PitchEdit;
   S.pitchPath = pitchPath;
+  S.pitchModel = pitchModel;
+  S.expandPoints = expandPoints;
+  S.pitchCurve = pitchCurve;
   S.Preview = Preview;
   S.Props = Props;
   S.Library = Library;

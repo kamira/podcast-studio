@@ -1162,3 +1162,48 @@ def test_synth_progress_reloads_view_without_waiting_for_finish():
     seg_branch = synth[synth.index('if (ev.type === "segment"'):synth.index('if (ev.type === "error"')]
     assert "Store.reload()" in seg_branch
     assert "seq !== this.reloadSeq" in js
+
+
+# CHG-20261029-01 修訂 1 T13:前端語調試算與 worker 同公式(R1-6、R1-7)
+PITCH_FUNCS = [("timeline.js", "  const PITCH_SEMI = 6;", "  // 片段實際套用的語調點與畫法")]
+
+
+def test_expand_points_matches_worker():
+    import random
+
+    import breezy_worker
+    rnd = random.Random(20261029)
+    cases = [[[0, 0], [0.25, 3], [0.5, -2], [0.75, 2], [1, 0]], [[0, 1], [1, -1]], [[0, 0], [0.5, 6], [1, 0]]]
+    for _ in range(20):
+        n = rnd.randint(2, 16)
+        xs = sorted(rnd.sample(range(0, 101), n))
+        cases.append([[x / 100, round(rnd.uniform(-6, 6), 1)] for x in xs])
+    got = _run_js_funcs(PITCH_FUNCS, "var C = " + json.dumps(cases) + ";\n"
+                        "var result = C.map(function (c) { return expandPoints(c); });")
+    for c, g in zip(cases, got):
+        want = breezy_worker.expand_points(c, None)
+        for k in ("points", "auto", "amplified"):
+            assert len(g[k]) == len(want[k]), (c, k)
+            for a, b in zip(g[k], want[k]):
+                assert abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9, (c, k, a, b)
+    # R1-7 的例子:5 點 → 8 點
+    assert [[round(a, 3), round(b, 3)] for a, b in got[0]["points"]] == [
+        [0, 0], [0.175, 1.1], [0.25, 3.6], [0.425, 0.5], [0.5, -2.4], [0.675, -0.2], [0.75, 2.4], [1, 0]]
+
+
+def test_pitch_curve_passes_every_applied_point():
+    pts = [[0, 0], [0.175, 1.1], [0.25, 3.6], [0.425, 0.5], [0.5, -2.4], [0.675, -0.2], [0.75, 2.4], [1, 0]]
+    body = ("var P = " + json.dumps(pts) + ";\n"
+            "var result = [0, 50, 100].map(function (r) { return {"
+            " at: P.map(function (p) { return pitchCurve(P, r, p[0]); }),"
+            " mid: pitchCurve(P, r, 0.6), lin: pitchCurve(P, 0, 0.6), edge: [pitchCurve(P, r, -1), pitchCurve(P, r, 2)],"
+            " d: pitchPath(P, r, 500, 78) }; });")
+    got = _run_js_funcs(PITCH_FUNCS, body)
+    for g in got:
+        assert all(abs(a - p[1]) < 1e-9 for a, p in zip(g["at"], pts))      # 一定經過每個實際套用的點
+        assert g["edge"] == [0, 0]                                           # 點外維持端點值
+        assert "Q" not in g["d"]
+        for x, y in pts:                                                     # 每個點都是 path 的頂點
+            assert f"{x * 500:.1f} {39 - y / 7.2 * 33:.1f}" in g["d"]
+    assert abs(got[0]["mid"] - got[0]["lin"]) < 1e-12                        # 圓弧 0% 為折線
+    assert got[1]["mid"] != got[2]["mid"]
