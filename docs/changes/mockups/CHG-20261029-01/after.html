@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-Hant-TW"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CHG-20261029-01 變更後畫面草稿</title>
+<style>
+:root { --c-text:#2f6fdd; --c-image:#2e9e5b; --c-audio:#e8892b; --fg:#1f2328; --muted:#5d6673; --line:#d0d5dd;
+  --bg:#f6f7f9; --panel:#fff; --accent:#2f6fdd; --err:#c93c37; --pitch:#ffe27a; }
+* { box-sizing:border-box; }
+html,body { margin:0; }
+body { font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif; color:var(--fg); background:var(--bg); font-size:14px; }
+.page-header { display:flex; align-items:center; gap:12px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
+.page-title { font-size:18px; margin:0; flex:1; }
+.back { color:var(--accent); }
+.btn { font:inherit; padding:5px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); }
+.btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+.btn.small { padding:1px 8px; }
+.btn.tiny { font-size:12px; padding:1px 8px; }
+.btn.is-muted { color:#9aa3ae; }
+.btn.is-on { background:#eaf1fd; border-color:var(--accent); color:var(--accent); }
+.muted { color:var(--muted); font-size:12px; }
+.layout { display:grid; grid-template-columns:340px minmax(0,1fr) 330px; gap:8px; padding:8px; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; display:grid; gap:8px; align-content:start; }
+.panel-title { font-size:14px; margin:0; }
+.col { display:grid; gap:8px; align-content:start; }
+textarea { width:100%; height:200px; font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; resize:none; }
+.preview { width:420px; aspect-ratio:16/9; margin:0 auto; background:#b4462a; position:relative; border-radius:2px; }
+.preview span { position:absolute; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(40,10,0,.75); color:#fff; padding:4px 10px; font-size:16px; }
+.ctrls { text-align:center; }
+.lib { display:flex; gap:6px; padding:4px 6px; background:var(--bg); border-radius:6px; }
+.props-body { display:grid; gap:6px; position:relative; }
+.prop-title { font-size:14px; margin:0; }
+.prop-section { font-size:12px; color:var(--muted); margin:6px 0 0; border-top:1px solid var(--line); padding-top:6px; font-weight:normal; }
+.prop-section.new { color:var(--fg); font-weight:600; }
+.badge { font-size:10px; background:#fde7c8; color:#8a4b00; border-radius:3px; padding:0 4px; font-weight:normal; }
+.prop-row { display:flex; gap:8px; align-items:center; }
+.prop-label { color:var(--muted); font-size:12px; min-width:42px; }
+.prop-unit { color:var(--muted); font-size:12px; }
+.prop-hint { margin:0 0 0 50px; font-size:11px; color:var(--muted); }
+.pause-input { width:64px; font:inherit; padding:2px 6px; border:1px solid var(--line); border-radius:4px; }
+.speed-select { font:inherit; font-size:12px; }
+.slider { position:relative; flex:1; height:6px; border-radius:3px; background:#e3e7ee; }
+.slider-fill { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:var(--accent); }
+.slider-thumb { position:absolute; top:50%; width:16px; height:16px; margin:-8px 0 0 -8px; border-radius:50%; background:#fff; border:2px solid var(--accent); box-shadow:0 1px 3px rgba(0,0,0,.2); }
+.pct { min-width:40px; text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
+.seg-toggle { display:flex; gap:4px; }
+.tone-chars { display:flex; flex-wrap:wrap; gap:2px; }
+.tone-char { display:grid; justify-items:center; min-width:22px; padding:2px 2px 4px; border-radius:4px; background:var(--bg); position:relative; border:1px solid transparent; }
+.tone-glyph { font-size:16px; }
+.tone-zhuyin { font-size:10px; color:var(--muted); min-height:12px; }
+.clar-bar { position:absolute; left:2px; bottom:1px; height:2px; background:#8fb3ef; border-radius:1px; }
+.tone-char.has-clarity .clar-bar { background:#7a52c7; }
+.tone-char.is-picked { background:#efe8fb; border-color:#7a52c7; }
+.tone-popup { position:absolute; right:0; bottom:-128px; width:250px; padding:10px 12px; display:grid; gap:6px; background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 6px 24px rgba(0,0,0,.18); z-index:5; }
+.tone-head { display:flex; justify-content:space-between; align-items:baseline; }
+.tone-popup .prop-hint { margin:0; }
+.tone-actions { display:flex; justify-content:flex-end; gap:6px; }
+.panel-props { padding-bottom:140px; }
+/* 時間軸 */
+.tl-toolbar { display:flex; align-items:center; gap:8px; }
+.spacer { flex:1; }
+.legend { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+.legend-tick { display:inline-block; width:1px; height:12px; background:rgba(255,255,255,.9); outline:1px solid #b46a1d; margin-left:8px; }
+.legend-wc { display:inline-block; width:14px; height:10px; background:repeating-linear-gradient(45deg,rgba(122,82,199,.55) 0 3px,rgba(122,82,199,.2) 3px 6px); margin-left:8px; }
+.tl-zoom-label { color:var(--muted); font-size:12px; }
+.tl-frame { display:flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+.tl-labels { flex:none; width:44px; display:flex; flex-direction:column; background:var(--bg); border-right:1px solid var(--line); }
+.tl-label { display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--muted); }
+.tl-label.l0 { height:23px; } .tl-label.l1 { height:41px; } .tl-label.l2 { height:79px; } .tl-label.l3 { height:52px; }
+.tl-scroll { flex:1; overflow:hidden; }
+.tl-content { position:relative; }
+.tl-ruler { position:relative; height:22px; border-bottom:1px solid var(--line); }
+.tl-tick { position:absolute; top:0; height:22px; padding:3px 0 0 3px; border-left:1px solid var(--line); font-size:11px; color:var(--muted); }
+.tl-lane { position:relative; border-bottom:1px solid #eef0f3; }
+.tl-lane-cues { height:40px; } .tl-lane-voice { height:78px; } .tl-lane-images { height:52px; border-bottom:none; }
+.tl-seg,.tl-cue,.tl-img { position:absolute; top:5px; bottom:5px; padding:0 5px; border-radius:4px; overflow:hidden; font-size:12px; white-space:nowrap; display:flex; align-items:center; }
+.tl-cue { background:#dbe7fb; color:#1d4f9c; border:1px solid #b7cdf3; }
+.tl-seg { background:var(--c-audio); color:#fff; overflow:visible; }
+.seg-label { position:absolute; top:2px; left:5px; right:5px; font-size:11px; overflow:hidden; text-overflow:ellipsis; opacity:.95; }
+.tl-img { background:#d7efe0; color:#1e6b3e; border:1px solid #a9d8bb; }
+.tl-gap { position:absolute; top:22px; bottom:22px; border-top:1px dashed #c3c8d0; border-bottom:1px dashed #c3c8d0; }
+.is-selected { box-shadow:0 0 0 2px var(--accent); z-index:2; }
+.tl-playhead { position:absolute; top:0; bottom:0; width:2px; background:var(--err); z-index:6; }
+.pitch { position:absolute; left:0; top:5px; overflow:visible; }
+.tl-seg .pitch { top:auto; bottom:0; left:0; height:68px; }
+.pitch-zero { stroke:rgba(255,255,255,.75); stroke-dasharray:3 3; stroke-width:1; }
+.pitch-under { fill:none; stroke:#4a2a00; stroke-width:4.5; stroke-linejoin:round; }
+.pitch-under.is-dim { stroke:rgba(74,42,0,.45); stroke-width:3; }
+.pitch-line { fill:none; stroke:var(--pitch); stroke-width:2.2; stroke-linejoin:round; }
+.pitch-line.is-dim { stroke:rgba(255,236,160,.75); stroke-width:1.5; }
+.kf { fill:#fff; stroke:#5a3a00; stroke-width:1.2; }
+.kf.is-active { fill:var(--pitch); stroke:#1f2328; stroke-width:1.6; }
+.legend .kf { fill:#fff; stroke:#5a3a00; }
+.char-tick { position:absolute; top:16px; bottom:2px; width:1px; background:rgba(255,255,255,.45); }
+.word-clarity { position:absolute; top:14px; bottom:0; background:repeating-linear-gradient(45deg,rgba(122,82,199,.38) 0 3px,rgba(122,82,199,.12) 3px 6px); border-left:1px solid #7a52c7; border-right:1px solid #7a52c7; }
+.word-clarity b { position:absolute; top:-15px; left:-4px; background:#7a52c7; color:#fff; font-size:10px; font-weight:normal; padding:0 3px; border-radius:2px; white-space:nowrap; }
+.kf-tip { position:absolute; top:52px; background:var(--fg); color:#fff; font-size:10px; padding:0 4px; border-radius:3px; z-index:7; white-space:nowrap; }
+.cmp-row { display:flex; gap:24px; }
+.cmp-seg { position:relative; top:0; bottom:auto; padding:0; }
+.cmp-seg .pitch { top:5px; bottom:auto; height:70px; }
+.cmp-cap { text-align:center; font-size:12px; color:var(--muted); margin-top:4px; }
+#panel-roundness { margin:8px; width:fit-content; }
+</style></head>
+<body>
+<div id="shot-full">
+<header class="page-header"><span class="back">← 首頁</span><h1 class="page-title">完整模式</h1>
+  <span>專案:<b>夜市的味道</b></span><button class="btn">存檔</button><button class="btn">版本:目前 ▾</button><button class="btn primary">匯出 MP4</button><span>⚙</span></header>
+<div class="layout">
+  <div class="col">
+    <section class="panel"><h2 class="panel-title">文稿</h2><textarea>大家好，歡迎收聽夜市的味道。今天我們來聊聊台灣的夜市文化。夜市是很多人下班後最愛去的地方。你有試過嗎？這家攤販已經開了四十年。</textarea>
+      <div><button class="btn">存檔文稿</button> <button class="btn primary">逐句合成全部</button></div><span class="muted">合成完成:新合成 5 句、沿用 0 句</span></section>
+    <section class="panel"><h2 class="panel-title">素材庫</h2><div class="lib">▣ 封面.png</div></section>
+  </div>
+  <div class="col">
+    <section class="panel"><h2 class="panel-title">預覽</h2><div class="preview"><span>大家好，歡迎收聽夜市的味道</span></div>
+      <div class="ctrls"><button class="btn">⏮</button> <button class="btn primary">▶</button> <button class="btn">⏭</button> 00:01.7 / 00:12.1</div></section>
+    <section class="panel"><h2 class="panel-title">封面</h2><span class="muted">(與變更前相同)</span></section>
+  </div>
+  
+<section class="panel panel-props" id="panel-props">
+  <h2 class="panel-title">屬性</h2>
+  <div class="props-body">
+    <h3 class="prop-title">選取:片段 #1</h3>
+    <div class="prop-row"><span class="prop-label">文字</span><span>大家好，歡迎收聽夜市的味道。</span></div>
+    <div class="prop-row"><span class="prop-label">狀態</span><span>✓ 已合成 2.2 秒 <span class="muted">(已裁掉前後低音量 0.69 秒)</span></span></div>
+    <div class="prop-row"><span class="prop-label">語速</span><select class="speed-select"><option>預設(1.15×)</option></select></div>
+    <h4 class="prop-section">停頓</h4>
+    <div class="prop-row"><span class="prop-label">之後</span><input class="pause-input" value="0.4"> <span class="prop-unit">秒</span> <button class="btn tiny is-muted">預設</button></div>
+    <h4 class="prop-section new">韻律 <span class="badge">新</span></h4>
+    
+  <div class="prop-row slider-row"><span class="prop-label">連音</span>
+    <span class="slider"><span class="slider-fill" style="width:35%"></span><span class="slider-thumb" style="left:35%"></span></span>
+    <output class="pct">35%</output><button class="btn tiny">預設</button></div>
+  <p class="prop-hint">字與字之間的黏著;句與句之間仍由「停頓」決定</p>
+    
+  <div class="prop-row slider-row"><span class="prop-label">清晰度</span>
+    <span class="slider"><span class="slider-fill" style="width:70%"></span><span class="slider-thumb" style="left:70%"></span></span>
+    <output class="pct">70%</output><button class="btn tiny">預設</button></div>
+  <p class="prop-hint">整句的咬字清晰程度;個別字詞可在下方另設</p>
+    <h4 class="prop-section new">語調 <span class="badge">新</span></h4>
+    
+  <div class="prop-row slider-row"><span class="prop-label">圓弧</span>
+    <span class="slider"><span class="slider-fill" style="width:50%"></span><span class="slider-thumb" style="left:50%"></span></span>
+    <output class="pct">50%</output><button class="btn tiny">預設</button></div>
+  <p class="prop-hint">折線轉角的圓弧程度:0% 為直線折角,100% 為最圓滑</p>
+    <div class="prop-row"><span class="prop-label">關鍵點</span><span>5 個 · 選取中:#2(位置 22%,+3.0 半音)</span></div>
+    <div class="prop-row"><span class="prop-label"></span><button class="btn tiny">清除語調</button><button class="btn tiny">▶ 試聽這一句</button></div>
+    <h4 class="prop-section">聲調與字詞清晰度</h4>
+    <div class="seg-toggle"><button class="btn tiny">念法</button><button class="btn tiny is-on">清晰度</button></div>
+    <div class="tone-chars"><span class="tone-char is-clickable"><span class="tone-glyph">大</span><span class="tone-zhuyin">ㄉㄚˋ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">家</span><span class="tone-zhuyin">ㄐㄧㄚ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">好</span><span class="tone-zhuyin">ㄏㄠˇ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">，</span><span class="tone-zhuyin"></span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">歡</span><span class="tone-zhuyin">ㄏㄨㄢ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">迎</span><span class="tone-zhuyin">ㄧㄥˊ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">收</span><span class="tone-zhuyin">ㄕㄡ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">聽</span><span class="tone-zhuyin">ㄊㄧㄥ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable has-clarity is-picked"><span class="tone-glyph">夜</span><span class="tone-zhuyin">ㄧㄝˋ</span><span class="clar-bar" style="width:40%"></span></span><span class="tone-char is-clickable has-clarity is-picked"><span class="tone-glyph">市</span><span class="tone-zhuyin">ㄕˋ</span><span class="clar-bar" style="width:40%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">的</span><span class="tone-zhuyin">˙ㄉㄜ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">味</span><span class="tone-zhuyin">ㄨㄟˋ</span><span class="clar-bar" style="width:70%"></span></span><span class="tone-char is-clickable"><span class="tone-glyph">道</span><span class="tone-zhuyin">ㄉㄠˋ</span><span class="clar-bar" style="width:70%"></span></span></div>
+    <p class="prop-hint">清晰度模式:在字上拖曳選取一個字詞,調整該字詞的清晰度;字下橫條長度 = 清晰度</p>
+    <div class="tone-popup" id="word-popup">
+      <div class="tone-head"><strong class="tone-title">「夜市」的清晰度</strong><span class="muted">第 9–10 字</span></div>
+      <div class="prop-row slider-row"><span class="slider"><span class="slider-fill" style="width:40%"></span><span class="slider-thumb" style="left:40%"></span></span><output class="pct">40%</output></div>
+      <p class="prop-hint">未個別設定的字沿用整句清晰度(70%)</p>
+      <div class="tone-actions"><button class="btn tiny">清除</button><button class="btn tiny primary">套用</button></div>
+    </div>
+  </div>
+</section>
+</div>
+<div class="tl-wrap" style="padding:0 8px 8px">
+<section class="panel panel-timeline" id="panel-timeline">
+  <div class="tl-toolbar"><h2 class="panel-title">時間軸</h2>
+    <span class="legend"><svg width="12" height="12" viewBox="-6 -6 12 12"><path class="kf" d="M0.0,-5.0 L5.0,0.0 L0.0,5.0 L-5.0,0.0 Z"/></svg> 語調關鍵點(點兩下新增、拖曳調整、Delete 刪除)
+    <i class="legend-tick"></i> 估計字界 <i class="legend-wc"></i> 字詞清晰度</span>
+    <span class="spacer"></span><button class="btn small">－</button><span class="tl-zoom-label">縮放</span><button class="btn small">＋</button></div>
+  <div class="tl-frame">
+    <div class="tl-labels"><div class="tl-label l0"></div><div class="tl-label l1">字幕</div><div class="tl-label l2">語音</div><div class="tl-label l3">畫面</div></div>
+    <div class="tl-scroll"><div class="tl-content" style="width:1568px">
+      <div class="tl-ruler"><div class="tl-tick" style="left:0px;width:112px">00:00</div><div class="tl-tick" style="left:112px;width:112px">00:01</div><div class="tl-tick" style="left:224px;width:112px">00:02</div><div class="tl-tick" style="left:336px;width:112px">00:03</div><div class="tl-tick" style="left:448px;width:112px">00:04</div><div class="tl-tick" style="left:560px;width:112px">00:05</div><div class="tl-tick" style="left:672px;width:112px">00:06</div><div class="tl-tick" style="left:784px;width:112px">00:07</div><div class="tl-tick" style="left:896px;width:112px">00:08</div><div class="tl-tick" style="left:1008px;width:112px">00:09</div><div class="tl-tick" style="left:1120px;width:112px">00:10</div><div class="tl-tick" style="left:1232px;width:112px">00:11</div><div class="tl-tick" style="left:1344px;width:112px">00:12</div><div class="tl-tick" style="left:1456px;width:112px">00:13</div></div>
+      <div class="tl-lane tl-lane-cues"><div class="tl-cue is-selected" style="left:0.0px;width:246.4px">大家好，歡迎收聽夜市的味道</div><div class="tl-cue" style="left:291.2px;width:291.2px">今天我們來聊聊台灣的夜市文化</div><div class="tl-cue" style="left:627.2px;width:302.4px">夜市是很多人下班後最愛去的地方</div><div class="tl-cue" style="left:974.4px;width:100.8px">你有試過嗎？</div><div class="tl-cue" style="left:1120.0px;width:235.2px">這家攤販已經開了四十年</div></div>
+      <div class="tl-lane tl-lane-voice"><div class="tl-seg is-selected" style="left:0.0px;width:246.4px"><span class="seg-label">#1 大家好，歡迎收聽夜市的味道</span><i class="char-tick" style="left:20.5px"></i><i class="char-tick" style="left:41.1px"></i><i class="char-tick" style="left:61.6px"></i><i class="char-tick" style="left:82.1px"></i><i class="char-tick" style="left:102.7px"></i><i class="char-tick" style="left:123.2px"></i><i class="char-tick" style="left:143.7px"></i><i class="char-tick" style="left:164.3px"></i><i class="char-tick" style="left:184.8px"></i><i class="char-tick" style="left:205.3px"></i><i class="char-tick" style="left:225.9px"></i><span class="word-clarity" style="left:143.7px;width:41.1px"><b>夜市 40%</b></span><svg class="pitch" width="246" height="68" viewBox="0 0 246 68" aria-hidden="true"><line class="pitch-zero" x1="0" y1="34.0" x2="246" y2="34.0"/><path class="pitch-under" d="M0.0,34.0 L40.7,22.8 Q54.2,19.0 71.5,25.2 L106.0,37.8 Q123.2,44.0 140.4,39.0 L174.9,29.0 Q192.2,24.0 205.7,26.5 L246.4,34.0"/><path class="pitch-line" d="M0.0,34.0 L40.7,22.8 Q54.2,19.0 71.5,25.2 L106.0,37.8 Q123.2,44.0 140.4,39.0 L174.9,29.0 Q192.2,24.0 205.7,26.5 L246.4,34.0"/><path class="kf" d="M0.0,29.0 L5.0,34.0 L0.0,39.0 L-5.0,34.0 Z"/><path class="kf is-active" d="M54.2,14.0 L59.2,19.0 L54.2,24.0 L49.2,19.0 Z"/><path class="kf" d="M123.2,39.0 L128.2,44.0 L123.2,49.0 L118.2,44.0 Z"/><path class="kf" d="M192.2,19.0 L197.2,24.0 L192.2,29.0 L187.2,24.0 Z"/><path class="kf" d="M246.4,29.0 L251.4,34.0 L246.4,39.0 L241.4,34.0 Z"/></svg><span class="kf-tip" style="left:64.2px">#2 · 22% · +3.0 半音</span></div><div class="tl-seg" style="left:291.2px;width:291.2px"><span class="seg-label">#2 今天我們來聊聊台灣的夜市文化</span></div><div class="tl-seg" style="left:627.2px;width:302.4px"><span class="seg-label">#3 夜市是很多人下班後最愛去的地方</span><svg class="pitch" width="302" height="68" viewBox="0 0 302 68" aria-hidden="true"><line class="pitch-zero" x1="0" y1="34.0" x2="302" y2="34.0"/><path class="pitch-under is-dim" d="M0.0,34.0 L90.7,28.4 Q121.0,26.5 166.3,30.2 L302.4,41.5"/><path class="pitch-line is-dim" d="M0.0,34.0 L90.7,28.4 Q121.0,26.5 166.3,30.2 L302.4,41.5"/></svg></div><div class="tl-seg" style="left:974.4px;width:100.8px"><span class="seg-label">#4 你有試過嗎？</span></div><div class="tl-seg" style="left:1120.0px;width:235.2px"><span class="seg-label">#5 這家攤販已經開了四十年</span></div><div class="tl-gap" style="left:246.4px;width:44.8px"></div><div class="tl-gap" style="left:582.4px;width:44.8px"></div><div class="tl-gap" style="left:929.6px;width:44.8px"></div><div class="tl-gap" style="left:1075.2px;width:44.8px"></div></div>
+      <div class="tl-lane tl-lane-images"><div class="tl-img" style="left:0;width:1355.2px">封面.png</div></div>
+      <div class="tl-playhead" style="left:196.0px"></div>
+    </div></div>
+  </div>
+</section></div>
+</div>
+
+<section class="panel" id="panel-roundness">
+  <h2 class="panel-title">語調折線:同一組關鍵點在不同圓弧程度下的形狀</h2>
+  <div class="cmp-row"><div class="cmp"><div class="tl-seg cmp-seg" style="width:300px;height:80px"><svg class="pitch" width="300" height="70" viewBox="0 0 300 70" aria-hidden="true"><line class="pitch-zero" x1="0" y1="35.0" x2="300" y2="35.0"/><path class="pitch-under" d="M0.0,35.0 L66.0,19.5 Q66.0,19.5 66.0,19.5 L150.0,45.3 Q150.0,45.3 150.0,45.3 L234.0,24.7 Q234.0,24.7 234.0,24.7 L300.0,35.0"/><path class="pitch-line" d="M0.0,35.0 L66.0,19.5 Q66.0,19.5 66.0,19.5 L150.0,45.3 Q150.0,45.3 150.0,45.3 L234.0,24.7 Q234.0,24.7 234.0,24.7 L300.0,35.0"/><path class="kf" d="M0.0,30.0 L5.0,35.0 L0.0,40.0 L-5.0,35.0 Z"/><path class="kf" d="M66.0,14.5 L71.0,19.5 L66.0,24.5 L61.0,19.5 Z"/><path class="kf" d="M150.0,40.3 L155.0,45.3 L150.0,50.3 L145.0,45.3 Z"/><path class="kf" d="M234.0,19.7 L239.0,24.7 L234.0,29.7 L229.0,24.7 Z"/><path class="kf" d="M300.0,30.0 L305.0,35.0 L300.0,40.0 L295.0,35.0 Z"/></svg></div><div class="cmp-cap">圓弧程度 0%</div></div><div class="cmp"><div class="tl-seg cmp-seg" style="width:300px;height:80px"><svg class="pitch" width="300" height="70" viewBox="0 0 300 70" aria-hidden="true"><line class="pitch-zero" x1="0" y1="35.0" x2="300" y2="35.0"/><path class="pitch-under" d="M0.0,35.0 L49.5,23.4 Q66.0,19.5 87.0,26.0 L129.0,38.9 Q150.0,45.3 171.0,40.2 L213.0,29.8 Q234.0,24.7 250.5,27.2 L300.0,35.0"/><path class="pitch-line" d="M0.0,35.0 L49.5,23.4 Q66.0,19.5 87.0,26.0 L129.0,38.9 Q150.0,45.3 171.0,40.2 L213.0,29.8 Q234.0,24.7 250.5,27.2 L300.0,35.0"/><path class="kf" d="M0.0,30.0 L5.0,35.0 L0.0,40.0 L-5.0,35.0 Z"/><path class="kf" d="M66.0,14.5 L71.0,19.5 L66.0,24.5 L61.0,19.5 Z"/><path class="kf" d="M150.0,40.3 L155.0,45.3 L150.0,50.3 L145.0,45.3 Z"/><path class="kf" d="M234.0,19.7 L239.0,24.7 L234.0,29.7 L229.0,24.7 Z"/><path class="kf" d="M300.0,30.0 L305.0,35.0 L300.0,40.0 L295.0,35.0 Z"/></svg></div><div class="cmp-cap">圓弧程度 50%</div></div><div class="cmp"><div class="tl-seg cmp-seg" style="width:300px;height:80px"><svg class="pitch" width="300" height="70" viewBox="0 0 300 70" aria-hidden="true"><line class="pitch-zero" x1="0" y1="35.0" x2="300" y2="35.0"/><path class="pitch-under" d="M0.0,35.0 L33.0,27.2 Q66.0,19.5 108.0,32.4 L108.0,32.4 Q150.0,45.3 192.0,35.0 L192.0,35.0 Q234.0,24.7 267.0,29.8 L300.0,35.0"/><path class="pitch-line" d="M0.0,35.0 L33.0,27.2 Q66.0,19.5 108.0,32.4 L108.0,32.4 Q150.0,45.3 192.0,35.0 L192.0,35.0 Q234.0,24.7 267.0,29.8 L300.0,35.0"/><path class="kf" d="M0.0,30.0 L5.0,35.0 L0.0,40.0 L-5.0,35.0 Z"/><path class="kf" d="M66.0,14.5 L71.0,19.5 L66.0,24.5 L61.0,19.5 Z"/><path class="kf" d="M150.0,40.3 L155.0,45.3 L150.0,50.3 L145.0,45.3 Z"/><path class="kf" d="M234.0,19.7 L239.0,24.7 L234.0,29.7 L229.0,24.7 Z"/><path class="kf" d="M300.0,30.0 L305.0,35.0 L300.0,40.0 L295.0,35.0 Z"/></svg></div><div class="cmp-cap">圓弧程度 100%</div></div></div>
+  <p class="prop-hint">關鍵點:(0%, 0)、(22%, +3)、(50%, −2)、(78%, +2)、(100%, 0) 半音;水平虛線為原音高(0 半音),上下界 ±6 半音。圓弧程度大於 0% 時,曲線在中間關鍵點處以圓弧繞過(不一定通過該點)。</p>
+</section>
+</body></html>
