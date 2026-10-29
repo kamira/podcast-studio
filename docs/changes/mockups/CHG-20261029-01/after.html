@@ -125,9 +125,15 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 .diff-table { border-collapse:collapse; width:100%; background:#fff; }
 .diff-table th, .diff-table td { border:1px solid var(--line); padding:3px 8px; text-align:left; }
 .diff-table th { background:var(--bg); font-weight:600; }
-.diff-table tr.is-kept td { color:#5d6673; background:#f6f7f9; }
-.k { font-size:11px; padding:0 6px; border-radius:3px; color:#fff; }
-.k-add { background:#2e9e5b; } .k-upd { background:#2f6fdd; } .k-dis { background:#b7791f; } .k-del { background:#c93c37; }
+.diff-legend { display:flex; flex-wrap:wrap; gap:6px; font-size:12px; align-items:center; }
+.lg { padding:1px 6px; border-radius:3px; border-left:4px solid transparent; }
+.lg-add, .diff-add td { background:rgba(46,158,91,.22); } .lg-add, .diff-add td:first-child { border-left:4px solid #2e9e5b; }
+.lg-upd, .diff-upd { background:rgba(240,190,0,.38); border-left:4px solid #c99700 !important; font-weight:600; }
+.lg-dis, .diff-dis { background:rgba(232,137,43,.38); border-left:4px solid #c46a10 !important; font-weight:600; }
+.lg-del, .diff-del td { background:rgba(201,60,55,.22); } .lg-del, .diff-del td:first-child { border-left:4px solid #c93c37; }
+.diff-del s { text-decoration-thickness:2px; }
+.lg-same { border:1px solid var(--line); }
+@media (prefers-color-scheme: dark) { .diff-add td, .lg-add { background:rgba(70,200,120,.30); } .diff-upd, .lg-upd { background:rgba(255,210,40,.40); } .diff-dis, .lg-dis { background:rgba(255,150,60,.42); } .diff-del td, .lg-del { background:rgba(255,90,80,.32); } }
 </style></head>
 <body>
 <div id="shot-full">
@@ -247,13 +253,14 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
       <div class="import-box">
         <strong>匯入預覽:fusions-2026-10-29.json(3.1 KB)</strong>
         <p class="warn">⚠ 匯入檔與現有詞庫<b>不一致</b>:6 項會更動(新增 2、修改 2、停用 1、刪除 1)· 不變 4 · 拒絕 1(第 7 筆「怎麼樣」不是兩字詞)</p>
-        <table class="diff-table"><thead><tr><th>保留</th><th>類別</th><th>詞</th><th>現值</th><th></th><th>匯入後</th></tr></thead><tbody>
-          <tr><td>☐</td><td><span class="k k-add">新增</span></td><td>不會</td><td>—</td><td>→</td><td>ㄅㄟˋ(啟用)</td></tr>
-          <tr><td>☐</td><td><span class="k k-add">新增</span></td><td>所以</td><td>—</td><td>→</td><td>ㄒㄧˇ(啟用)</td></tr>
-          <tr><td>☐</td><td><span class="k k-upd">修改</span></td><td>知道</td><td>ㄗㄠˋ</td><td>→</td><td>ㄓㄠˋ</td></tr>
-          <tr><td>☐</td><td><span class="k k-upd">修改</span></td><td>那樣</td><td>啟用</td><td>→</td><td>停用</td></tr>
-          <tr class="is-kept"><td>☑</td><td><span class="k k-dis">停用</span></td><td>我們</td><td>啟用</td><td>→</td><td>停用(檔案中沒有這個預設詞)</td></tr>
-          <tr class="is-kept"><td>☑</td><td><span class="k k-del">刪除</span></td><td>然後</td><td>ㄖㄡˋ(自訂)</td><td>→</td><td>刪除(檔案中沒有這個自訂詞)</td></tr>
+        <div class="diff-legend">圖例:<span class="lg lg-add">新增(整列綠底)</span><span class="lg lg-upd">修改(變動的儲存格黃底,原值 → 新值)</span><span class="lg lg-dis">停用(「啟用」欄橙底)</span><span class="lg lg-del">刪除(整列紅底、刪除線)</span><span class="lg lg-same">不變(無底色)</span></div>
+        <table class="diff-table"><thead><tr><th>保留</th><th>類別</th><th>詞</th><th>合音注音</th><th>啟用</th></tr></thead><tbody>
+          <tr class="diff-add"><td>☐</td><td>新增</td><td>不會</td><td>ㄅㄟˋ</td><td>啟用</td></tr>
+          <tr class="diff-add"><td>☐</td><td>新增</td><td>所以</td><td>ㄒㄧˇ</td><td>啟用</td></tr>
+          <tr><td>☐</td><td>修改</td><td>知道</td><td class="diff-upd">ㄗㄠˋ → ㄓㄠˋ</td><td>啟用</td></tr>
+          <tr><td>☐</td><td>修改</td><td>那樣</td><td>ㄋㄧㄤˋ</td><td class="diff-upd">啟用 → 停用</td></tr>
+          <tr><td>☑ 不更新</td><td>停用</td><td>我們</td><td>ㄨㄣˇ</td><td class="diff-dis">啟用 → 停用</td></tr>
+          <tr class="diff-del"><td>☑ 不更新</td><td>刪除</td><td><s>然後</s></td><td><s>ㄖㄡˋ</s></td><td><s>啟用</s></td></tr>
         </tbody></table>
         <label>○ 全部覆蓋(套用全部 6 項,含刪除 1 項、停用 1 項)</label>
         <label>● 自訂(勾選「保留」的項目維持現值、不被更新;刪除與停用預設勾保留)</label>
