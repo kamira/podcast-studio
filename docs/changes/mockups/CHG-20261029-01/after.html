@@ -121,6 +121,8 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 .license-table th { background:var(--bg); }
 .import-box { border:1px dashed var(--accent); border-radius:8px; padding:10px 12px; display:grid; gap:6px; background:#f7faff; }
 .import-box p { margin:0; }
+.limit-row { display:flex; gap:16px; align-items:center; padding:6px 10px; border:1px solid var(--line); border-radius:6px; }
+.limit-row label { display:flex; gap:6px; align-items:center; }
 .reject-box { border:1px solid #7a828c; border-left:4px solid #7a828c; background:rgba(120,128,140,.12); border-radius:6px; padding:6px 10px; display:grid; gap:2px; }
 #panel-import-errors { margin:8px; width:560px; }
 .toast-demo { padding:8px 12px; border-radius:8px; color:#fff; background:#c93c37; box-shadow:0 4px 12px rgba(0,0,0,.18); }
@@ -255,6 +257,10 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
       <div class="tl-toolbar"><h3 class="panel-title">合音詞庫</h3><span class="muted">共 7 筆(預設 6、自訂 1);合音模式的建議與「存入合音詞庫」都讀寫這裡</span><span class="spacer"></span>
         <button class="btn tiny">＋ 新增</button><button class="btn tiny">匯入…</button><button class="btn tiny">匯出 JSON</button><button class="btn tiny">匯出 CSV</button></div>
       <table class="license-table"><thead><tr><th>原詞(兩字)</th><th>合音注音</th><th>同音字(參考)</th><th>來源</th><th>啟用</th><th></th></tr></thead><tbody><tr><td>這樣</td><td>ㄐㄧㄤˋ</td><td>醬</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>那樣</td><td>ㄋㄧㄤˋ</td><td>釀</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>知道</td><td>ㄗㄠˋ</td><td>造</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>什麼</td><td>ㄕㄚˊ</td><td>啥</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>我們</td><td>ㄨㄣˇ</td><td>穩</td><td>預設</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>不要</td><td>ㄅㄧㄠˋ</td><td>—</td><td>預設</td><td>☐</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>還原</button></td></tr><tr><td>然後</td><td>ㄖㄡˋ</td><td>肉</td><td>自訂</td><td>☑</td><td><button class='btn tiny'>編輯</button> <button class='btn tiny'>刪除</button></td></tr></tbody></table>
+      <div class="limit-row"><strong>匯入上限</strong>
+        <label>大小上限 <input class="pause-input" value="256"> KB <span class="muted">(16–4096)</span></label>
+        <label>筆數上限 <input class="pause-input" value="1000"> 筆 <span class="muted">(10–10000)</span></label>
+        <button class="btn tiny">儲存上限</button></div>
       <div class="import-box">
         <strong>匯入預覽:fusions-2026-10-29.json(3.1 KB)</strong>
         <p class="warn">⚠ 匯入檔與現有詞庫<b>不一致</b>:6 項會更動(新增 2、修改 2、停用 1、刪除 1)· 不變 4 · 拒絕 1</p>
@@ -278,9 +284,11 @@ code { background:#f0f2f5; padding:1px 4px; border-radius:3px; font-size:12px; }
 </section>
 
 <section class="panel" id="panel-import-errors">
-  <h2 class="panel-title">匯入時只有這兩種情況跳出訊息提示(示意;另一種額外提示為表格下方的「拒絕原因」區塊)</h2>
+  <h2 class="panel-title">匯入時跳出的訊息提示(示意:格式錯誤、匯入失敗、超過上限;另一種額外提示為表格下方的「拒絕原因」區塊)</h2>
   <div class="toast-demo is-error">✗ 格式錯誤:檔案不是 UTF-8 編碼的 JSON 或 CSV,未匯入</div>
   <div class="toast-demo is-error">✗ 匯入失敗:詞庫在預覽後被修改,請重新預覽</div>
+  <div class="toast-demo is-error">✗ 超過允許大小上限(256 KB)</div>
+  <div class="toast-demo is-error">✗ 超過筆數上限(1000 筆)</div>
   <div class="same-state">與現有詞庫一致,無需更動</div>
 </section>
 </body></html>
