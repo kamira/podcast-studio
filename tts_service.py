@@ -563,20 +563,18 @@ def _synthesized(segment: dict) -> bool:
 
 
 def _model_units(segment: dict) -> list[int]:
-    """送模型時會念出的字(漢字)在原文中的索引;估計字界與字詞清晰度的時間換算以此為準(D8、D28)。
-    合音刪去的第二字不念,不算一個字。"""
-    skip = pj.fused_out(segment)
-    return [i for i, ch in enumerate(segment["text"]) if pj._is_hanzi(ch) and i not in skip]
+    """送模型的每個漢字依序對應的原文索引;估計字界與字詞清晰度的時間換算以此為準(D8、D28、R1-5)。
+    合音刪去的字不念、不算;帶顯示字的合音以顯示字的字數計(見 `project.model_units`)。"""
+    return pj.model_units(segment)
 
 
 def shape_job(segment: dict, out_id: str, input_id: str) -> dict:
-    """breezy_worker shape 的一筆工作:字詞清晰度的原文索引換成「念出的字」索引。"""
+    """breezy_worker shape 的一筆工作:字詞清晰度的原文索引換成「送模型的字」索引(R1-5:顯示字算入)。"""
     p = pj.post_params(segment)
     units = _model_units(segment)
-    pos = {i: k for k, i in enumerate(units)}
     words = []
     for w in p["word_clarity"]:
-        idx = [pos[i] for i in range(w["start"], w["end"]) if i in pos]
+        idx = [k for k, i in enumerate(units) if w["start"] <= i < w["end"]]
         if idx:
             words.append({"start": idx[0], "end": idx[-1] + 1, "value": w["value"]})
     return {"id": out_id, "input": f"{input_id}.wav", "chars": max(1, len(units)), "connect": p["connect"],

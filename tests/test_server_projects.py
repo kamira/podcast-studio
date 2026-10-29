@@ -1148,3 +1148,41 @@ def test_文稿改寫時改過的句子沿用同位置的合音狀態(client, en
     r = client.put(f"/api/projects/{NAME}", json={"script": "嗯,我也不知道。是這樣啊。"}, headers=auth())
     s = r.json()["project"]["segments"][0]
     assert s["text"] == "嗯,我也不知道。" and s["fusions"][0]["index"] == 4
+
+
+# ---------- CHG-20261029-01 修訂 1 T12:合音送顯示字(R1-4、R1-5) ----------
+
+def test_PATCH合音帶顯示字_專案檢視回傳_送模型為顯示字_字幕與SRT為原文(client, env):
+    import timeline
+    view = create(client, script="是這樣啊，我也不知道。")
+    sid = view["project"]["segments"][0]["id"]
+    fus = [{"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "lexicon", "display": "醬"},
+           {"index": 7, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon", "display": "不造"}]
+    r = patch_segment(client, sid, {"fusions": fus})
+    assert r.status_code == 200, r.text
+    assert r.json()["project"]["segments"][0]["fusions"] == fus
+    assert get(client)["project"]["segments"][0]["fusions"] == fus
+    r = client.post(f"/api/projects/{NAME}/synth", headers=auth())
+    assert r.status_code == 200, r.text
+    assert read_sse(client, r.json()["run_id"])[-1]["status"] == "ok"
+    assert [j["text"] for c in env.worker_calls() for j in c["jobs"]] == ["是醬啊，我也不造。"]
+    proj = pj.load(NAME)
+    assert proj.segments[0]["text"] == "是這樣啊，我也不知道。"
+    lay = timeline.layout(proj)
+    assert [c["text"] for c in lay["cues"]] == ["是這樣啊，我也不知道"]
+    _, _, cues = media._check_layout(proj, lay)
+    srt = taiwan_ai.reserve("podcast", ".srt")
+    media._write_timeline_srt(cues, srt)
+    text = srt.read_text(encoding="utf-8")
+    assert "是這樣啊，我也不知道" in text and "醬" not in text and "不造" not in text
+
+
+@pytest.mark.parametrize("display", ["是這樣啊是", "醬a", 1, None])
+def test_PATCH合音顯示字不合法回422(client, env, display):
+    view = create(client, script="是這樣啊。")
+    sid = view["project"]["segments"][0]["id"]
+    r = patch_segment(client, sid, {"fusions": [{"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ",
+                                                  "source": "lexicon", "display": display}]})
+    assert r.status_code == 422, r.text
+    assert "顯示字" in r.json()["error"] and no_abs_path(r.text, env)
+    assert get(client)["project"]["segments"][0]["fusions"] == []

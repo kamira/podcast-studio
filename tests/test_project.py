@@ -1165,3 +1165,84 @@ def test_shift_marks依位移調整_改動範圍內清除():
     got = pj.shift_marks(s, old, "是這樣啊我不道耶好的")              # 刪掉「知」(被合音的字)
     assert got["fusions"] == [] and got["cleared"] == 1
     assert got["fusion_off"] == [{"index": 0, "length": 2}, {"index": 7, "length": 2}]
+
+
+# ---------- CHG-20261029-01 修訂 1 T12:合音送顯示字(R1-4、R1-5) ----------
+
+def fzd(index, zhuyin, length, display, source="lexicon"):
+    return {**fz(index, zhuyin, source, length), "display": display}
+
+
+R1_TEXT = "是這樣啊，我也不知道。"
+
+
+def test_tts_text有顯示字時以顯示字取代合音範圍且不加注音():
+    s = pj.validate(data(segments=[seg(R1_TEXT, fusions=[fzd(1, "ㄐㄧㄤˋ", 2, "醬"),
+                                                          fzd(7, "ㄅㄨˋ ㄗㄠˋ", 3, "不造")])]))["segments"][0]
+    assert pj.tts_text(s) == "是醬啊，我也不造。"
+    assert "[:" not in pj.tts_text(s)
+    assert s["fusions"][0]["display"] == "醬" and s["fusions"][1]["display"] == "不造"
+
+
+@pytest.mark.parametrize("display", [None, ""])
+def test_tts_text沒有顯示字時沿用注音標註(display):
+    fus = [fz(1, "ㄐㄧㄤˋ", "lexicon"), fz(7, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)]
+    if display is not None:
+        fus = [{**f, "display": display} for f in fus]
+    s = pj.validate(data(segments=[seg(R1_TEXT, fusions=fus)]))["segments"][0]
+    assert pj.tts_text(s) == "是這[:ㄐㄧㄤˋ]啊，我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]。"
+
+
+def test_修訂前的合音專案檔可載入_tts_text與cache_key不變(projects):
+    import tts_service as tts
+    voice = tts.Voice(wav=Path("/dev/null"), text="逐字稿", wav_sha="a" * 64, text_sha="b" * 64)
+    old = [fz(1, "ㄐㄧㄤˋ", "lexicon"), fz(7, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)]
+    body = data(segments=[seg(R1_TEXT, id="0123456789abcdef", fusions=old)])
+    d = projects / "夜市的味道"
+    d.mkdir()
+    (d / "project.json").write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    s = pj.load("夜市的味道").segments[0]
+    assert s["fusions"] == old                                      # 不自動補 display(不回填)
+    assert pj.tts_text(s) == "是這[:ㄐㄧㄤˋ]啊，我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]。"
+    # 以修訂前的公式(注音標註路線的合成文字 + 聲線 + 模型)算出的鍵比對
+    assert tts.cache_key(s, voice) == hashlib.sha256(json.dumps(
+        ["是這[:ㄐㄧㄤˋ]啊，我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]。", "a" * 64, "b" * 64, voice.model],
+        ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("display", ["是這樣啊是", "醬a", "a", "醬 ", 1, None, ["醬"], "［"])
+def test_顯示字不合法回錯誤(display):
+    with pytest.raises(pj.ProjectError) as e:
+        pj.validate(data(segments=[seg(R1_TEXT, fusions=[fzd(1, "ㄐㄧㄤˋ", 2, display)])]))
+    assert "顯示字" in errors_of(e)
+
+
+def test_加上顯示字後cache_key改變():
+    import tts_service as tts
+    voice = tts.Voice(wav=Path("/dev/null"), text="逐字稿", wav_sha="a" * 64, text_sha="b" * 64)
+    base = pj.validate(data(segments=[seg(R1_TEXT, fusions=[fz(1, "ㄐㄧㄤˋ", "lexicon")])]))["segments"][0]
+    shown = pj.validate(data(segments=[{**base, "fusions": [fzd(1, "ㄐㄧㄤˋ", 2, "醬")]}]))["segments"][0]
+    assert tts.cache_key(base, voice) != tts.cache_key(shown, voice)
+    blank = pj.validate(data(segments=[{**base, "fusions": [fzd(1, "ㄐㄧㄤˋ", 2, "")]}]))["segments"][0]
+    assert tts.cache_key(blank, voice) == tts.cache_key(base, voice)
+
+
+def test_shape工作以送模型的字換算_顯示字():
+    import tts_service as tts
+    s = pj.validate(data(segments=[seg("我也不知道", fusions=[fzd(2, "ㄅㄨˋ ㄗㄠˋ", 3, "不造")],
+                                       word_clarity=[{"start": 2, "end": 5, "value": 30}],
+                                       audio={"id": KEY_A[:32], "seconds": 2.0, "key": KEY_A})]))["segments"][0]
+    job = tts.shape_job(s, "c" * 32, "d" * 32)
+    assert job["chars"] == 4                                     # 我、也 + 不、造
+    assert job["word_clarity"] == [{"start": 2, "end": 4, "value": 30}]
+    # 顯示字比原範圍長、合音前後都有字詞清晰度
+    s = pj.validate(data(segments=[seg("是這樣啊好", fusions=[fzd(1, "ㄐㄧㄤˋ", 2, "醬醬醬")],
+                                       word_clarity=[{"start": 0, "end": 1, "value": 20},
+                                                     {"start": 1, "end": 3, "value": 30},
+                                                     {"start": 4, "end": 5, "value": 40}],
+                                       audio={"id": KEY_A[:32], "seconds": 2.0, "key": KEY_A})]))["segments"][0]
+    assert pj.tts_text(s) == "是醬醬醬啊好"
+    job = tts.shape_job(s, "c" * 32, "d" * 32)
+    assert job["chars"] == 6
+    assert job["word_clarity"] == [{"start": 0, "end": 1, "value": 20}, {"start": 1, "end": 4, "value": 30},
+                                   {"start": 5, "end": 6, "value": 40}]
