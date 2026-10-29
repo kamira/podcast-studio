@@ -593,7 +593,7 @@ def fusion_file(words) -> bytes:
 
 def test_合音詞庫列表_新增_刪除預設詞422(client, root):
     r = client.get("/api/settings/fusions")
-    assert r.status_code == 200 and len(r.json()["words"]) == 6 and len(r.json()["version"]) == 64
+    assert r.status_code == 200 and len(r.json()["words"]) == len(settings.FUSION_DEFAULTS) and len(r.json()["version"]) == 64
     r = client.put("/api/settings/fusions/然後", json={"zhuyin": "ㄖㄢˊ", "enabled": True}, headers=auth())
     assert r.status_code == 200 and ("然後", "ㄖㄢˊ", 1, "custom") in fusion_rows(root)
     r = client.delete("/api/settings/fusions/知道", headers=auth())
@@ -624,7 +624,7 @@ def test_匯出JSON與CSV_匯出內容等於列表(client):
     assert json.loads(r.content)["words"] == client.get("/api/settings/fusions").json()["words"]
     r = client.get("/api/settings/fusions/export?format=csv")
     lines = r.content.decode("utf-8").splitlines()
-    assert lines[0] == "word,zhuyin,enabled,source" and len(lines) == 7
+    assert lines[0] == "word,zhuyin,enabled,source" and len(lines) == len(settings.FUSION_DEFAULTS) + 1
     assert all(not ln[0] in "=+-@" for ln in lines)
     assert client.get("/api/settings/fusions/export?format=xml").status_code == 422
 
@@ -682,16 +682,18 @@ def test_整檔不合法回413或422且詞庫不變(client, root, raw, status):
 
 
 def test_被拒詞條列在rejected含word與reason(client):
-    words = [{"word": "怎麼樣", "zhuyin": "ㄗㄤˇ", "enabled": True}, {"word": "好像", "zhuyin": "ㄓㄧ", "enabled": True}]
+    words = [{"word": "一二三四五", "zhuyin": "ㄗㄤˇ", "enabled": True}, {"word": "好像", "zhuyin": "ㄓㄧ", "enabled": True},
+             {"word": "不知道", "zhuyin": "ㄅㄨˋ ㄓ ㄉㄠˋ", "enabled": True}]
     r = preview(client, fusion_file(words)).json()
-    assert [(x["word"], x["reason"]) for x in r["rejected"]] == [("怎麼樣", "詞須為兩個漢字"),
-                                                                ("好像", "注音不是單一合法音節")]
+    assert [(x["word"], x["reason"]) for x in r["rejected"]] == [
+        ("一二三四五", "詞須為 2~4 個漢字"), ("好像", "注音不是合法音節(多個音節以半形空白分隔)"),
+        ("不知道", "合音注音的音節數必須少於字數")]
     assert r["rejected"][0]["row"] == 1
 
 
 def test_合音建議讀設定資料庫的詞庫(client):
     r = client.post("/api/fusion/suggest", json={"text": "我也不知道"}, headers=auth())
-    assert r.json()["suggestions"] == [{"index": 3, "zhuyin": "ㄗㄠˋ", "source": "lexicon"}]
+    assert r.json()["suggestions"] == [{"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}]
 
 
 def test_匯入上限端點_缺Token403_超出範圍422(client, root):

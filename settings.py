@@ -1025,6 +1025,12 @@ FUSION_DEFAULTS = (
     ("什麼", "ㄕㄚˊ", True),
     ("我們", "ㄨㄣˇ", True),
     ("不要", "ㄅㄧㄠˋ", False),
+    # 3 字(合音字數放寬為 2~4 字後新增,D35;需使用者覆核)
+    ("不知道", "ㄅㄨˋ ㄗㄠˋ", True),
+    ("是這樣", "ㄕˋ ㄐㄧㄤˋ", True),
+    ("這樣子", "ㄐㄧㄤˋ ˙ㄗ", True),
+    ("為什麼", "ㄨㄟˋ ㄕㄚˊ", True),
+    ("怎麼樣", "ㄗㄣˇ ㄧㄤˋ", True),
 )
 FUSION_FORMAT = "podcast-studio-fusions"
 FUSION_FORMAT_VERSION = 1
@@ -1138,12 +1144,15 @@ def _hanzi(ch: str) -> bool:
 
 
 def check_fusion_word(word, zhuyin, enabled) -> str | None:
-    """D31 詞條驗證;合格回 None,否則回繁中原因。"""
+    """D31 詞條驗證(2~4 字;合音注音 1~字數−1 個音節,半形空白分隔);合格回 None,否則回繁中原因。"""
     import fusion
-    if not isinstance(word, str) or len(word) != 2 or not all(_hanzi(c) for c in word):
-        return "詞須為兩個漢字"
-    if not isinstance(zhuyin, str) or not fusion.is_syllable(zhuyin):
-        return "注音不是單一合法音節"
+    if not isinstance(word, str) or not 2 <= len(word) <= 4 or not all(_hanzi(c) for c in word):
+        return "詞須為 2~4 個漢字"
+    parts = zhuyin.split(" ") if isinstance(zhuyin, str) else []
+    if not parts or not all(fusion.is_syllable(p) for p in parts):
+        return "注音不是合法音節(多個音節以半形空白分隔)"
+    if len(parts) >= len(word):
+        return "合音注音的音節數必須少於字數"
     if not isinstance(enabled, bool):
         return "啟用必須是 true 或 false"
     return None

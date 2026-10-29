@@ -1200,7 +1200,7 @@ def test_v2資料庫開啟後升為3_既有三表逐列不變_預設詞6筆(env)
     assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
     assert _all_rows(env) == before
     rows = _fusion_rows(env)
-    assert len(rows) == 6 and {r[0] for r in rows} == {w for w, _, _ in settings.FUSION_DEFAULTS}
+    assert len(rows) == len(settings.FUSION_DEFAULTS) == 11 and {r[0] for r in rows} == {w for w, _, _ in settings.FUSION_DEFAULTS}
     assert ("不要", "ㄅㄧㄠˋ", 0, "default") in rows and ("知道", "ㄗㄠˋ", 1, "default") in rows
 
 
@@ -1218,7 +1218,7 @@ def test_v2升級中途丟例外時維持v2_回預設詞庫帶警告(env, monkey
     assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "2"
     assert "fusion_words" not in _tables(env) and _all_rows(env) == before
     fz = settings.load_fusions()
-    assert fz["_warnings"] and len(fz["words"]) == 6
+    assert fz["_warnings"] and len(fz["words"]) == len(settings.FUSION_DEFAULTS)
     monkeypatch.setattr(settings, "_write_fusion_defaults", real)
     assert "_warnings" not in settings.load()
     assert dict(query(env, "SELECT key, value FROM meta"))["schema_version"] == "3"
@@ -1257,7 +1257,8 @@ def test_CRUD_預設詞可編輯停用還原不可刪_自訂詞可刪(env):
     with pytest.raises(settings.FusionError) as e:
         settings.delete_fusion("然後")
     assert e.value.status == 404
-    for bad in (("三個字", "ㄖㄢˊ", True), ("然後", "ㄓㄧ", True), ("然後", "ㄖㄢˊ", "true"), ("然,", "ㄖㄢˊ", True)):
+    for bad in (("一二三四五", "ㄖㄢˊ", True), ("然後", "ㄓㄧ", True), ("然後", "ㄖㄢˊ", "true"), ("然,", "ㄖㄢˊ", True),
+                ("不知道", "ㄅㄨˋ ㄓ ㄉㄠˋ", True), ("然後", "ㄖㄢˊ ㄏㄡˋ", True), ("不知道", "ㄅㄨˋ  ㄗㄠˋ", True)):
         with pytest.raises(settings.FusionError):
             settings.save_fusion(*bad)
 
@@ -1271,11 +1272,11 @@ def test_匯出JSON再預覽_一致且零寫入(env):
     settings.save_fusion("然後", "ㄖㄢˊ", True)
     raw = _export()
     body = json.loads(raw)
-    assert body["format"] == "podcast-studio-fusions" and body["version"] == 1 and len(body["words"]) == 7
+    assert body["format"] == "podcast-studio-fusions" and body["version"] == 1 and len(body["words"]) == len(settings.FUSION_DEFAULTS) + 1
     before = (db(env).read_bytes(), db(env).stat().st_mtime_ns)
     for fmt in ("json", "csv"):
         p = settings.preview_import(_export(fmt))
-        assert p["status"] == "same" and p["changes"] == [] and p["rejected"] == [] and p["unchanged"] == 7
+        assert p["status"] == "same" and p["changes"] == [] and p["rejected"] == [] and p["unchanged"] == len(settings.FUSION_DEFAULTS) + 1
     assert (db(env).read_bytes(), db(env).stat().st_mtime_ns) == before
 
 
@@ -1345,11 +1346,11 @@ def test_被拒絕的詞不產生更動_原資料保留(env):
     settings.save(changed())
     settings.save_fusion("然後", "ㄖㄢˊ", True)
     words = _words_without("然後") + [{"word": "然後", "zhuyin": "ㄓㄧ", "enabled": True},
-                                      {"word": "怎麼樣", "zhuyin": "ㄗㄤˇ", "enabled": True}]
+                                      {"word": "一二三四五", "zhuyin": "ㄗㄤˇ", "enabled": True}]
     p = settings.preview_import(_file(words))
     assert p["status"] == "same" and p["changes"] == []
-    assert [(r["word"], r["reason"]) for r in p["rejected"]] == [("然後", "注音不是單一合法音節"),
-                                                                 ("怎麼樣", "詞須為兩個漢字")]
+    assert [(r["word"], r["reason"]) for r in p["rejected"]] == [("然後", "注音不是合法音節(多個音節以半形空白分隔)"),
+                                                                 ("一二三四五", "詞須為 2~4 個漢字")]
     assert all(set(r) == {"row", "word", "reason"} for r in p["rejected"])
 
 
@@ -1451,3 +1452,12 @@ def test_v2升級時同時建立匯入上限表(env):
     settings.load()
     assert dict(query(env, "SELECT key, value FROM fusion_settings")) == {"import_max_kb": 256,
                                                                          "import_max_rows": 1000}
+
+
+def test_三四字詞可存入_CSV多音節往返(env):
+    settings.save(changed())
+    settings.save_fusion("我也不知", "ㄨㄛˇ ㄧㄝˇ ㄅㄨˋ", True)
+    settings.save_fusion("怎麼辦", "ㄗㄣˇ ㄅㄢˋ", True)
+    p = settings.preview_import(_export("csv"))
+    assert p["status"] == "same" and p["rejected"] == []
+    assert "不知道,ㄅㄨˋ ㄗㄠˋ,true,default" in _export("csv").decode("utf-8")
