@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -926,6 +927,38 @@ def test_PATCH不能寫入post():
     assert "post" not in ss.SEGMENT_PATCH_KEYS
 
 
+# ---------- CHG-20261029-01 修訂 1 T11:post.pitch_points(R1-10;伺服器產生,PATCH 不能寫入) ----------
+
+PP8 = [[0, 0], [0.175, 1.1], [0.25, 3.6], [0.425, 0.5], [0.5, -2.4], [0.675, -0.2], [0.75, 2.4], [1, 0]]
+
+
+def test_post含pitch_points可載入且存檔往返():
+    good = {"id": KEY_B[:32], "key": KEY_B, "seconds": 2.1, "trim": 0.4, "pitch_points": PP8}
+    assert synth_seg(post=good)["post"] == good
+    edge = [[i / 29, 7.2 if i % 2 else -7.2] for i in range(30)]          # 30 點、±7.2 為上限
+    assert synth_seg(post={**good, "pitch_points": edge})["post"]["pitch_points"] == edge
+
+
+@pytest.mark.parametrize("bad", [
+    [[i / 30, 0] for i in range(31)],                    # 31 點
+    [[0, 0], [0.5, 1], [0.5, 2]],                         # 位置不遞增
+    [[0, 0], [0.6, 1], [0.4, 2]],
+    [[0, 0], [1, 7.3]],                                   # 超過 ±7.2
+    [[0, 0], [1, -7.3]],
+    [[0, 0], [1.01, 1]], [[-0.01, 0], [1, 1]],            # 位置超出 0–1
+    [[0, 0]], [],                                         # 少於 2 點
+    [[0, "1"], [1, 0]], [[0, True], [1, 0]], [[0, 0, 0], [1, 0]], [{"pos": 0, "semi": 0}, [1, 0]],
+    [[0, float("nan")], [1, 0]], None, "x", {"0": 0},
+])
+def test_post的pitch_points不合格為錯誤(bad):
+    with pytest.raises(pj.ProjectError):
+        synth_seg(post={"id": KEY_B[:32], "key": KEY_B, "seconds": 2.1, "trim": 0.4, "pitch_points": bad})
+
+
+def test_PATCH仍不能寫入post_含pitch_points():
+    assert "post" not in ss.SEGMENT_PATCH_KEYS and "pitch_points" not in ss.SEGMENT_PATCH_KEYS
+
+
 def test_post_params以程式常數補預設():
     p = pj.post_params(synth_seg())
     assert p["connect"] == 0 and p["clarity"] == 100 and p["word_clarity"] == [] and p["pitch"] is None
@@ -967,6 +1000,66 @@ def test_is_post_fresh():
     assert not pj.is_post_fresh(pj.validate(data(segments=[seg()]))["segments"][0])
     with pytest.raises(pj.ProjectError):
         pj.post_key(ext["segments"][0])
+
+
+# ---------- CHG-20261029-01 修訂 1 T10:後製鍵演算法標記(R1-11) ----------
+
+# 以修訂前的公式(SHA-256(JSON 陣列 [audio.id, POST_VERSION, 裁切參數, connect, clarity, word_clarity,
+# pitch]),不附演算法標記)對下列片段算出的固定值;只有裁切、只有連音的片段修訂後必須仍是這個鍵。
+OLD_KEYS = {
+    "trim": "a5b2f459ffc3121aac89c686a3457996dea02d342f48af0170bfafa55fb331eb",
+    "connect50": "9ea0ec0dbbdf0067580762b11d4a3f5549948ce3f2d70f2d3db1fd46f75bcc96",
+    "clarity50": "e3084a4d56a48ee60d9b24dcf4f34269ad555d6bdbdee5deeb8b45fafcfdeffd",
+    "wc": "b821890912bbd68300bc293b7cd12f7163a28db8f29a10d102b8383b31264a4e",
+    "pitch": "1900fad4a3651feff3e23e72e326129316c6c5ee80760a6c9861f6da47d2243b",
+}
+
+
+def rev1_cases():
+    return {"trim": synth_seg(), "connect50": synth_seg(connect=50), "clarity50": synth_seg(clarity=50),
+            "wc": synth_seg(word_clarity=[wc(8, 10, 40)]), "pitch": synth_seg(pitch=pitch([(0, 0), (1, 1)]))}
+
+
+def test_演算法標記常數():
+    assert pj.POST_VERSION == 1
+    assert pj.POST_ALGO == {"clarity": 2, "pitch": 2}
+
+
+def test_只有裁切或連音的片段鍵與修訂前相同():
+    c = rev1_cases()
+    assert pj.post_key(c["trim"]) == OLD_KEYS["trim"]
+    assert pj.post_key(c["connect50"]) == OLD_KEYS["connect50"]
+    assert pj.post_key(synth_seg(connect=50, speed=1.5)) == OLD_KEYS["connect50"]     # 改語速仍不改鍵
+
+
+def test_有清晰度字詞清晰度或語調的片段鍵改變_修訂前的post過期():
+    for name in ("clarity50", "wc", "pitch"):
+        s = rev1_cases()[name]
+        k = pj.post_key(s)
+        assert k != OLD_KEYS[name], name
+        assert pj.KEY_RE.fullmatch(k)
+        old = OLD_KEYS[name]
+        stale = {**s, "post": {"id": old[:32], "key": old, "seconds": 2.0, "trim": 0.5}}
+        assert not pj.is_post_fresh(stale), name                         # 修訂前寫入的 post 失效
+        assert pj.is_post_fresh({**s, "post": {"id": k[:32], "key": k, "seconds": 2.0, "trim": 0.5}})
+    # 改語速仍不改鍵
+    assert pj.post_key(synth_seg(clarity=50, speed=1.5)) == pj.post_key(rev1_cases()["clarity50"])
+    assert pj.post_key(synth_seg(pitch=pitch([(0, 0), (1, 1)]), speed=0.8)) == pj.post_key(rev1_cases()["pitch"])
+
+
+def test_演算法標記只附用到的部分():
+    def key(parts):
+        return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    a = KEY_A[:32]
+    trim = dict(pj.TRIM_PARAMS)
+    pts = {"points": [[0.0, 0.0], [1.0, 1.0]], "roundness": 50}
+    assert pj.post_key(synth_seg(clarity=50)) == key([a, 1, trim, 0, 50, [], None, {"clarity": 2}])
+    assert pj.post_key(synth_seg(word_clarity=[wc(8, 10, 40)])) == key(
+        [a, 1, trim, 0, 100, [[8, 10, 40]], None, {"clarity": 2}])
+    assert pj.post_key(synth_seg(pitch=pitch([(0, 0), (1, 1)]))) == key([a, 1, trim, 0, 100, [], pts, {"pitch": 2}])
+    assert pj.post_key(synth_seg(clarity=50, pitch=pitch([(0, 0), (1, 1)]))) == key(
+        [a, 1, trim, 0, 50, [], pts, {"clarity": 2, "pitch": 2}])
+    assert pj.post_key(synth_seg(connect=30)) == key([a, 1, trim, 30, 100, [], None])
 
 
 # ---------- CHG-20261029-01 T7:片段合音 ----------
@@ -1072,3 +1165,84 @@ def test_shift_marks依位移調整_改動範圍內清除():
     got = pj.shift_marks(s, old, "是這樣啊我不道耶好的")              # 刪掉「知」(被合音的字)
     assert got["fusions"] == [] and got["cleared"] == 1
     assert got["fusion_off"] == [{"index": 0, "length": 2}, {"index": 7, "length": 2}]
+
+
+# ---------- CHG-20261029-01 修訂 1 T12:合音送顯示字(R1-4、R1-5) ----------
+
+def fzd(index, zhuyin, length, display, source="lexicon"):
+    return {**fz(index, zhuyin, source, length), "display": display}
+
+
+R1_TEXT = "是這樣啊，我也不知道。"
+
+
+def test_tts_text有顯示字時以顯示字取代合音範圍且不加注音():
+    s = pj.validate(data(segments=[seg(R1_TEXT, fusions=[fzd(1, "ㄐㄧㄤˋ", 2, "醬"),
+                                                          fzd(7, "ㄅㄨˋ ㄗㄠˋ", 3, "不造")])]))["segments"][0]
+    assert pj.tts_text(s) == "是醬啊，我也不造。"
+    assert "[:" not in pj.tts_text(s)
+    assert s["fusions"][0]["display"] == "醬" and s["fusions"][1]["display"] == "不造"
+
+
+@pytest.mark.parametrize("display", [None, ""])
+def test_tts_text沒有顯示字時沿用注音標註(display):
+    fus = [fz(1, "ㄐㄧㄤˋ", "lexicon"), fz(7, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)]
+    if display is not None:
+        fus = [{**f, "display": display} for f in fus]
+    s = pj.validate(data(segments=[seg(R1_TEXT, fusions=fus)]))["segments"][0]
+    assert pj.tts_text(s) == "是這[:ㄐㄧㄤˋ]啊，我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]。"
+
+
+def test_修訂前的合音專案檔可載入_tts_text與cache_key不變(projects):
+    import tts_service as tts
+    voice = tts.Voice(wav=Path("/dev/null"), text="逐字稿", wav_sha="a" * 64, text_sha="b" * 64)
+    old = [fz(1, "ㄐㄧㄤˋ", "lexicon"), fz(7, "ㄅㄨˋ ㄗㄠˋ", "lexicon", 3)]
+    body = data(segments=[seg(R1_TEXT, id="0123456789abcdef", fusions=old)])
+    d = projects / "夜市的味道"
+    d.mkdir()
+    (d / "project.json").write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    s = pj.load("夜市的味道").segments[0]
+    assert s["fusions"] == old                                      # 不自動補 display(不回填)
+    assert pj.tts_text(s) == "是這[:ㄐㄧㄤˋ]啊，我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]。"
+    # 以修訂前的公式(注音標註路線的合成文字 + 聲線 + 模型)算出的鍵比對
+    assert tts.cache_key(s, voice) == hashlib.sha256(json.dumps(
+        ["是這[:ㄐㄧㄤˋ]啊，我也不[:ㄅㄨˋ]知[:ㄗㄠˋ]。", "a" * 64, "b" * 64, voice.model],
+        ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("display", ["是這樣啊是", "醬a", "a", "醬 ", 1, None, ["醬"], "［"])
+def test_顯示字不合法回錯誤(display):
+    with pytest.raises(pj.ProjectError) as e:
+        pj.validate(data(segments=[seg(R1_TEXT, fusions=[fzd(1, "ㄐㄧㄤˋ", 2, display)])]))
+    assert "顯示字" in errors_of(e)
+
+
+def test_加上顯示字後cache_key改變():
+    import tts_service as tts
+    voice = tts.Voice(wav=Path("/dev/null"), text="逐字稿", wav_sha="a" * 64, text_sha="b" * 64)
+    base = pj.validate(data(segments=[seg(R1_TEXT, fusions=[fz(1, "ㄐㄧㄤˋ", "lexicon")])]))["segments"][0]
+    shown = pj.validate(data(segments=[{**base, "fusions": [fzd(1, "ㄐㄧㄤˋ", 2, "醬")]}]))["segments"][0]
+    assert tts.cache_key(base, voice) != tts.cache_key(shown, voice)
+    blank = pj.validate(data(segments=[{**base, "fusions": [fzd(1, "ㄐㄧㄤˋ", 2, "")]}]))["segments"][0]
+    assert tts.cache_key(blank, voice) == tts.cache_key(base, voice)
+
+
+def test_shape工作以送模型的字換算_顯示字():
+    import tts_service as tts
+    s = pj.validate(data(segments=[seg("我也不知道", fusions=[fzd(2, "ㄅㄨˋ ㄗㄠˋ", 3, "不造")],
+                                       word_clarity=[{"start": 2, "end": 5, "value": 30}],
+                                       audio={"id": KEY_A[:32], "seconds": 2.0, "key": KEY_A})]))["segments"][0]
+    job = tts.shape_job(s, "c" * 32, "d" * 32)
+    assert job["chars"] == 4                                     # 我、也 + 不、造
+    assert job["word_clarity"] == [{"start": 2, "end": 4, "value": 30}]
+    # 顯示字比原範圍長、合音前後都有字詞清晰度
+    s = pj.validate(data(segments=[seg("是這樣啊好", fusions=[fzd(1, "ㄐㄧㄤˋ", 2, "醬醬醬")],
+                                       word_clarity=[{"start": 0, "end": 1, "value": 20},
+                                                     {"start": 1, "end": 3, "value": 30},
+                                                     {"start": 4, "end": 5, "value": 40}],
+                                       audio={"id": KEY_A[:32], "seconds": 2.0, "key": KEY_A})]))["segments"][0]
+    assert pj.tts_text(s) == "是醬醬醬啊好"
+    job = tts.shape_job(s, "c" * 32, "d" * 32)
+    assert job["chars"] == 6
+    assert job["word_clarity"] == [{"start": 0, "end": 1, "value": 20}, {"start": 1, "end": 4, "value": 30},
+                                   {"start": 5, "end": 6, "value": 40}]

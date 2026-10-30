@@ -125,21 +125,34 @@ def _speech_inputs(work):
     return items
 
 
-def test_清晰度0與50(work):
+def test_清晰度方案C_0_25_50(work):
+    """修訂 1 T10(R1-1):方案 C。0% 子音 ≥ 3 kHz 降 ≥ 18 dB、離散度降 ≥ 20%、RMS 差 ≤ 0.5 dB;25% 與 0% 不悶
+    (母音「低−中高」≤ +1.0 dB)、不削高頻(非子音幀 ≥ 4 kHz 變化 ≥ −2 dB);50% 子音降 ≥ 8 dB;不含低通。"""
     for label, src, chars in _speech_inputs(work):
         rows = shape(work, [job("cccc0000", input=src.name, chars=chars, clarity=0),
+                            job("cccc0025", input=src.name, chars=chars, clarity=25),
                             job("cccc0050", input=src.name, chars=chars, clarity=50)])
-        assert len(rows) == 2
-        m0 = metric("clar", orig=str(src), proc=str(work / "cccc0000.wav"))
-        m50 = metric("clar", orig=str(src), proc=str(work / "cccc0050.wav"))
-        print(f"\n[清晰度 {label}] 0%:{m0};50%:{m50}")
-        assert m0["consonant_db"] <= -18
-        assert m0["dispersion_pct"] <= -25
-        assert abs(m0["rms_db"]) <= 0.5
-        assert m50["consonant_db"] <= -8
-        assert abs(m50["rms_db"]) <= 0.5
-        assert metric("lowpass_calls", path=str(src), p=50)["calls"] == 0     # 50% 不含低通
-        assert metric("lowpass_calls", path=str(src), p=0)["calls"] >= 1
+        assert len(rows) == 3
+        m = {p: metric("clar", orig=str(src), proc=str(work / f"cccc00{p:02d}.wav")) for p in (0, 25, 50)}
+        print(f"\n[清晰度 {label}] " + ";".join(f"{p}%:{m[p]}" for p in (50, 25, 0)))
+        assert m[0]["consonant_db"] <= -18
+        assert m[0]["dispersion_pct"] <= -20
+        for p in (0, 25, 50):
+            assert abs(m[p]["rms_db"]) <= 0.5, p
+        for p in (0, 25):
+            assert m[p]["vowel_lowmid_db"] <= 1.0, p                         # 不悶
+            assert m[p]["nonconsonant_4k_db"] >= -2.0, p                     # 不削高頻
+        assert m[50]["consonant_db"] <= -8
+        for p in (0, 25, 50):
+            assert metric("lowpass_calls", path=str(src), p=p)["calls"] == 0, p  # 方案 C 不用低通
+
+
+def test_清晰度100逐樣本等於輸入_每句處理半秒內(work):
+    for label, src, _ in _speech_inputs(work):
+        assert metric("identity", path=str(src))["same"], label
+        t = metric("timing", path=str(src), ps=[0, 25, 50, 75])
+        print(f"\n[清晰度耗時 {label}] {t}")
+        assert max(t["seconds"].values()) <= 0.5
 
 
 def test_字詞清晰度只影響區段(work):
@@ -162,12 +175,58 @@ def test_字詞清晰度只影響區段(work):
 
 
 def test_語調5點誤差中位1半音以內_長度不變(work):
+    """修訂 1 T11:誤差對 worker 實際套用的內部曲線(stdout 的 pitch_points)計算。"""
     chars = make(work, [0] * 9, f0=150)
     pts = [[0, 0], [0.25, 3], [0.55, -2], [0.8, 2], [1.0, -3]]
-    shape(work, [job("eeee0001", chars=chars, pitch={"points": pts, "roundness": 50})])
-    m = metric("pitch", orig=str(work / f"{IN_ID}.wav"), proc=str(work / "eeee0001.wav"), points=pts,
+    [row] = shape(work, [job("eeee0001", chars=chars, pitch={"points": pts, "roundness": 50})])
+    inner = row["pitch_points"]
+    assert isinstance(inner, list) and 5 <= len(inner) <= 8
+    m = metric("pitch", orig=str(work / f"{IN_ID}.wav"), proc=str(work / "eeee0001.wav"), points=inner,
                roundness=50)
-    print(f"\n[語調] {m}")
+    print(f"\n[語調] 內部點 {inner};{m}")
     assert m["frames"] > 50
     assert m["median"] <= 1.0
     assert abs(m["len_out"] - m["len_in"]) <= 0.010
+
+
+FIVE = [[0, 0], [0.25, 3], [0.5, -2], [0.75, 2], [1, 0]]
+
+
+def test_pitch_curve經過每個實際套用的點_0為折線_100為PCHIP():
+    m = metric("curve", points=FIVE)
+    print(f"\n[語調曲線] {m}")
+    assert len(m["inner"]) == 8
+    for r in (0, 50, 100):
+        assert m[f"through_{r}"] <= 1e-9, r
+    assert m["lin_0"] <= 1e-9 and m["pchip_100"] <= 1e-9
+
+
+def _auto(inner, user):
+    xs = {round(x, 6) for x, _ in user}
+    return [q for q in inner if round(q[0], 6) not in xs]
+
+
+def test_真語音語調圓弧100位移峰谷7半音以上_自動補點附近有聲_每句1秒內(work):
+    wavs = [x for x in os.environ.get("SHAPE_REAL_WAVS", "").split(":") if x]
+    if not wavs:
+        pytest.skip("未設定 SHAPE_REAL_WAVS")
+    for k, p in enumerate(wavs):
+        src = work / f"{'%016x' % (k + 1)}.wav"
+        shutil.copyfile(p, src)
+        res = {}
+        for r in (0, 50, 100):
+            jid = f"ffff{k:04x}{r:04x}0000"[:16]
+            [row] = shape(work, [job(jid, input=src.name, chars=12, pitch={"points": FIVE, "roundness": r})])
+            inner = row["pitch_points"]
+            auto = _auto(inner, FIVE)
+            m = metric("pitch_swing", orig=str(src), proc=str(work / f"{jid}.wav"), points=inner, roundness=r,
+                       auto=auto)
+            res[r] = (inner, auto, m)
+            print(f"\n[語調 {Path(p).name} 圓弧 {r}%] 內部點 {inner};自動補點 {auto};{m}")
+            assert abs(m["len_out"] - m["len_in"]) <= 0.010
+            assert m["median"] <= 1.0
+            assert len(auto) == 3 and all(n >= 1 for n in m["auto_voiced"]), m["auto_voiced"]
+        assert res[100][2]["swing"] >= 7.0
+        t = metric("pitch_timing", path=str(src), points=FIVE, roundness=100)
+        print(f"[語調耗時 {Path(p).name}] {t}")
+        assert t["seconds"] <= 1.0

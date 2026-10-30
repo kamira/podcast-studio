@@ -620,6 +620,9 @@
   // 自錄音檔片段不做後製:拉桿停用並說明原因(D4)。
 
   const PROSODY_DEFAULTS = { connect: 0, clarity: 100, roundness: 50 };
+  // (修訂 1 R1-3)清晰度低於 25% 時在拉桿說明下方警告;只警告、不阻擋(照常送出、不跳訊息)
+  const CLARITY_WARN_BELOW = 25;
+  const CLARITY_WARN_TEXT = "⚠ 低於 25% 會過度含糊、聲音偏悶,不建議使用;需要含糊感時建議用 50% 或 25%。";
   const POST_RETRY_MS = 1000;
   const POST_RETRIES = 120;
 
@@ -690,6 +693,7 @@
       } finally {
         (ids || []).forEach((id) => this.running.delete(id));
         S.Props && S.Props.render();
+        S.PitchEdit && S.PitchEdit.refresh();   // 修訂 1 R1-10:後製結束後語調改以實際套用的點重畫
       }
     },
   };
@@ -706,7 +710,21 @@
     return r;
   }
 
-  // 百分比拉桿:{label, value(null = 預設), dflt, disabled, onCommit(v | null)}
+  // 清晰度警告(R1-3):淺橙底、role="status",以 textContent 寫入固定文字;低於門檻才顯示
+  function clarityWarn() {
+    const p = el("p", "clarity-warn", "");
+    p.setAttribute("role", "status");
+    p.hidden = true;
+    return p;
+  }
+
+  function setClarityWarn(node, value) {
+    const on = typeof value === "number" && value < CLARITY_WARN_BELOW;
+    node.textContent = on ? CLARITY_WARN_TEXT : "";
+    node.hidden = !on;
+  }
+
+  // 百分比拉桿:{label, value(null = 預設), dflt, disabled, onCommit(v | null), onInput(v)?}
   function percentSlider(o) {
     const wrap = el("div", "pct-slider");
     const input = document.createElement("input");
@@ -726,7 +744,10 @@
     reset.title = o.label + "改回預設(" + o.dflt + "%)";
     reset.disabled = !!o.disabled || typeof o.value !== "number";
     input.disabled = !!o.disabled;
-    input.addEventListener("input", function () { out.textContent = input.value + "%"; });
+    input.addEventListener("input", function () {
+      out.textContent = input.value + "%";
+      if (o.onInput) o.onInput(Number(input.value));
+    });
     input.addEventListener("change", function () { o.onCommit(Number(input.value)); });
     reset.addEventListener("click", function () { o.onCommit(null); });
     wrap.append(input, out, reset);
@@ -737,7 +758,7 @@
     if (!holder) return;
     const ext = isExternal(seg);
     const rows = [];
-    const add = function (key, label, hint) {
+    const add = function (key, label, hint, warn) {
       const row = el("div", "pct-row");
       row.appendChild(el("span", "prop-label", label));
       row.appendChild(percentSlider({
@@ -747,11 +768,16 @@
           body[key] = v;
           patchAndPost(seg, body, v === null ? label + "改回預設" : label + "改為 " + v + "%");
         },
+        onInput: warn ? function (v) { setClarityWarn(warn, v); } : null,
       }));
       rows.push(row, el("p", "muted pct-hint", hint));
+      if (warn) {
+        setClarityWarn(warn, seg[key]);
+        rows.push(warn);
+      }
     };
     add("connect", "連音", "字與字之間的黏著;句與句之間仍由「停頓」決定");
-    add("clarity", "清晰度", "100% 字正腔圓,越低越含糊;個別字詞可在下方另設");
+    add("clarity", "清晰度", "100% 字正腔圓,越低越含糊;個別字詞可在下方另設", ext ? null : clarityWarn());
     if (ext) rows.push(el("p", "muted pct-hint is-disabled-note", "自錄音檔不做後製"));
     holder.replaceChildren(...rows);
     holder.classList.add("has-editor");
@@ -772,7 +798,8 @@
           v === null ? "圓弧改回預設" : "圓弧改為 " + v + "%");
       },
     }));
-    rows.push(row, el("p", "muted pct-hint", "折線轉角的圓弧程度:0% 為直線折角,100% 為最圓滑"));
+    rows.push(row, el("p", "muted pct-hint", "折線轉角的圓弧程度:0% 為直線折角,100% 為最圓滑;"
+      + "曲線一律經過每個實際套用的點(含放大後的峰谷與自動補點)"));
     const info = el("p", "pitch-info");
     info.dataset.hook = "pitch-info";
     if (ext) info.textContent = "自錄音檔不做後製";
@@ -780,6 +807,9 @@
     else {
       const k = S.PitchEdit ? S.PitchEdit.selected(seg.id) : -1;
       let text = "關鍵點 " + pitch.points.length + " 個";
+      // (修訂 1 R1-10)自動補點數:與時間軸同一份資料(後製有效時為 worker 的結果,否則為試算)
+      const model = S.pitchModel ? S.pitchModel(seg) : null;
+      if (model && model.auto.length) text += " · 自動補點 " + model.auto.length + " 個(虛線,不可拖曳)";
       if (k >= 0 && pitch.points[k]) {
         const p = pitch.points[k];
         text += " · 選取中:#" + (k + 1) + "(位置 " + Math.round(p.pos * 100) + "%," + semiText(p.semi) + ")";
@@ -910,6 +940,7 @@
       head.append(this.title, close);
       this.sliderSlot = el("div", "word-slider");
       this.note = el("p", "tone-auto", "");
+      this.warn = clarityWarn();
       const actions = el("div", "tone-actions");
       this.clearBtn = el("button", "btn btn-small", "清除");
       this.clearBtn.type = "button";
@@ -918,7 +949,7 @@
       this.applyBtn.type = "button";
       this.applyBtn.addEventListener("click", () => this.apply(Number(this.input.value)));
       actions.append(this.clearBtn, this.applyBtn);
-      box.append(head, this.sliderSlot, this.note, actions);
+      box.append(head, this.sliderSlot, this.note, this.warn, actions);
       box.addEventListener("keydown", (e) => { if (e.key === "Escape") this.close(); });
       document.body.appendChild(box);
       document.addEventListener("pointerdown", (e) => {
@@ -935,12 +966,14 @@
       const own = (seg.word_clarity || []).find(function (w) { return w.start === start && w.end === end; });
       const base = typeof seg.clarity === "number" ? seg.clarity : PROSODY_DEFAULTS.clarity;
       this.title.textContent = "「" + word + "」的清晰度 — 第 " + (start + 1) + (end - start > 1 ? "–" + end : "") + " 字";
+      const warn = this.warn;
       const slider = percentSlider({ label: "「" + word + "」的清晰度", value: own ? own.value : base,
-        dflt: base, onCommit: function () {} });
+        dflt: base, onCommit: function () {}, onInput: function (v) { setClarityWarn(warn, v); } });
       slider.querySelector(".pct-reset").remove();
       this.input = slider.querySelector("input");
       this.sliderSlot.replaceChildren(slider);
       this.note.textContent = "未個別設定的字沿用整句清晰度(" + base + "%)";
+      setClarityWarn(this.warn, own ? own.value : base);
       this.clearBtn.disabled = !(seg.word_clarity || []).some(function (w) { return w.start < end && w.end > start; });
       this.applyBtn.disabled = false;
       this.box.hidden = false;
@@ -998,14 +1031,55 @@
     return parts.length >= 1 && parts.length <= n - 1 && parts.every(zhuyinOk);
   }
 
-  // 套用一組合音後的 fusions(移除與它重疊者;依起點排序)(純函式)
+  // 一組合音的欄位副本;display(修訂 1 R1-4)有才帶(舊專案檔的合音不補欄位,送模型的文字不變)
+  function fusionItem(f) {
+    const out = { index: f.index, length: f.length, zhuyin: f.zhuyin, source: f.source };
+    if (typeof f.display === "string") out.display = f.display;
+    return out;
+  }
+
+  // 套用一組合音後的 fusions(移除與它重疊者;依起點排序)(純函式)。新套用的 item 一律帶 display
+  // (由詞庫套用時為該詞當時的顯示字,其餘為空字串,R1-4)
   function withFusion(list, item) {
     const end = item.index + item.length;
     const out = (list || []).filter(function (f) { return f.index + f.length <= item.index || f.index >= end; })
-      .map(function (f) { return { index: f.index, length: f.length, zhuyin: f.zhuyin, source: f.source }; });
-    out.push({ index: item.index, length: item.length, zhuyin: item.zhuyin, source: item.source });
+      .map(fusionItem);
+    out.push(fusionItem(Object.assign({ display: "" }, item)));
     out.sort(function (a, b) { return a.index - b.index; });
     return out;
+  }
+
+  // 這一句送給模型的文字(同 project.tts_text():`[`、`]` 換全形;合音帶顯示字時整段換成顯示字、不加注音;
+  // 沒有顯示字時前 k 字帶 `[:音節]`、刪除其餘字(D26);範圍外的聲調標註帶 `[:注音]`)(純函式;T14 前端試算,
+  // 只供屬性面板合音模式「送模型」列顯示,實際送出仍以伺服器為準)
+  function ttsText(seg) {
+    const esc = function (t) { return String(t).replace(/\[/g, "［").replace(/\]/g, "］"); };
+    const anns = {};
+    (seg.annotations || []).forEach(function (a) { anns[a.index] = a.zhuyin; });
+    const fus = {};
+    const shown = {};
+    const skip = new Set();
+    (seg.fusions || []).forEach(function (f) {
+      if (f.display) {
+        shown[f.index] = f.display;
+        for (let j = 0; j < f.length; j++) skip.add(f.index + j);
+        return;
+      }
+      const parts = String(f.zhuyin || "").split(" ");
+      for (let j = 0; j < f.length; j++) {
+        if (j < parts.length) fus[f.index + j] = parts[j];
+        else skip.add(f.index + j);
+      }
+    });
+    const out = [];
+    Array.from(esc(seg.text || "")).forEach(function (ch, i) {
+      if (Object.prototype.hasOwnProperty.call(shown, i)) out.push(esc(shown[i]));
+      if (skip.has(i)) return;
+      out.push(ch);
+      if (Object.prototype.hasOwnProperty.call(fus, i)) out.push("[:" + fus[i] + "]");
+      else if (Object.prototype.hasOwnProperty.call(anns, i)) out.push("[:" + anns[i] + "]");
+    });
+    return out.join("");
   }
 
   // 詞庫詞比對(同 fusion.suggest:4 → 3 → 2 字、每層由左至右、不重疊;exclude 為不提示的字元索引)(純函式)
@@ -1040,23 +1114,30 @@
     return out;
   }
 
-  // words:啟用中的詞(供建議);all:完整詞庫含停用詞(判斷詞是否已存在,D32)
+  // words:啟用中的詞(供建議);all:完整詞庫含停用詞(判斷詞是否已存在,D32);
+  // display:啟用中的詞的顯示字(修訂 1 R1-4,由詞庫套用時寫入片段)
   const Lexicon = {
     words: null,
     all: null,
+    display: {},
     async load(force) {
       if (this.words && !force) return this.words;
       const r = await S.api("GET", "/api/settings/fusions");
       const out = {};
       const all = {};
+      const display = {};
       if (r.ok && r.data && Array.isArray(r.data.words)) {
         r.data.words.forEach(function (w) {
           all[w.word] = w.zhuyin;
-          if (w.enabled) out[w.word] = w.zhuyin;
+          if (w.enabled) {
+            out[w.word] = w.zhuyin;
+            display[w.word] = typeof w.display === "string" ? w.display : "";
+          }
         });
       }
       this.words = out;
       this.all = all;
+      this.display = display;
       return out;
     },
   };
@@ -1163,7 +1244,9 @@
       this.error.textContent = "";
       this.box.hidden = false;
       const r = anchor ? anchor.getBoundingClientRect() : { left: 100, bottom: 100 };
-      this.box.style.left = Math.max(8, r.left + window.scrollX) + "px";
+      // 不超出視窗右緣(T14:原本片段靠右時彈出框超出視窗、內容被切掉)
+      const maxLeft = document.documentElement.clientWidth - this.box.offsetWidth - 8;
+      this.box.style.left = Math.max(8, Math.min(r.left, maxLeft) + window.scrollX) + "px";
       this.box.style.top = Math.max(8, r.bottom + window.scrollY + 6) + "px";
       if (n > FUSION_MAX || !chars.slice(start, end).every(isHanzi) || n < 2) {
         this.derive.textContent = n < 2 ? "合音需要相鄰 2 個以上的漢字" : "合音最多 " + FUSION_MAX + " 個漢字(不可含標點)";
@@ -1258,14 +1341,24 @@
       S.toast("已存入合音詞庫:「" + word + "」" + ARROW + z);
     },
 
+    // 由詞庫套用(選取的整個詞命中詞庫、注音未改)時的顯示字;其餘為空字串(修訂 1 R1-4)
+    async display(word, z, source) {
+      if (source !== "lexicon" || !this.info || this.info.lexicon !== z) return "";
+      await Lexicon.load(true);
+      return Lexicon.words && Lexicon.words[word] === z ? (Lexicon.display[word] || "") : "";
+    },
+
     async apply() {
       const seg = this.seg;
       if (!seg) return;
       const [s, e] = this.range;
       const z = this.input.value.trim();
+      const source = this.source();
       this.applyBtn.disabled = true;
+      const display = await this.display(Array.from(seg.text).slice(s, e).join(""), z, source);
+      if (this.seg !== seg) return;
       const r = await Store.patchSegment(seg.id, { fusions: withFusion(seg.fusions, { index: s, length: e - s,
-        zhuyin: z, source: this.source() }) });
+        zhuyin: z, source: source, display: display }) });
       if (!r.ok) {
         this.applyBtn.disabled = false;
         this.error.textContent = "無法套用:" + S.errorText(r);
@@ -1311,7 +1404,13 @@
       li.appendChild(x);
       list.appendChild(li);
     });
-    holder.after(list);
+    // T14:「已套用」下方的「送模型」(依已套用的合音算出整句送出的文字,有顯示字時為顯示字,R1-4)
+    // 與「字幕」(原文)兩列,照已核准的 after-fusion.png;一律以 textContent 寫入
+    const sentRow = el("div", "prop-row fusion-row");
+    sentRow.append(el("span", "prop-label", "送模型"), el("code", "fusion-sent", ttsText(seg)));
+    const subRow = el("div", "prop-row fusion-row");
+    subRow.append(el("span", "prop-label", "字幕"), el("span", "fusion-subtitle", seg.text + "(原文不變)"));
+    holder.after(list, sentRow, subRow);
     if (isExternal(seg)) return;
     let sel = null;
     const mark = function () {
@@ -1398,6 +1497,13 @@
       else if (d.start >= oldEnd && (p < oldEnd || d.start >= p)) out.push(Object.assign({}, d, { start: d.start + delta }));
     });
     return out;
+  }
+
+  // 已啟用合音的浮層文字:片段帶 display(修訂 1 R1-4)時以它為準(即送模型的字);舊專案檔沒有此欄位時
+  // 沿用詞庫中注音相同者的顯示字(D43)
+  function shownDisplay(f, entry) {
+    if (typeof f.display === "string") return f.display;
+    return entry && entry.zhuyin === f.zhuyin ? entry.display : "";
   }
 
   const ScriptMarks = {
@@ -1493,8 +1599,7 @@
         (s.fusions || []).forEach(function (f) {
           const word = s.text.slice(f.index, f.index + f.length);
           const e = lex[word];
-          out.push({ start: sp[0] + f.index, len: f.length, state: "on", zhuyin: f.zhuyin,
-                     display: e && e.zhuyin === f.zhuyin ? e.display : "" });
+          out.push({ start: sp[0] + f.index, len: f.length, state: "on", zhuyin: f.zhuyin, display: shownDisplay(f, e) });
         });
         (s.fusion_off || []).forEach(function (d) {
           const e = lex[s.text.slice(d.index, d.index + d.length)];
@@ -1596,8 +1701,7 @@
       const out = [];
       (seg.fusions || []).forEach(function (f) {
         const e = lex[word(f.index, f.length)];
-        out.push({ index: f.index, len: f.length, state: "on", zhuyin: f.zhuyin,
-                   display: e && e.zhuyin === f.zhuyin ? e.display : "" });
+        out.push({ index: f.index, len: f.length, state: "on", zhuyin: f.zhuyin, display: shownDisplay(f, e) });
       });
       (seg.fusion_off || []).forEach(function (d) {
         const e = lex[word(d.index, d.length)];
@@ -1695,7 +1799,10 @@
       const off = (seg.fusion_off || []).filter(function (x) { return !same(x); })
         .map(function (x) { return { index: x.index, length: x.length }; });
       let fusions = (seg.fusions || []).filter(function (x) { return !same(x); });
-      if (state === "on") fusions = withFusion(fusions, { index: at, length: m.len, zhuyin: m.zhuyin, source: "lexicon" });
+      if (state === "on") {
+        fusions = withFusion(fusions, { index: at, length: m.len, zhuyin: m.zhuyin, source: "lexicon",
+                                        display: m.display || "" });
+      }
       else off.push({ index: at, length: m.len });
       const r = await Store.patchSegment(seg.id, { fusions: fusions, fusion_off: off });
       if (!r.ok) {
@@ -1755,5 +1862,6 @@
     gapBox: gapBox, GAP_HIT: GAP_HIT, Post: Post, patchAndPost: patchAndPost, ToneMode: ToneMode,
     WordPopup: WordPopup, withWordClarity: withWordClarity, charClarity: charClarity, semiText: semiText,
     PROSODY_DEFAULTS: PROSODY_DEFAULTS, FusionPopup: FusionPopup, ScriptMarks: ScriptMarks, shiftDecided: shiftDecided, Lexicon: Lexicon,
-    matchLexicon: matchLexicon, withFusion: withFusion, fusionZhuyinOk: fusionZhuyinOk };
+    matchLexicon: matchLexicon, withFusion: withFusion, ttsText: ttsText, fusionZhuyinOk: fusionZhuyinOk,
+    CLARITY_WARN_BELOW: CLARITY_WARN_BELOW, CLARITY_WARN_TEXT: CLARITY_WARN_TEXT };
 })();

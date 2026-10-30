@@ -19,14 +19,17 @@
       輸入檔:{"text": 1–500 字};stdout 印一個 JSON 陣列,長度等於字數,每字為聲調符號格式的注音
       (一聲不標、輕聲以 ˙ 開頭),非中文字為 null。只用 G2PW,不載入語音模型。
   shape --jobs <json> --out <dir>(CHG-20261029-01 T2)
-      後製:連音 → 清晰度(整句,再疊字詞)→ 語調(TD-PSOLA)。jobs 檔:
+      後製:連音 → 清晰度(整句,再疊字詞;修訂 1 起為方案 C,不含低通)→ 語調(TD-PSOLA)。jobs 檔:
         {"jobs": [{"id": ^[0-9a-f]{8,32}$(輸出 <out>/<id>.wav), "input": 「十六進位 id + .wav」(<out> 內的
                    一般檔,不可是符號連結), "chars": 估計字界用的字數(1–500), "connect": 0–100, "clarity": 0–100,
                    "word_clarity": [{"start", "end", "value": 0–100}](字索引以 chars 計,≤ 32 段、不重疊),
                    "pitch": null 或 {"points": [[位置 0–1, 半音 −6–6]](2–16 點、位置嚴格遞增), "roundness": 0–100}}]}
       全部參數為預設(連音 0、清晰度 100、無字詞、無語調)時原樣複製輸入(逐位元組相同,不 import numpy);
       其他情況只 import BreezyVoice venv 已有的 numpy、scipy、librosa、soundfile,不載入任何模型、不連網。
-      每句寫完即在 stdout 印一行 {"id", "seconds"}。只在 --out 目錄內讀寫。
+      每句寫完即在 stdout 印一行 {"id", "seconds", "pitch_points"}(修訂 1 T11:pitch_points 為實際套用的
+      語調內部點 [[位置, 半音], …]——使用者點 + 峰前預降 / 谷前升點(吸附到同段有聲幀)、峰谷 × 1.2,
+      ±7.2 半音內;沒有語調時為 null)。語調曲線為 PCHIP 混合(圓弧 0% 折線、100% 單調三次)。
+      只在 --out 目錄內讀寫。
 
 stdout 只輸出上述 JSON:BreezyVoice 自己印到 stdout 的訊息一律改送 stderr。
 錯誤訊息一律為繁體中文、印到 stderr、不含本機絕對路徑與堆疊;結束碼:2 參數或輸入不合法、
@@ -240,14 +243,30 @@ GAP_REL_DB = -30.0          # 句內低於句峰值 −30 dB 的段落
 GAP_MIN, GAP_MAX = 0.03, 0.12  # 字間空隙 30–120 ms;長於 120 ms(多為逗號處)不動
 GAP_XFADE = 0.012           # 縮空隙切點的等功率交叉淡化
 BOUND_OVERLAP = 0.03        # 字界交叉淡化長度 = p × 30 ms
-# 清晰度(D7,v2)
+# 清晰度(修訂 1 R1-1:方案 C;取代 D7 v2 的 ①~⑥,拿掉 ⑤ 低通)
 N_FFT, HOP, LIFTER = 1024, 128, 30
 CONS_TOP = 35               # 子音幀 = 非靜音且 3 kHz 以上能量比為句內前 35%
-CONS_DB, CONS_HZ, CONS_MASK = 24.0, 2000, 0.03
-SMEAR_S, NEUTRAL, CONTRAST = 0.12, 0.3, 0.3
+CONS_MASK = 0.03            # 子音遮罩平滑長度(秒)
+LEN_W = 1.0                 # ① 子音包絡往前後母音包絡內插的權重(× c)
+C_ATT = 16.0                # ① 子音幀整幀衰減(dB,× c)
+SM_S = 0.16                 # ② 轉接區幅度譜移動平均長度(秒,× c)
+SM_OUT = 0.2                # ② 轉接區以外的平滑權重
+TRANS_PAD = 0.05            # ② 轉接區向前後擴張(秒)
+VALLEY_DB = 3.0             # ② 能量谷:比 150 ms 平滑能量低 3 dB 以上
+NEU_C = 0.3                 # ③ 往母音平均包絡靠的權重(× c)
+CONTRAST = 0.3              # ④ 音節對比降低(沿用)
+TILT_MAX = 12.0             # ⑤ 長期頻譜傾斜補償的上下限(dB)
 WORD_XFADE = 0.02           # 字詞清晰度區段邊緣交叉淡化(D8)
 # 語調(D11)
 F0_MIN, F0_MAX = 70, 400
+F0_HOP = 256                # pyin 的 hop(樣本);幀 i 的中心在 i × F0_HOP
+# 修訂 1(R1-7~R1-9):峰前預降、谷前升點、峰谷放大、吸附有聲幀
+PREDIP_SEMI = 1.0           # 預降(谷前為升)半音
+PEAK_GAIN = 1.2             # 峰谷值放大倍數
+PREDIP_FRAC = 0.3           # 插入點在「前一點 → 該點」這段的後 30%
+SNAP_GAP = 0.01             # 吸附後的位置與該段兩端至少相差 0.01
+INNER_LIMIT = 7.2           # 內部點上限(= 6 × 1.2)
+POINT_DIGITS = 6            # 內部點位置與半音取到小數 6 位(stdout 與實際套用的曲線用同一組值)
 
 np = None   # numpy:只在需要訊號處理時才載入(預設參數不 import)
 
@@ -452,7 +471,7 @@ def connect(y, sr, p, chars):
     return _xfade_join(np.split(z, bounds), ov)
 
 
-# --- 清晰度(D7 v2:咬字含糊程度) ---
+# --- 清晰度(咬字含糊程度;修訂 1 R1-1 方案 C) ---
 
 def _stft(y):
     import librosa
@@ -481,41 +500,79 @@ def _envelope(mag):
     return np.fft.rfft(cep, axis=0).real[:mag.shape[0]]
 
 
-def _consonant(y, sr, c):
-    """① 子音弱化:子音幀的 2 kHz 以上衰減 c × 24 dB(遮罩 30 ms 平滑)。"""
+def _classify(mag, sr):
+    """以 STFT 幅度譜分類幀:回 (freqs, active, cons, vow);子音幀 = 非靜音且 3 kHz 以上能量比為句內前
+    CONS_TOP%,母音幀 = 非靜音且不是子音幀。"""
+    freqs, hf, _, active = _frame_info(mag, sr)
+    if not active.any():
+        z = np.zeros(mag.shape[1], bool)
+        return freqs, active, z, z
+    cons = active & (hf >= np.percentile(hf[active], 100 - CONS_TOP))
+    return freqs, active, cons, active & ~cons
+
+
+def _lenite(y, sr, c):
+    """① 子音弱化(弱化而非削除):子音幀的倒頻譜包絡往前後最近的母音幀包絡(依距離線性內插)靠
+    c × LEN_W,保留子音本身的細部(雜訊)與原相位;先還原為原幀能量,再整幀衰減 c × C_ATT dB
+    (只在子音遮罩內,遮罩 CONS_MASK 平滑)。回 (處理後訊號, 子音遮罩)。"""
     from scipy.ndimage import uniform_filter1d
     S = _stft(y)
-    freqs, hf, _, active = _frame_info(np.abs(S), sr)
-    if not active.any():
-        return y
-    m = (active & (hf >= np.percentile(hf[active], 100 - CONS_TOP))).astype(float)
-    m = uniform_filter1d(m, size=max(1, int(CONS_MASK * sr / HOP)), mode="nearest")
-    att = 10 ** (-(c * CONS_DB) * m / 20)
-    gain = np.where((freqs >= CONS_HZ)[:, None], att[None, :], 1.0)
-    return _rms_match(_istft(S * gain, len(y)), y)
+    mag = np.abs(S)
+    _, _, cons, vow = _classify(mag, sr)
+    m = uniform_filter1d(cons.astype(float), size=max(1, int(CONS_MASK * sr / HOP)), mode="nearest")
+    if vow.sum() < 2:
+        return y, np.zeros(mag.shape[1])
+    E = _envelope(mag)
+    idx = np.where(vow)[0]
+    t = np.arange(mag.shape[1])
+    k = np.searchsorted(idx, t)
+    a = idx[np.maximum(k - 1, 0)]
+    b = idx[np.minimum(k, len(idx) - 1)]
+    w = np.where(b != a, (t - a) / np.where(b != a, b - a, 1), 0.0)
+    w = np.clip(w, 0, 1)
+    Ev = (1 - w)[None, :] * E[:, a] + w[None, :] * E[:, b]
+    lw = c * LEN_W * m
+    new = np.exp(np.log(mag + 1e-7) + lw[None, :] * (Ev - E))
+    e0 = (mag ** 2).sum(0)
+    e1 = (new ** 2).sum(0) + 1e-20
+    new *= np.sqrt(e0 / e1)[None, :] * 10 ** (-(c * C_ATT) * m / 20)[None, :]
+    return _rms_match(_istft(new * np.exp(1j * np.angle(S)), len(y)), y), m
 
 
-def _smear(y, sr, c):
-    """② 頻譜時間平滑:幅度譜沿時間 c × 120 ms 移動平均,相位用原音。"""
-    from scipy.ndimage import uniform_filter1d
-    w = max(1, int(round(c * SMEAR_S * sr / HOP)))
+def _smear_transitions(y, sr, c, m):
+    """② 轉接處時間平滑:轉接區(子音遮罩 > 0.2 的幀,或比 150 ms 平滑能量低 VALLEY_DB 以上的非靜音能量谷,
+    兩者再向前後各擴 TRANS_PAD)以權重 1 做 c × SM_S 的幅度譜移動平均,其他地方權重 SM_OUT;
+    權重本身以 30 ms 平滑;相位用原音。"""
+    from scipy.ndimage import binary_dilation, uniform_filter1d
+    w = max(1, int(round(c * SM_S * sr / HOP)))
     if w <= 1:
         return y
     S = _stft(y)
-    mag = uniform_filter1d(np.abs(S), size=w, axis=1, mode="nearest")
-    return _rms_match(_istft(mag * np.exp(1j * np.angle(S)), len(y)), y)
+    mag = np.abs(S)
+    _, _, edb, active = _frame_info(mag, sr)
+    sm = uniform_filter1d(edb, size=max(1, int(0.15 * sr / HOP)), mode="nearest")
+    valley = (edb < sm - VALLEY_DB) & active
+    zone = binary_dilation((m[:mag.shape[1]] > 0.2) | valley, iterations=max(1, int(TRANS_PAD * sr / HOP)))
+    wt = uniform_filter1d(np.where(zone, 1.0, SM_OUT), size=max(1, int(0.03 * sr / HOP)), mode="nearest")
+    Ms = uniform_filter1d(mag, size=w, axis=1, mode="nearest")
+    new = mag * (1 - wt) + Ms * wt
+    return _rms_match(_istft(new * np.exp(1j * np.angle(S)), len(y)), y)
 
 
-def _neutral(y, sr, c):
-    """③ 共振峰中性化:每幀包絡往全句平均包絡內插 c × 0.3。"""
+def _neutral_vowel(y, sr, c):
+    """③ 共振峰中性化(輔助):每幀包絡往母音幀的平均包絡靠 c × NEU_C,並保持每幀能量不變
+    (不改變整體頻譜傾斜);靜音幀不動。"""
     S = _stft(y)
     mag = np.abs(S)
-    _, _, _, active = _frame_info(mag, sr)
-    if not active.any():
+    _, active, _, vow = _classify(mag, sr)
+    if not vow.any():
         return y
     env = _envelope(mag)
-    gain = np.exp(c * NEUTRAL * (env[:, active].mean(1, keepdims=True) - env))
+    gain = np.exp(c * NEU_C * (env[:, vow].mean(1, keepdims=True) - env))
     gain[:, ~active] = 1.0
+    e0 = (mag ** 2).sum(0)
+    e1 = ((mag * gain) ** 2).sum(0) + 1e-20
+    gain *= np.sqrt(e0 / e1)[None, :]
     return _rms_match(_istft(S * gain, len(y)), y)
 
 
@@ -530,20 +587,38 @@ def _contrast(y, sr, c):
     return _rms_match(_istft(S * 10 ** (gdb / 20)[None, :], len(y)), y)
 
 
+def _tilt_comp(z, y, sr):
+    """⑤ 長期頻譜傾斜補償(取代 D7 v2 的低通):以原音 y 判定的母音幀,比較原音與處理後 z 的長期平均功率譜,
+    於 1/3 八度平滑(60 Hz 以下以 60 Hz 計)後取差值,上下各限 TILT_MAX dB,作為全句的固定 EQ 套回;
+    ⑥ 最後 RMS 對齊原音。"""
+    Sy, Sz = _stft(y), _stft(z)
+    my = np.abs(Sy)
+    freqs, _, _, vow = _classify(my, sr)
+    if vow.sum() < 3:
+        return _rms_match(z, y)
+    ly = (my[:, vow] ** 2).mean(1)
+    lz = (np.abs(Sz[:, vow]) ** 2).mean(1)
+    g = np.zeros_like(freqs)
+    for i, f in enumerate(freqs):
+        f = max(f, 60.0)
+        sel = (freqs >= f / 2 ** (1 / 6)) & (freqs <= f * 2 ** (1 / 6))
+        g[i] = 10 * np.log10(ly[sel].mean() + 1e-20) - 10 * np.log10(lz[sel].mean() + 1e-20)
+    g = np.clip(g, -TILT_MAX, TILT_MAX)
+    return _rms_match(_istft(Sz * (10 ** (g / 20))[:, None], len(z)), y)
+
+
 def clarity(y, sr, p):
-    """清晰度 p(0–100):100 不處理;c = 1 − p/100,依序 ①~④,p < 25 時 ⑤ 2 階低通,⑥ RMS 對齊原音。"""
+    """清晰度 p(0–100,修訂 1 方案 C):100 不處理(回傳輸入本身);c = 1 − p/100,依序
+    ① 子音弱化 → ② 轉接處時間平滑 → ③ 共振峰中性化 → ④ 音節對比降低 → ⑤ 長期頻譜傾斜補償 → ⑥ RMS 對齊原音。
+    不使用低通;輸出長度不變。"""
     if p >= 100 or len(y) < N_FFT:
         return y
-    from scipy.signal import butter, sosfiltfilt
     c = 1 - p / 100
-    z = _consonant(y, sr, c)
-    z = _smear(z, sr, c)
-    z = _neutral(z, sr, c)
+    z, m = _lenite(y, sr, c)
+    z = _smear_transitions(z, sr, c, m)
+    z = _neutral_vowel(z, sr, c)
     z = _contrast(z, sr, c)
-    if p < 25:
-        fc = min(8000 * (5000 / 8000) ** (1 - 4 * p / 100), sr / 2 * 0.95)
-        z = sosfiltfilt(butter(2, fc, btype="low", fs=sr, output="sos"), z)
-    return _rms_match(z, y)
+    return _tilt_comp(z, y, sr)
 
 
 def word_clarity(base, y, sr, spans, chars):
@@ -571,41 +646,101 @@ def word_clarity(base, y, sr, spans, chars):
     return out
 
 
-# --- 語調(D9~D11) ---
+# --- 語調(D9~D11;修訂 1 R1-6~R1-10) ---
+
+def snap_voiced(times, voiced, x0, x1, xd):
+    """吸附有聲幀(R1-8,純 Python)。times:各幀中心的相對位置(0–1,遞增);voiced:各幀是否有聲。
+    xd 所在幀(中心最近者)有聲時回傳 xd;否則回傳開區間 (x0, x1) 內、與 x0、x1 至少相差 SNAP_GAP、
+    離 xd 最近的有聲幀位置(距離相同取較前者);沒有則回傳 None。"""
+    if not times:
+        return None
+    k = min(range(len(times)), key=lambda i: (abs(times[i] - xd), i))
+    if voiced[k]:
+        return xd
+    eps = 1e-9
+    best = None
+    for t, v in zip(times, voiced):
+        if v and t >= x0 + SNAP_GAP - eps and t <= x1 - SNAP_GAP + eps and x0 < t < x1:
+            if best is None or abs(t - xd) < abs(best - xd) - eps:
+                best = t
+    return best
+
+
+def _clip_semi(v):
+    return max(-INNER_LIMIT, min(INNER_LIMIT, v))
+
+
+def expand_points(points, voiced_at):
+    """使用者關鍵點 → 實際套用的內部點(R1-7、R1-9;純 Python、不 import numpy)。
+
+    由左至右逐段:中間點且 semi > 0 且大於前一點為峰,semi < 0 且小於前一點為谷(首尾點不處理);
+    峰(谷)前在「前一點 → 該點」這段的後 PREDIP_FRAC 處插入一點,值 = 使用者原始折線在該處的值 ∓ PREDIP_SEMI;
+    峰谷值 × PEAK_GAIN。計算一律以使用者原始點為準。voiced_at(x0, x1, xd) 回傳吸附後的位置或 None
+    (None = 該段沒有有聲幀,不插入;峰谷仍放大);傳 None 表示不吸附。內部點截到 ±INNER_LIMIT。
+    回傳 {"points": 全部內部點, "auto": 自動補點, "amplified": 放大後的峰谷},每點為 [位置, 半音]。"""
+    pts = [(float(x), float(v)) for x, v in points]
+    out, auto, amp = [[pts[0][0], pts[0][1]]], [], []
+    last = len(pts) - 1
+    for i in range(1, len(pts)):
+        (x0, y0), (x1, y1) = pts[i - 1], pts[i]
+        peak = 0 < i < last and y1 > 0 and y1 > y0
+        valley = 0 < i < last and y1 < 0 and y1 < y0
+        if not (peak or valley):
+            out.append([x1, y1])
+            continue
+        xd = x1 - PREDIP_FRAC * (x1 - x0)
+        pos = xd if voiced_at is None else voiced_at(x0, x1, xd)
+        if pos is not None:
+            lin = y0 + (y1 - y0) * (pos - x0) / (x1 - x0)
+            q = [round(pos, POINT_DIGITS), round(_clip_semi(lin - PREDIP_SEMI if peak else lin + PREDIP_SEMI),
+                                                 POINT_DIGITS)]
+            out.append(q)
+            auto.append(list(q))
+        q = [x1, round(_clip_semi(y1 * PEAK_GAIN), POINT_DIGITS)]
+        out.append(q)
+        amp.append(list(q))
+    return {"points": out, "auto": auto, "amplified": amp}
+
+
+def _curve(points, roundness):
+    """PCHIP 混合曲線(R1-6)的向量化函式:f(t) = (1 − r) × 折線(t) + r × PCHIP(t),r = 圓弧 / 100;
+    PCHIP 為 scipy `PchipInterpolator`;t 限在第一點與最後一點之間(點外維持端點值)。"""
+    xs = np.array([p[0] for p in points], float)
+    ys = np.array([p[1] for p in points], float)
+    r = roundness / 100
+    pc = None
+    if r > 0:
+        from scipy.interpolate import PchipInterpolator
+        pc = PchipInterpolator(xs, ys)
+
+    def f(t):
+        tt = np.clip(np.asarray(t, float), xs[0], xs[-1])
+        lin = np.interp(tt, xs, ys)
+        return lin if pc is None else (1 - r) * lin + r * pc(tt)
+    return f
+
 
 def pitch_curve(points, roundness, t):
-    """折線 + 圓弧(D10):每個中間關鍵點以二次貝茲取代尖角,切入 / 切出距離 = 圓弧 × 相鄰線段長 ÷ 2;
-    第一點之前與最後一點之後維持端點值。t 為 0–1 的相對位置(陣列)。"""
-    r = roundness / 100
-    pts = [np.array(p, float) for p in points]
-    path = [pts[0]]
-    for i in range(1, len(pts) - 1):
-        p0, p1, p2 = pts[i - 1], pts[i], pts[i + 1]
-        a = p1 + (p0 - p1) * r * 0.5
-        b = p1 + (p2 - p1) * r * 0.5
-        for s in np.linspace(0, 1, 24):
-            path.append((1 - s) ** 2 * a + 2 * (1 - s) * s * p1 + s ** 2 * b)
-    path.append(pts[-1])
-    path = np.array(path)
-    order = np.argsort(path[:, 0], kind="stable")
-    return np.interp(t, path[order, 0], path[order, 1])
+    """語調曲線(R1-6):PCHIP 混合,一定經過 points 的每一點。points 為實際套用的內部點
+    (`expand_points` 的 points);t 為 0–1 的相對位置(陣列)。"""
+    return _curve(points, roundness)(t)
 
 
 def _f0(y, sr):
     import librosa
-    f0, vflag, _ = librosa.pyin(y, fmin=F0_MIN, fmax=F0_MAX, sr=sr, frame_length=1024, hop_length=256)
+    f0, vflag, _ = librosa.pyin(y, fmin=F0_MIN, fmax=F0_MAX, sr=sr, frame_length=1024, hop_length=F0_HOP)
     return f0, vflag
 
 
-def psola(y, sr, semitone_at):
+def psola(y, sr, semitone_at, f0v=None):
     """TD-PSOLA:依 pyin 的 F0 放音高標記,合成端以「週期 ÷ 音高比」的間距重放 2 週期 Hann 窗(長度不變);
-    無聲段每 5 ms 原樣重放。semitone_at(秒) → 半音。"""
-    f0, vflag = _f0(y.astype(np.float32), sr)
+    無聲段每 5 ms 原樣重放。semitone_at(秒) → 半音。f0v = (f0, 有聲旗標),省略時就地估計。"""
+    f0, vflag = _f0(y.astype(np.float32), sr) if f0v is None else f0v
     out = np.zeros(len(y) + sr // 10)
     unv = max(1, int(0.005 * sr))
     marks, t = [], 0
     while t < len(y):
-        i = min(int(t / 256), len(f0) - 1)
+        i = min(int(t / F0_HOP), len(f0) - 1)
         if vflag[i] and not np.isnan(f0[i]):
             per = max(2, int(sr / f0[i]))
             w = y[t:t + per]
@@ -636,22 +771,32 @@ def psola(y, sr, semitone_at):
 
 
 def apply_pitch(y, sr, pitch):
+    """套用語調(R1-6~R1-9):只估一次 F0(TD-PSOLA 與吸附共用同一組有聲旗標),自動補點吸附到同段有聲幀,
+    以 PCHIP 混合曲線做 TD-PSOLA。回傳 (處理後音訊, 實際套用的內部點 [[位置, 半音], …])。"""
     dur = len(y) / sr
+    exp = expand_points(pitch["points"], None)
     if dur <= 0:
-        return y
-    pts, r = pitch["points"], pitch["roundness"]
-    return _rms_match(psola(y, sr, lambda t: float(pitch_curve(pts, r, min(1.0, t / dur)))), y)
+        return y, exp["points"]
+    f0, vflag = _f0(y.astype(np.float32), sr)
+    times = [i * F0_HOP / sr / dur for i in range(len(f0))]
+    voiced = [bool(v) and not bool(np.isnan(f)) for f, v in zip(f0, vflag)]
+    exp = expand_points(pitch["points"], lambda x0, x1, xd: snap_voiced(times, voiced, x0, x1, xd))
+    f = _curve(exp["points"], pitch["roundness"])
+    z = psola(y, sr, lambda t: float(f(min(1.0, t / dur))), (f0, vflag))
+    return _rms_match(z, y), exp["points"]
 
 
 def shape_audio(y, sr, job):
-    """D12 的順序:連音 → 清晰度(整句,再疊字詞)→ 語調。y 為單聲道 float64。"""
+    """D12 的順序:連音 → 清晰度(整句,再疊字詞)→ 語調。y 為單聲道 float64。
+    回傳 (處理後音訊, 實際套用的語調內部點或 None)。"""
     z = connect(y, sr, job["connect"] / 100, job["chars"])
     if job["clarity"] < 100 or job["word_clarity"]:
         base = clarity(z, sr, job["clarity"])
         z = word_clarity(base, z, sr, job["word_clarity"], job["chars"])
+    points = None
     if job["pitch"] is not None:
-        z = apply_pitch(z, sr, job["pitch"])
-    return z
+        z, points = apply_pitch(z, sr, job["pitch"])
+    return z, points
 
 
 def cmd_shape(args, emit):
@@ -661,6 +806,7 @@ def cmd_shape(args, emit):
     for n, job in enumerate(jobs, 1):
         final = os.path.join(args.out, f"{job['id']}.wav")
         tmp = os.path.join(args.out, f"{job['id']}.part.wav")
+        points = None
         try:
             if _is_default(job):
                 shutil.copyfile(job["input"], tmp)
@@ -675,7 +821,8 @@ def cmd_shape(args, emit):
                                           3) from None
                 y, sr = sf.read(job["input"], dtype="float64", always_2d=True)
                 y = y.mean(axis=1)
-                z = np.clip(shape_audio(y, sr, job), -1.0, 1.0)
+                z, points = shape_audio(y, sr, job)
+                z = np.clip(z, -1.0, 1.0)
                 sf.write(tmp, z, sr, subtype="PCM_16", format="WAV")
                 seconds = round(len(z) / sr, 3)
             os.replace(tmp, final)
@@ -687,7 +834,7 @@ def cmd_shape(args, emit):
             except OSError:
                 pass
             raise WorkerError(f"✗ 第 {n} 句({job['id']})後製失敗:{type(e).__name__}", 4) from None
-        emit({"id": job["id"], "seconds": seconds})
+        emit({"id": job["id"], "seconds": seconds, "pitch_points": points})
 
 
 def _isolate_stdout():

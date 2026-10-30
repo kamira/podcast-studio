@@ -26,6 +26,9 @@
   (CHG-20261029-01 T5)屬性面板的連音、清晰度拉桿與字詞清晰度;截圖 prosody.png。
   (CHG-20261029-01 T6)時間軸語調折線(新增、拖曳、刪除關鍵點、圓弧)與預覽播放後製檔;截圖 pitch.png。後製的 shape worker
   以本機 Python 替身代替(輸入照抄成輸出,只用標準庫)。
+  (CHG-20261029-01 修訂 1 T13)清晰度低於 25% 的警告(整句與字詞)、時間軸的自動補點與放大峰谷、
+  合音由詞庫套用時帶顯示字;截圖 clarity-warn.png、pitch-auto.png。替身 shape worker 以
+  `breezy_worker.expand_points` 算出 pitch_points(其中一點示意吸附,位置與前端試算不同)。
 不帶參數兩組都跑(先 canvas 再 editor);`--only editor` 只跑 editor。
 
 editor 的替身:語音合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身腳本
@@ -596,8 +599,8 @@ SCRIPT_EDITED = SCRIPT.replace("四十年", "五十年")
 SYNTH_SECONDS = 1.6          # 替身 worker 每句的長度
 OWN_WAV_SECONDS = 1.2        # 自錄音檔長度
 VOICE_TEXT = "這是聲線逐字稿(UI 檢查替身)。"
-EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "pitch.png",
-                "fusion-typing.png", "fusion.png", "disclaimer.png")
+EDITOR_SHOTS = ("home.png", "wizard.png", "full.png", "editor.png", "tone.png", "prosody.png", "clarity-warn.png",
+                "pitch.png", "pitch-auto.png", "fusion-typing.png", "fusion.png", "fusion-rows.png", "disclaimer.png")
 CANVAS_SHOTS = ("canvas.png", "dnd.png", "settings.png", "settings-fusion.png")
 STUB_ZHUYIN = {"大": "ㄉㄚˋ", "家": "ㄐㄧㄚ", "好": "ㄏㄠˇ",
                # CHG-20261029-01 T9:合音規則推導需要的字
@@ -639,10 +642,17 @@ for n, job in enumerate(body["jobs"]):
 
 
 # 替身 shape worker(CHG-20261029-01):參數格式同 breezy_worker.py shape;輸入照抄成輸出,
-# 呼叫紀錄寫到同目錄的 shape.log(一行一次呼叫)。
+# 呼叫紀錄寫到同目錄的 shape.log(一行一次呼叫)。修訂 1 T11 起 stdout 同真 worker 帶 pitch_points
+# (沒有語調時為 null)。修訂 1 T13:有語調時以 `breezy_worker.expand_points`(純 Python)展開;
+# 替身沒有 F0,吸附以固定規則示意——落在 0.425 的插入點改到 0.405(同 rev1-after mockup),
+# 其餘不動,因此畫面若誤用前端試算(不含吸附)會與 post.pitch_points 差一截。
 FAKE_SHAPE = """# -*- coding: utf-8 -*-
 import json, os, shutil, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, __REPO__)
+from breezy_worker import expand_points
+def snap(x0, x1, xd):
+    return 0.405 if abs(xd - 0.425) < 1e-9 else xd
 args = sys.argv[1:]
 jobs_path, out = args[args.index("--jobs") + 1], args[args.index("--out") + 1]
 with open(jobs_path, encoding="utf-8") as f:
@@ -651,9 +661,10 @@ with open(os.path.join(HERE, "shape.log"), "a", encoding="utf-8") as f:
     f.write(json.dumps({"jobs": body["jobs"]}, ensure_ascii=False) + "\\n")
 for job in body["jobs"]:
     shutil.copyfile(os.path.join(out, job["input"]), os.path.join(out, job["id"] + ".wav"))
-    sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0}) + "\\n")
+    pts = expand_points(job["pitch"]["points"], snap)["points"] if job["pitch"] else None
+    sys.stdout.write(json.dumps({"id": job["id"], "seconds": 0, "pitch_points": pts}) + "\\n")
     sys.stdout.flush()
-"""
+""".replace("__REPO__", repr(str(REPO)))
 
 
 def sine_wav(seconds: float, rate: int = 22050, freq: float = 330.0) -> bytes:
@@ -785,6 +796,17 @@ async ([a, b]) => {
 """
 
 
+JS_PITCH_SCREEN = """(sel) => {
+  // 語調 SVG 上各元素中心相對 SVG 左上角的座標(修訂 1 T13)
+  const svg = document.querySelector(sel);
+  const r = svg.getBoundingClientRect();
+  const c = (e) => { const b = e.getBoundingClientRect(); return [b.left + b.width / 2 - r.left, b.top + b.height / 2 - r.top]; };
+  return { w: r.width, h: r.height,
+           auto: Array.from(svg.querySelectorAll('.tl-pitch-auto')).map(c),
+           amp: Array.from(svg.querySelectorAll('.tl-pitch-amp')).map(c),
+           keys: Array.from(svg.querySelectorAll('.tl-pitch-key')).map(c) };
+}"""
+
 JS_MARK = """(word) => {
   const m = Array.from(document.querySelectorAll('.fusion-mirror .mk')).filter(e => e.textContent === word);
   return m.map(e => { const r = e.getClientRects()[0] || e.getBoundingClientRect();   // 跨行時取第一行
@@ -832,7 +854,7 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(pop).to_be_hidden()
     check(page.evaluate("document.activeElement.id") == "script-text", "標示出現後文稿框仍應保有焦點")
 
-    begin("文稿框:點擊「不知道」開浮動窗,選「啟用」→ 綠線、片段 fusions、浮層「不造」蓋住原詞")
+    begin("文稿框:點擊「不知道」開浮動窗,選「啟用」→ 綠線、片段 fusions(帶顯示字「不造」)、浮層「不造」蓋住原詞")
     m = marks("不知道")[0]
     page.mouse.click(m["x"], m["y"])
     expect(pop).to_be_visible()
@@ -841,7 +863,8 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(pop.locator("#fusion-pop-off")).to_have_text("停用")
     pop.locator("#fusion-pop-on").click()
     wait_until(lambda: seg_with("我也不知道。") is not None and seg_with("我也不知道。")["fusions"] == [
-        {"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}], "啟用後片段應有 3 字合音")
+        {"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon", "display": "不造"}],
+        f"啟用後片段應有 3 字合音且帶顯示字「不造」,實際 {(seg_with('我也不知道。') or {}).get('fusions')}")
     wait_until(lambda: any("mark-on" in x["cls"] for x in marks("不知道")), "啟用後應為綠色標記")
     pill = page.locator(".fusion-pill")
     expect(pill).to_have_count(1)
@@ -855,6 +878,14 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(pop).to_be_visible()
     page.locator("#script-status").click()
     expect(pop).to_be_hidden()
+
+    begin("文稿框啟用「不知道」後重新合成:替身 synth worker 收到顯示字「不造」、不含注音標註(修訂 1 R1-4)")
+    n = len(calls())
+    page.locator("#script-synth").click()
+    wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "應重新合成這一句")
+    sent = [j["text"] for j in calls()[-1]]
+    check(sent == ["我也不造。"], f"送模型的文字應為顯示字且不含 [:,實際 {sent}")
+    check(seg_with("我也不知道。")["audio"] is not None, "該句應已合成")
 
     begin("文稿框:另一處「是這樣」選「停用」→ 紅線、fusion_off 有該位置、fusions 沒有")
     append_text("是這樣啊。")
@@ -941,10 +972,15 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(fpop.locator(".fusion-derive")).to_contain_text("ㄓ + ㄧㄤˋ")
     expect(fpop.locator(".fusion-derive")).to_contain_text("顎化")
     expect(fpop.locator(".fusion-input")).to_have_value("ㄐㄧㄤˋ")
+    # T14:彈出框維持原樣,不含「送模型」「字幕」兩列(兩列在屬性面板「已套用」下方)
+    expect(fpop.locator(".fusion-sent")).to_have_count(0)
+    expect(fpop.locator(".fusion-subtitle")).to_have_count(0)
     n = len(calls())
     fpop.get_by_role("button", name="套用").click()
     wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
-    check(seg_with("是這樣啊，你不知道嗎。")["fusions"] == [{"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "rule"}],
+    check(calls()[-1][0]["text"] == "是這[:ㄐㄧㄤˋ]啊，你不知道嗎。", f"送模型的文字不符:{calls()[-1][0]['text']}")
+    check(seg_with("是這樣啊，你不知道嗎。")["fusions"] == [{"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "rule",
+                                                          "display": ""}],
           f"fusions 不符:{seg_with('是這樣啊，你不知道嗎。')['fusions']}")
     sent = calls()[-1][0]["text"]
     check("是這[:ㄐㄧㄤˋ]啊" in sent and "樣" not in sent, f"送模型的文字不符:{sent}")
@@ -960,10 +996,22 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     n = len(calls())
     fpop.get_by_role("button", name="套用").click()
     wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
-    check(seg_with("那裡很好。")["fusions"] == [{"index": 0, "length": 2, "zhuyin": "ㄋㄧˇ", "source": "rule"}],
+    check(seg_with("那裡很好。")["fusions"] == [{"index": 0, "length": 2, "zhuyin": "ㄋㄧˇ", "source": "rule",
+                                                "display": ""}],
           f"fusions 不符:{seg_with('那裡很好。')['fusions']}")
     sent = calls()[-1][0]["text"]
     check("那[:ㄋㄧˇ]" in sent and "裡" not in sent, f"送模型的文字不符:{sent}")
+    begin("T14 屬性面板合音模式:規則推導的「那裡」套用後「已套用」下方送模型列為 那[:ㄋㄧˇ]很好。(與 worker 相同)、字幕列為原文")
+    select_seg(s5["id"])
+    psent, psub = page.locator("#props-body .fusion-sent"), page.locator("#props-body .fusion-subtitle")
+    expect(psent).to_have_text(sent)
+    check(sent == "那[:ㄋㄧˇ]很好。", f"送模型的文字不符:{sent}")
+    expect(psub).to_have_text("那裡很好。(原文不變)")
+    check(psent.evaluate("e => e.children.length") == 0, "送模型列應只含文字(textContent)")
+    check(page.evaluate("""() => { const l = document.querySelector('#props-body .fusion-list');
+        const a = l && l.nextElementSibling; const b = a && a.nextElementSibling;
+        return !!(a && b && a.querySelector('.fusion-sent') && b.querySelector('.fusion-subtitle')); }"""),
+          "兩列應緊接在「已套用」列表下方,依序為送模型、字幕")
     expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s5["id"]}"]').first).to_contain_text("那裡很好")
 
     begin("合音模式:詞庫有停用的「攤販」時按「存入合音詞庫」先確認覆寫;取消不變、接受才寫入")
@@ -996,19 +1044,30 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     page.keyboard.press("Escape")
     settings.delete_fusion("攤販")
 
-    begin("合音模式:選三字「不知道」預填詞庫值 ㄅㄨˋ ㄗㄠˋ,套用後送模型含 不[:ㄅㄨˋ]知[:ㄗㄠˋ] 不含「道」")
+    begin("合音模式:選三字「不知道」預填詞庫值 ㄅㄨˋ ㄗㄠˋ,套用後帶顯示字「不造」、送模型含「不造」不含 不[:")
     select_seg(s1["id"])
     drag_chars(6, 8)
     expect(fpop.locator(".fusion-input")).to_have_value("ㄅㄨˋ ㄗㄠˋ")
     expect(fpop.locator(".fusion-derive")).to_contain_text("詞庫")
+    pb = fpop.bounding_box()
+    vw = page.evaluate("document.documentElement.clientWidth")
+    check(pb["x"] >= 0 and pb["x"] + pb["width"] <= vw, f"T14:彈出框應在視窗內(不超出右緣):{pb},視窗寬 {vw}")
     n = len(calls())
     fpop.get_by_role("button", name="套用").click()
     wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成")
     sent = calls()[-1][0]["text"]
-    check("不[:ㄅㄨˋ]知[:ㄗㄠˋ]" in sent and "道" not in sent, f"送模型的文字不符:{sent}")
+    check(sent == "是這[:ㄐㄧㄤˋ]啊，你不造嗎。", f"送模型的文字不符:{sent}")
+    check(seg_with("是這樣啊，你不知道嗎。")["fusions"] == [
+        {"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "rule", "display": ""},
+        {"index": 6, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon", "display": "不造"}],
+        f"fusions 不符:{seg_with('是這樣啊，你不知道嗎。')['fusions']}")
     expect(page.locator(f'#tl-voice [data-segment="{s1["id"]}"] .tl-badge')).to_have_text("⟲ 合音 2")
     select_seg(s1["id"])
     shot("fusion.png")
+    begin("T14 屬性面板合音模式:詞庫「不知道」套用後送模型列為顯示字「不造」(含已套用的「這樣」,與 worker 相同)、字幕列為原文")
+    expect(psent).to_have_text(sent)
+    expect(psub).to_have_text("是這樣啊，你不知道嗎。(原文不變)")
+    page.locator("#props-body").screenshot(path=str(SHOT_DIR / "fusion-rows.png"))
 
     begin("合音模式:「就是」顯示不合音原因、套用停用;選五字時套用停用")
     s2 = seg_with("就是這家攤販。")
@@ -1036,7 +1095,7 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     page.keyboard.press("Escape")
     settings.save_fusion("是這樣", "ㄕˋ ㄐㄧㄤˋ", True)
 
-    begin("合音模式:選預設詞「這樣」(詞庫啟用)套用後 source 為 lexicon、送模型含 [:ㄐㄧㄤˋ] 不含「樣」、字幕仍為原文")
+    begin("合音模式:選預設詞「這樣」(詞庫啟用)套用後 source 為 lexicon、帶顯示字「醬」、送模型為「就是醬。」、字幕仍為原文")
     select_seg(s3["id"])
     drag_chars(2, 3)
     expect(fpop).to_be_visible()
@@ -1045,10 +1104,24 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     n = len(calls())
     fpop.get_by_role("button", name="套用").click()
     wait_until(lambda: len(calls()) == n + 1 and not page.evaluate("window.Studio.Voice.running"), "套用後應重新合成這一句")
-    check(seg_with("就是這樣。")["fusions"] == [{"index": 2, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "lexicon"}],
+    check(seg_with("就是這樣。")["fusions"] == [{"index": 2, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "lexicon",
+                                              "display": "醬"}],
           f"fusions 不符:{seg_with('就是這樣。')['fusions']}")
     sent = calls()[-1][0]["text"]
-    check("[:ㄐㄧㄤˋ]" in sent and "樣" not in sent, f"送模型的文字不符:{sent}")
+    check(sent == "就是醬。", f"送模型的文字不符:{sent}")
+    begin("T14 屬性面板合音模式:詞庫「這樣」套用後送模型列為「就是醬。」(與 worker 相同);按 ✕ 移除後兩列即時更新")
+    select_seg(s3["id"])
+    expect(psent).to_have_text(sent)
+    expect(psub).to_have_text("就是這樣。(原文不變)")
+    n = len(calls())
+    page.locator("#props-body .fusion-item button").first.click()
+    expect(psent).to_have_text("就是這樣。")
+    expect(psub).to_have_text("就是這樣。(原文不變)")
+    wait_until(lambda: seg_with("就是這樣。")["fusions"] == [] and seg_with("就是這樣。")["audio"]
+               and not page.evaluate("window.Studio.Voice.running"), "移除後應回到原文的音檔")
+    # 原文「就是這樣。」先前已合成過,移除後命中合成快取、不一定再呼叫 worker;有呼叫時文字須與送模型列相同
+    check(len(calls()) == n or calls()[-1][0]["text"] == "就是這樣。", f"移除後送模型的文字不符:{calls()[n:]}")
+    expect(psent).to_have_text("就是這樣。")
     expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s3["id"]}"]').first).to_contain_text("就是這樣")
 
     begin("屬性面板句子文字:「不知道」顯示黃色波浪底線,點擊開同一個浮動窗;停用變紅、再點選啟用變綠")
@@ -1074,7 +1147,7 @@ def fusion_editor_steps(page, expect, begin, shot, proj, calls, wait_until, toas
     expect(pop).to_be_visible()
     pop.locator("#fusion-pop-on").click()
     wait_until(lambda: seg_with("他也不知道。")["fusions"] == [
-        {"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon"}]
+        {"index": 2, "length": 3, "zhuyin": "ㄅㄨˋ ㄗㄠˋ", "source": "lexicon", "display": "不造"}]
         and seg_with("他也不知道。")["fusion_off"] == [], "屬性面板選啟用應寫入 fusions")
     expect(page.locator("#props-body .prop-text .mk")).to_have_class(re.compile(r"\bmark-on\b"))
     expect(page.locator(f'#tl-cues .tl-cue[data-segment="{s6["id"]}"]').first).to_contain_text("他也不知道")
@@ -1478,6 +1551,96 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         check(len(calls()) == n_calls, "改字詞清晰度不應呼叫合成 worker")
         shot("prosody.png")
 
+        # CHG-20261029-01 修訂 1 T13:清晰度低於 25% 只警告、不阻擋(R1-3)
+        warn_text = "⚠ 低於 25% 會過度含糊、聲音偏悶,不建議使用;需要含糊感時建議用 50% 或 25%。"
+        clar_sel = '#props-body [data-hook="prosody"] input[aria-label="清晰度(百分比)"]'
+        warn = page.locator('#props-body [data-hook="prosody"] .clarity-warn')
+
+        def no_error_toast():
+            # 只警告、不阻擋:不跳出錯誤或警告訊息(修改成功的一般提示照舊)
+            t = page.evaluate("() => { const t = document.getElementById('toast');"
+                              " return [t.hidden, t.classList.contains('toast-error'), t.textContent]; }")
+            return t[0] or (not t[1] and "低於 25%" not in t[2])
+
+        def drag_word(a, b):
+            ca = page.locator(f'#props-body .tone-char[data-index="{a}"]').bounding_box()
+            cb = page.locator(f'#props-body .tone-char[data-index="{b}"]').bounding_box()
+            page.mouse.move(ca["x"] + ca["width"] / 2, ca["y"] + ca["height"] / 2)
+            page.mouse.down()
+            page.mouse.move(cb["x"] + cb["width"] / 2, cb["y"] + cb["height"] / 2, steps=4)
+            page.mouse.up()
+
+        begin("屬性面板:整句清晰度拖到 24% 即時出現警告(role=status),拖到 25% 消失")
+        page.locator('#props-body .tone-mode[data-mode="tone"]').click()
+        clar = page.locator(clar_sel)
+        expect(warn).to_be_hidden()
+        clar.evaluate("(e) => { e.value = '24'; e.dispatchEvent(new Event('input', {bubbles: true})); }")
+        expect(warn).to_be_visible()
+        expect(warn).to_contain_text("建議用 50% 或 25%")
+        expect(warn).to_have_text(warn_text)
+        expect(warn).to_have_attribute("role", "status")
+        check(proj().segments[0]["clarity"] is None, "拖動中(還沒放開)不應送出")
+        clar.evaluate("(e) => { e.value = '25'; e.dispatchEvent(new Event('input', {bubbles: true})); }")
+        expect(warn).to_be_hidden()
+
+        begin("屬性面板:放開在 24% 照常存檔(不阻擋、不跳錯誤訊息),警告仍在;按「預設」後消失")
+        clar.evaluate("(e) => { e.value = '24'; e.dispatchEvent(new Event('input', {bubbles: true}));"
+                      " e.dispatchEvent(new Event('change', {bubbles: true})); }")
+        wait_until(lambda: proj().segments[0]["clarity"] == 24, "放開在 24 後清晰度應存成 24")
+        check(no_error_toast(), "清晰度 24% 不應跳出錯誤或警告訊息")
+        expect(page.locator(clar_sel)).to_have_value("24")
+        expect(warn).to_be_visible()
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "清晰度改了之後應完成後製")
+        page.locator('#props-body [data-hook="prosody"] .pct-row').nth(1).locator(".pct-reset").click()
+        wait_until(lambda: proj().segments[0]["clarity"] is None, "按「預設」後清晰度應為 null")
+        expect(warn).to_be_hidden()
+
+        begin("字詞清晰度彈出框:「收聽」設 15% 出現同一則警告且「套用」可按,套用後存入")
+        page.locator('#props-body .tone-mode[data-mode="clarity"]').click()
+        expect(page.locator('#props-body .tone-char[data-index="6"] .tone-glyph')).to_have_text("收")
+        drag_word(6, 7)
+        expect(wpop).to_be_visible()
+        wwarn = wpop.locator(".clarity-warn")
+        expect(wwarn).to_be_hidden()
+        wpop.locator("input[type=range]").fill("15")
+        expect(wpop.locator("output")).to_have_text("15%")
+        expect(wwarn).to_be_visible()
+        expect(wwarn).to_have_text(warn_text)
+        expect(wwarn).to_have_attribute("role", "status")
+        expect(wpop.get_by_role("button", name="套用")).to_be_enabled()
+        wpop.locator("input[type=range]").fill("25")
+        expect(wwarn).to_be_hidden()
+        wpop.locator("input[type=range]").fill("15")
+        expect(wwarn).to_be_visible()
+        wpop.get_by_role("button", name="套用").click()
+        wait_until(lambda: {"start": 6, "end": 8, "value": 15} in proj().segments[0]["word_clarity"],
+                   f"字詞清晰度應有 [6, 8) 15%,實際 {proj().segments[0]['word_clarity']}")
+        check(no_error_toast(), "字詞清晰度 15% 不應跳出錯誤或警告訊息")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "字詞清晰度改了之後應完成後製")
+
+        begin("重新載入頁面後,清晰度 20% 的片段仍顯示警告")
+        page.locator('#props-body .tone-mode[data-mode="tone"]').click()
+        page.locator(clar_sel).fill("20")
+        wait_until(lambda: proj().segments[0]["clarity"] == 20, "清晰度應存成 20")
+        wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "清晰度改了之後應完成後製")
+        page.reload()
+        expect(page.locator("#full-body")).to_be_visible()
+        page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[0]}"]').click()
+        expect(page.locator("#props-body .prop-title")).to_have_text("選取:片段 #1")
+        expect(page.locator(clar_sel)).to_have_value("20")
+        expect(warn).to_be_visible()
+        expect(warn).to_have_text(warn_text)
+        page.locator('#props-body .tone-mode[data-mode="clarity"]').click()
+        drag_word(6, 7)
+        expect(wpop).to_be_visible()
+        expect(wpop.locator(".clarity-warn")).to_be_visible()
+        shot("clarity-warn.png")
+        page.keyboard.press("Escape")
+        page.locator('#props-body .tone-mode[data-mode="tone"]').click()
+        page.locator('#props-body [data-hook="prosody"] .pct-row').nth(1).locator(".pct-reset").click()
+        wait_until(lambda: proj().segments[0]["clarity"] is None, "按「預設」後清晰度應為 null")
+        expect(warn).to_be_hidden()
+
         begin("完整模式:自錄音檔的第 2 句,韻律拉桿停用")
         page.locator(f'#tl-voice .tl-seg[data-segment="{seg_ids[1]}"]').click()
         expect(page.locator("#props-body .prop-title")).to_have_text("選取:片段 #2")
@@ -1534,7 +1697,7 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("半音")
         check(len(calls()) == n_calls, "拖曳關鍵點不應呼叫合成 worker")
 
-        begin("屬性面板:圓弧 0% 與 100% 的折線不同(100% 含 Q 指令)")
+        begin("屬性面板:圓弧 0% 與 100% 的曲線不同(修訂 1 R1-6:PCHIP 混合,不再用二次貝茲)")
         rnd = page.locator('#props-body input[aria-label="圓弧(百分比)"]')
         rnd.fill("0")
         wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == 0, "圓弧應存成 0")
@@ -1544,7 +1707,7 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == 100, "圓弧應存成 100")
         expect(page.locator('#props-body input[aria-label="圓弧(百分比)"]')).to_have_value("100")
         d100 = page.locator(f"{seg0} svg.tl-pitch .tl-pitch-line").get_attribute("d")
-        check(d0 != d100 and "Q" in d100 and "Q" not in d0, f"圓弧 0% / 100% 的 path 應不同且 100% 含 Q:{d0} / {d100}")
+        check(d0 != d100 and "Q" not in d100, f"圓弧 0% / 100% 的 path 應不同且不含二次貝茲:{d0} / {d100}")
         wait_until(lambda: pj.is_post_fresh(proj().segments[0]), "改圓弧後應完成後製")
         shot("pitch.png")
 
@@ -1568,6 +1731,119 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         page.keyboard.press("Delete")
         wait_until(lambda: pitch_pts() is None, "剩 2 點時再刪應清除語調(pitch 為 null)")
         expect(keys).to_have_count(0)
+        check(len(calls()) == n_calls, "編輯語調不應呼叫合成 worker")
+
+        # CHG-20261029-01 修訂 1 T13:自動補點、放大峰谷與 PCHIP 混合曲線(R1-6~R1-10)
+        user5 = [{"pos": 0, "semi": 0}, {"pos": 0.25, "semi": 3}, {"pos": 0.5, "semi": -2},
+                 {"pos": 0.75, "semi": 2}, {"pos": 1, "semi": 0}]
+        svg_sel = f"{seg0} svg.tl-pitch.is-editable"
+
+        def pitch_screen():
+            """畫面上的自動補點、放大峰谷、使用者菱形中心(相對 SVG 左上角)與 SVG 大小。"""
+            return page.evaluate(JS_PITCH_SCREEN, svg_sel)
+
+        def to_screen(q, w, h):
+            # 同 timeline.js 的 semiToY:縱軸 ±7.2 半音(R1-9),上下各留 6 px
+            return [q[0] * w, h / 2 - q[1] / 7.2 * (h / 2 - 6)]
+
+        def near(a, b, tol):
+            return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+        def split_pp(pp):
+            user_pos = {p["pos"] for p in user5}
+            amp = [q for q in pp if q[0] in (0.25, 0.5, 0.75)]
+            auto = [q for q in pp if q[0] not in user_pos]
+            return auto, amp
+
+        def check_path_through(d, pts, w, h, label):
+            verts = [(float(a), float(b)) for a, b in re.findall(r"(-?[0-9.]+) (-?[0-9.]+)", d)]
+            for q in pts:
+                x, y = to_screen(q, w, h)
+                best = min(math.hypot(vx - x, vy - y) for vx, vy in verts)
+                check(best <= 0.5, f"{label}:曲線應經過實際套用的點 {q}(畫面 {x:.1f}, {y:.1f}),最近 {best:.2f} px")
+
+        begin("時間軸:語調 5 點 0、+3、−2、+2、0(圓弧 100%)後製完成後有 3 個自動補點與 3 個放大峰谷,位置與 post.pitch_points 一致")
+        page.locator(seg0).click()
+        expect(page.locator(svg_sel)).to_have_count(1)
+        sid0 = seg_ids[0]
+        page.evaluate("([id, pts]) => window.Studio.Edit.patchAndPost(window.Studio.Store.segment(id),"
+                      " {pitch: {points: pts, roundness: 100}}, '')", [sid0, user5])
+        wait_until(lambda: pitch_pts() == user5 and pj.is_post_fresh(proj().segments[0])
+                   and "pitch_points" in proj().segments[0]["post"], "語調 5 點的後製應完成且帶 pitch_points")
+        pp = proj().segments[0]["post"]["pitch_points"]
+        check(len(pp) == 8 and [0.405, 0.9] in [[round(a, 3), round(b, 3)] for a, b in pp],
+              f"替身應回傳 8 個內部點(含吸附到 0.405 的升點),實際 {pp}")
+        auto_pp, amp_pp = split_pp(pp)
+        expect(page.locator(f"{seg0} .tl-pitch-auto")).to_have_count(3)
+        expect(page.locator(f"{seg0} .tl-pitch-amp")).to_have_count(3)
+        expect(keys).to_have_count(5)
+        expect(page.locator(f"{seg0} .tl-pitch-line.is-estimate")).to_have_count(0)
+        scr = pitch_screen()
+        w, h = scr["w"], scr["h"]
+        for got, want, label in ((scr["auto"], auto_pp, "自動補點"), (scr["amp"], amp_pp, "放大峰谷")):
+            for q in want:
+                ex = to_screen(q, w, h)
+                check(any(near(g, ex, 1) for g in got), f"{label} {q} 應畫在 {ex} 附近(≤ 1 px),畫面 {got}")
+        for p_, g in zip(user5, scr["keys"]):
+            check(near(g, to_screen([p_["pos"], p_["semi"]], w, h), 1), f"使用者菱形位置不符:{p_} / {g}")
+        expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("關鍵點 5 個")
+        expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("自動補點 3 個(虛線,不可拖曳)")
+        expect(page.locator('#props-body [data-hook="pitch-props"]')).to_contain_text(
+            "曲線一律經過每個實際套用的點(含放大後的峰谷與自動補點)")
+        check_path_through(page.locator(f"{seg0} svg.tl-pitch .tl-pitch-line").get_attribute("d"), pp, w, h, "圓弧 100%")
+        for r_ in (0, 50, 100):
+            d = page.evaluate("([pp, r, w, h]) => window.Studio.pitchPath(pp, r, w, h)", [pp, r_, w, h])
+            check_path_through(d, pp, w, h, f"pitchPath 圓弧 {r_}%")
+        page.evaluate("() => { document.getElementById('toast').hidden = true; }")
+        shot("pitch-auto.png")
+        # 另存時間軸面板的放大圖(與 rev1-after-timeline.png 對照用;不列入 Interaction spec 的產出物)
+        page.locator("#panel-timeline").screenshot(path=str(SHOT_DIR / "pitch-auto-timeline.png"), scale="device")
+
+        begin("時間軸:拖曳自動補點不會移動它,使用者點數與 pitch.points 不變")
+        n_patch = len(stubs.shape_calls())
+        a0 = page.locator(f"{seg0} .tl-pitch-auto").first.bounding_box()
+        ax, ay = a0["x"] + a0["width"] / 2, a0["y"] + a0["height"] / 2
+        page.mouse.move(ax, ay)
+        page.mouse.down()
+        page.mouse.move(ax + 30, ay - 20, steps=6)
+        page.mouse.up()
+        page.wait_for_timeout(400)
+        check(pitch_pts() == user5, f"拖曳自動補點後 pitch.points 應不變,實際 {pitch_pts()}")
+        check(len(stubs.shape_calls()) == n_patch, "拖曳自動補點不應重做後製")
+        expect(keys).to_have_count(5)
+        expect(page.locator(f"{seg0} .tl-pitch-auto")).to_have_count(3)
+        a1 = page.locator(f"{seg0} .tl-pitch-auto").first.bounding_box()
+        check(abs(a1["x"] - a0["x"]) < 0.5 and abs(a1["y"] - a0["y"]) < 0.5, "自動補點不應被拖動")
+
+        begin("屬性面板:圓弧 50%、0% 後製完成後,畫出的曲線仍經過每個實際套用的點")
+        for r_ in (50, 0):
+            page.locator('#props-body input[aria-label="圓弧(百分比)"]').fill(str(r_))
+            wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == r_
+                       and pj.is_post_fresh(proj().segments[0]), f"圓弧 {r_}% 的後製應完成")
+            pp_r = proj().segments[0]["post"]["pitch_points"]
+            expect(page.locator(f"{seg0} .tl-pitch-line.is-estimate")).to_have_count(0)
+            scr = pitch_screen()
+            check_path_through(page.locator(f"{seg0} svg.tl-pitch .tl-pitch-line").get_attribute("d"),
+                               pp_r, scr["w"], scr["h"], f"畫面上的圓弧 {r_}%")
+
+        begin("時間軸:後製有效但沒有 pitch_points(快取命中)時,退回淡色試算(不含吸附)")
+        page.locator('#props-body input[aria-label="圓弧(百分比)"]').fill("100")
+        wait_until(lambda: proj().segments[0]["pitch"]["roundness"] == 100
+                   and pj.is_post_fresh(proj().segments[0]), "圓弧改回 100% 的後製應完成(快取命中)")
+        check("pitch_points" not in proj().segments[0]["post"],
+              f"快取命中且專案內沒有同鍵的 pitch_points 時不應帶此欄位:{proj().segments[0]['post']}")
+        expect(page.locator(f"{seg0} .tl-pitch-line.is-estimate")).to_have_count(1)
+        expect(page.locator(f"{seg0} .tl-pitch-auto.is-estimate")).to_have_count(3)
+        expect(page.locator(f"{seg0} .tl-pitch-amp.is-estimate")).to_have_count(3)
+        scr = pitch_screen()
+        est = [[0.175, 1.1], [0.425, 0.5], [0.675, -0.2]]      # R1-7 的例子(未吸附)
+        for q in est:
+            ex = to_screen(q, scr["w"], scr["h"])
+            check(any(near(g, ex, 1) for g in scr["auto"]), f"試算的自動補點 {q} 應畫在 {ex} 附近,畫面 {scr['auto']}")
+        expect(page.locator('#props-body [data-hook="pitch-info"]')).to_contain_text("自動補點 3 個")
+        page.locator('#props-body [data-hook="pitch-props"] button', has_text="清除語調").click()
+        wait_until(lambda: pitch_pts() is None and pj.is_post_fresh(proj().segments[0]), "清除語調後應完成後製")
+        expect(page.locator(f"{seg0} .tl-pitch-auto")).to_have_count(0)
         check(len(calls()) == n_calls, "編輯語調不應呼叫合成 worker")
 
         # CHG-20261029-01 T9:文稿框的合音標示(D40~D43)與聲調區「合音」模式(D23~D28、D37)
