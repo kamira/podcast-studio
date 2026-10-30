@@ -10,6 +10,8 @@
 //
 // 設定頁表單(T12):模型、審議席位子頁、還原預設、儲存(422 逐欄顯示)。
 //
+// CHG-20261022-02 T3:設定 › MCP 註冊子頁(McpPanel、mcpView;CLI 輸出一律 textContent)。
+//
 // CHG-20261022-04 T7:本檔另提供共用工具 `window.Studio`(el、api、toast、uploadFile、watchRun…)與
 // hash 路由登錄(`Studio.addRoute`、`Studio.pageHooks`),首頁、精靈、完整模式與剪輯畫面在
 // project.js、timeline.js、wizard.js;畫布存檔(buildGraph)保留載入時的 steps(carrySteps,修訂 3 R3-2)。
@@ -57,7 +59,7 @@
   const CASE_COLLISION_MARK = "只差大小寫";
 
   const TOKEN = (document.querySelector('meta[name="studio-token"]') || {}).content || "";
-  const SUBPAGES = ["models", "seats", "voice", "flow", "fusion"];
+  const SUBPAGES = ["models", "seats", "voice", "flow", "fusion", "mcp"];
   const NODE_TEMPLATE = "studio-node";
   const LONG_TEXT = 200;          // 字串參數上限超過此值改用多行輸入框
   const TOAST_MS = 6000;
@@ -257,6 +259,7 @@
     });
     if (sub === "flow") Flow.open();
     if (sub === "fusion") FusionLib.open();
+    if (sub === "mcp") McpPanel.open();
   }
 
   // ---------- 精靈步驟的保留規則(修訂 3 R3-2) ----------
@@ -1965,6 +1968,311 @@
     },
   };
 
+  // ---------- 設定 › MCP 註冊(CHG-20261022-02 T3,FR-22) ----------
+  //
+  // 端點(T2):POST /api/mcp/status {check}、/api/mcp/plan {client, action}、/api/mcp/apply {client, action, confirm:true}。
+  // 伺服器回傳的字串已依「去除 env 值 → scrub → 截斷」處理;本段一律以 textContent 顯示,不以 HTML 字串插入。
+  // 進子頁只查 check:false(不啟動 MCP 伺服器);「重新檢查」才送 check:true(D8、D17)。
+
+  const MCP_LABELS = { claude: "Claude Code", codex: "Codex" };
+
+  // 單一 client 的狀態(mcp_registry 的 ClientStatus)→ 畫面文字與按鈕狀態;純函式(tests/test_static.py 實跑)。
+  // checked:這份狀態是否來自「重新檢查」(check:true)。
+  function mcpView(client, st, checked) {
+    const v = { state: "", tone: "unknown", action: "register", enabled: false, health: null, warn: null,
+                info: [], timeout: null, snippet: null, detail: null };
+    if (!st || typeof st !== "object") {
+      v.state = "? 狀態不明(伺服器回應格式不符)";
+      return v;
+    }
+    const state = st.state;
+    v.action = state === "registered" || state === "other" ? "remove" : "register";
+    if (!st.installed) {
+      v.state = "— 未安裝(找不到 ~/.local/bin/" + client + ")";
+      v.tone = "missing";
+      return v;
+    }
+    // detail 可能同時帶「不做健康檢查:…」(D17);拆出來放在連線那一行
+    let detail = typeof st.detail === "string" && st.detail ? st.detail : null;
+    let skip = null;
+    if (detail) {
+      const i = detail.indexOf("不做健康檢查");
+      if (i !== -1) {
+        skip = detail.slice(i);
+        detail = detail.slice(0, i).replace(/[;\s]+$/, "") || null;
+      }
+    }
+    if (state === "registered") {
+      v.state = "✔ 已註冊(" + (client === "claude" ? "user scope," : "") + "指向本 repo)";
+      v.tone = "ok";
+      v.enabled = true;
+    } else if (state === "other") {
+      v.state = "⚠ 已註冊,但指向其他位置" + (client === "claude" ? "(user scope)" : "") + ";只能先移除再註冊";
+      v.tone = "warn";
+      v.enabled = true;
+    } else if (state === "absent") {
+      v.state = "✖ 未註冊";
+      v.tone = "off";
+      v.enabled = true;
+    } else {
+      // 狀態不明:不推論成未註冊,兩個動作都停用
+      const lines = detail ? detail.split("\n") : [];
+      const head = lines.length && lines[0].indexOf("狀態不明") === 0 ? lines.shift() : "狀態不明";
+      v.state = "? " + head + ",請按「重新檢查」";
+      detail = lines.join("\n").trim() || null;
+    }
+    if (detail && detail.indexOf("本 repo 有同名") === 0) {
+      v.warn = detail;
+      detail = null;
+    }
+    if (state === "other") {
+      v.info.push("目前註冊:" + (typeof st.command === "string"
+        ? [st.command].concat(Array.isArray(st.args) ? st.args : []).join(" ") : "(不是 stdio 類型)"));
+    }
+    if (Array.isArray(st.env_keys) && st.env_keys.length) {
+      v.info.push("env:" + st.env_keys.map(function (k) { return String(k) + "(已設定)"; }).join("、"));
+    }
+    if (client === "claude") {
+      if (st.health === "ok") v.health = "連線:✔ 已連線(健康檢查通過)";
+      else if (st.health === "failed") v.health = "連線:✖ 健康檢查失敗";
+      else if (st.health === "unknown") {
+        v.health = "連線:? 連線狀態不明";
+        if (detail) detail = detail.replace(/^連線狀態不明\n?/, "") || null;
+      } else if (skip) v.health = skip;
+      else if (state === "registered" && st.shadowed === false && !checked) {
+        v.health = "連線:尚未檢查(按「重新檢查」會啟動一次 MCP 伺服器)";
+      }
+    }
+    const t = st.timeout && typeof st.timeout === "object" ? st.timeout : null;
+    const hasValue = t && t.value !== null && t.value !== undefined;
+    if (client === "claude" && t) {
+      v.timeout = hasValue
+        ? { text: "✔ MCP_TOOL_TIMEOUT 已設定(" + t.value + ")", tone: "ok" }
+        : { text: "⚠ MCP_TOOL_TIMEOUT 尚未設定;長工具可能逾時。網頁不會修改 Claude Code 的設定,請自行在 settings.json 的 env 加入 MCP_TOOL_TIMEOUT(建議值 " + (t.suggested || "1800000") + ")", tone: "warn" };
+    } else if (client === "codex" && t && (state === "registered" || state === "other")) {
+      if (hasValue) v.timeout = { text: "✔ tool_timeout_sec = " + t.value, tone: "ok" };
+      else {
+        v.timeout = { text: "⚠ 沒有 tool_timeout_sec;長工具可能逾時。請手動加入:", tone: "warn" };
+        v.snippet = typeof t.snippet === "string" ? t.snippet : null;
+      }
+    }
+    v.detail = detail;
+    return v;
+  }
+  // mcpView 結束
+
+  const McpPanel = {
+    inited: false,
+    busy: false,
+    data: null,          // 最近一次 status 回應
+    checked: false,      // data 是否來自 check:true
+    pending: null,       // 確認框對應的 {client, action, snippet}
+
+    $(id) { return document.getElementById(id); },
+
+    init() {
+      if (this.inited) return;
+      this.inited = true;
+      this.$("mcp-check").addEventListener("click", () => this.refresh(true));
+      ["claude", "codex"].forEach((client) => {
+        this.$("mcp-" + client + "-action").addEventListener("click", () => this.ask(client));
+      });
+      this.$("mcp-cancel").addEventListener("click", () => this.cancel());
+      this.$("mcp-confirm").addEventListener("click", () => this.run());
+      this.$("mcp-copy").addEventListener("click", () => this.copy(this.pending && this.pending.snippet));
+      // Esc 關閉對話框時一併清掉待執行的動作
+      this.$("mcp-dialog").addEventListener("close", () => { this.pending = null; });
+    },
+
+    open() {
+      this.init();
+      this.refresh(false);
+    },
+
+    setBusy(on) {
+      this.busy = on;
+      this.$("mcp-check").disabled = on;
+      this.$("mcp-confirm").disabled = on;
+      if (on) ["claude", "codex"].forEach((c) => { this.$("mcp-" + c + "-action").disabled = true; });
+      else this.render();
+    },
+
+    async refresh(check) {
+      if (this.busy) return;
+      this.$("mcp-result").hidden = true;
+      this.$("mcp-error").hidden = true;
+      const loading = this.$("mcp-loading");
+      loading.textContent = check ? "重新檢查中…(會啟動一次 MCP 伺服器做健康檢查)" : "讀取註冊狀態中…";
+      loading.hidden = false;
+      this.setBusy(true);
+      const r = await api("POST", "/api/mcp/status", { check: !!check });
+      loading.hidden = true;
+      if (r.ok && r.data && typeof r.data === "object") {
+        this.data = r.data;
+        this.checked = !!check;
+      } else {
+        this.$("mcp-error").textContent = "無法讀取註冊狀態:" + errorText(r);
+        this.$("mcp-error").hidden = false;
+      }
+      this.setBusy(false);
+    },
+
+    render() {
+      const d = this.data;
+      this.$("mcp-server-cmd").textContent = d && Array.isArray(d.server) ? d.server.join(" ") : "";
+      ["claude", "codex"].forEach((client) => this.renderClient(client, d ? d[client] : null));
+    },
+
+    renderClient(client, st) {
+      const v = mcpView(client, st, this.checked);
+      const body = this.$("mcp-" + client + "-body");
+      body.replaceChildren();
+      body.appendChild(el("p", "mcp-state tone-" + v.tone, v.state));
+      if (v.health) body.appendChild(el("p", "mcp-line mcp-health", v.health));
+      if (v.warn) body.appendChild(el("p", "mcp-line mcp-warn", "⚠ " + v.warn));
+      v.info.forEach((line) => body.appendChild(el("p", "mcp-line mcp-info", line)));
+      if (v.timeout) body.appendChild(el("p", "mcp-line mcp-timeout tone-" + v.timeout.tone, v.timeout.text));
+      if (v.snippet) {
+        const box = el("div", "mcp-snippet-row");
+        box.appendChild(el("pre", "mcp-pre mcp-snippet", v.snippet));
+        const copy = el("button", "btn btn-small mcp-copy", "複製片段");
+        copy.type = "button";
+        copy.addEventListener("click", () => this.copy(v.snippet));
+        box.appendChild(copy);
+        body.appendChild(box);
+      }
+      if (v.detail) body.appendChild(el("pre", "mcp-pre mcp-detail", v.detail));
+      const btn = this.$("mcp-" + client + "-action");
+      btn.textContent = v.action === "remove" ? "移除" : "註冊";
+      btn.dataset.action = v.action;
+      btn.disabled = this.busy || !v.enabled;
+    },
+
+    async ask(client) {
+      if (this.busy) return;
+      const action = this.$("mcp-" + client + "-action").dataset.action === "remove" ? "remove" : "register";
+      this.setBusy(true);
+      const r = await api("POST", "/api/mcp/plan", { client: client, action: action });
+      this.setBusy(false);
+      if (!r.ok || !r.data || !Array.isArray(r.data.argv)) {
+        toast("無法產生指令預覽:" + errorText(r), true);
+        return;
+      }
+      this.fillDialog(client, action, r.data);
+      const dlg = this.$("mcp-dialog");
+      if (typeof dlg.showModal === "function") {
+        if (!dlg.open) dlg.showModal();
+      } else dlg.setAttribute("open", "");
+    },
+
+    fillDialog(client, action, plan) {
+      const label = MCP_LABELS[client];
+      this.$("mcp-dialog-title").textContent = action === "remove" ? "確認:從 " + label + " 移除" : "確認:註冊到 " + label;
+      const argv = this.$("mcp-argv");
+      argv.replaceChildren();
+      plan.argv.forEach((a, i) => {
+        if (i) argv.appendChild(document.createTextNode(" "));
+        argv.appendChild(el("span", "mcp-arg", a));
+      });
+      const files = Array.isArray(plan.files) ? plan.files : [];
+      this.$("mcp-files").textContent = "這會修改 " + files.join("、") + " 的 local-models 段落;其他 MCP 伺服器不受影響。";
+      const cur = plan.current;
+      const curEl = this.$("mcp-current");
+      let snippet = null;
+      if (cur && typeof cur === "object") {
+        const env = Array.isArray(cur.env_keys) && cur.env_keys.length
+          ? cur.env_keys.map(function (k) { return String(k) + "(已設定)"; }).join("、") : "(無)";
+        const parts = ["command " + (cur.command || "(無)"),
+                       "args " + (Array.isArray(cur.args) && cur.args.length ? cur.args.join(" ") : "(無)"),
+                       "env " + env];
+        const t = cur.timeout && typeof cur.timeout === "object" ? cur.timeout : null;
+        if (client === "codex") {
+          const has = t && t.value !== null && t.value !== undefined;
+          parts.push("tool_timeout_sec " + (has ? "= " + t.value : "(無)"));
+          if (has && typeof t.snippet === "string") snippet = t.snippet;
+        }
+        curEl.textContent = "目前註冊內容:" + parts.join("、");
+        curEl.hidden = false;
+      } else {
+        curEl.textContent = "";
+        curEl.hidden = true;
+      }
+      if (client === "codex" && action === "register") {
+        const st = this.data && this.data.codex;
+        if (st && st.timeout && typeof st.timeout.snippet === "string") snippet = st.timeout.snippet;
+      }
+      const warns = this.$("mcp-warnings");
+      warns.replaceChildren();
+      (Array.isArray(plan.warnings) ? plan.warnings : []).forEach(function (w) {
+        warns.appendChild(el("p", "notice notice-warn", "⚠ " + w));
+      });
+      this.$("mcp-snippet").textContent = snippet || "";
+      this.$("mcp-snippet-box").hidden = !snippet;
+      const all = [plan.argv.join(" "), files.join(" "), curEl.textContent, warns.textContent].join(" ");
+      this.$("mcp-var-note").hidden = all.indexOf("$CLAUDE_CONFIG_DIR") === -1 && all.indexOf("$CODEX_HOME") === -1;
+      this.$("mcp-dialog-error").hidden = true;
+      const ok = this.$("mcp-confirm");
+      ok.classList.toggle("btn-danger", action === "remove");
+      ok.classList.toggle("btn-primary", action !== "remove");
+      this.pending = { client: client, action: action, snippet: snippet };
+    },
+
+    closeDialog() {
+      const dlg = this.$("mcp-dialog");
+      if (dlg.open && typeof dlg.close === "function") dlg.close();
+      else dlg.removeAttribute("open");
+      this.pending = null;
+    },
+
+    cancel() {
+      this.closeDialog();
+    },
+
+    async run() {
+      const p = this.pending;
+      if (!p || this.busy) return;
+      this.setBusy(true);
+      const r = await api("POST", "/api/mcp/apply", { client: p.client, action: p.action, confirm: true });
+      if (!r.ok || !r.data || typeof r.data !== "object") {
+        this.setBusy(false);
+        const err = this.$("mcp-dialog-error");
+        err.textContent = "無法執行:" + errorText(r);
+        err.hidden = false;
+        return;
+      }
+      this.closeDialog();
+      const label = MCP_LABELS[p.client];
+      const d = r.data;
+      if (d.status && typeof d.status === "object") {
+        this.data = d.status;
+        this.checked = false;
+      }
+      let title;
+      if (d.ok) title = p.action === "remove" ? "已從 " + label + " 移除" : "已註冊到 " + label;
+      else if (d.exit_code === 0) title = "執行後狀態不符預期(結束碼 0)";
+      else if (typeof d.exit_code === "number") title = "執行失敗(結束碼 " + d.exit_code + ")";
+      else title = "執行失敗";
+      const box = this.$("mcp-result");
+      box.classList.toggle("is-error", !d.ok);
+      this.$("mcp-result-title").textContent = title;
+      this.$("mcp-result-output").textContent = typeof d.output === "string" ? d.output : "";
+      box.hidden = false;
+      toast(title, !d.ok);
+      this.setBusy(false);
+    },
+
+    async copy(text) {
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("已複製片段");
+      } catch (e) {
+        toast("無法複製,請手動選取片段文字", true);
+      }
+    },
+  };
+  // McpPanel 結束
+
   window.Studio = Object.assign(window.Studio || {}, {
     TOKEN: TOKEN,
     NAME_RE: WORKFLOW_NAME_RE,         // 專案名稱與工作流程名稱同一套中英日白名單(names.py)
@@ -1985,6 +2293,7 @@
     pageHooks: pageHooks,
     route: route,
     FusionLib: FusionLib,
+    McpPanel: McpPanel,
     fusionDiffRow: fusionDiffRow,
   });
 

@@ -642,3 +642,44 @@ tr.diff-del td:first-child { text-decoration: none; }
 .tl-pitch-amp-label { fill: #ffe27a; font-size: 10px; font-weight: 700; }
 .tl-pitch-auto.is-estimate, .tl-pitch-amp.is-estimate, .tl-pitch-amp-link.is-estimate, .tl-pitch-amp-label.is-estimate { opacity: .5; }
 .tl-pitch-limit, .tl-pitch-auto, .tl-pitch-amp, .tl-pitch-amp-link, .tl-pitch-amp-label { pointer-events: none; }
+
+/* ---------- 設定 › MCP 註冊(CHG-20261022-02 T3) ---------- */
+.mcp-section { display: grid; gap: 10px; }
+.mcp-server { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcp-server-label { color: var(--muted); }
+.mcp-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px;
+  word-break: break-all;
+}
+.mcp-client {
+  display: grid; grid-template-columns: 120px 1fr auto; gap: 12px; align-items: start;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.mcp-name { font-weight: 600; padding-top: 2px; }
+.mcp-body { display: grid; gap: 4px; min-width: 0; }
+.mcp-state { margin: 0; font-weight: 600; }
+.mcp-line { margin: 0; font-size: 13px; }
+.mcp-info, .mcp-health { color: var(--muted); }
+.tone-ok { color: var(--ok); }
+.tone-warn, .mcp-warn { color: var(--warn); }
+.tone-off { color: var(--fg); }
+.tone-unknown, .tone-missing { color: var(--muted); }
+.mcp-pre {
+  margin: 0; padding: 6px 8px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
+}
+.mcp-snippet-row, .mcp-snippet-box { display: flex; gap: 8px; align-items: flex-start; }
+.mcp-snippet-row[hidden], .mcp-snippet-box[hidden] { display: none; }
+.mcp-snippet { flex: 1; }
+.mcp-result { display: grid; gap: 4px; }
+.mcp-result[hidden] { display: none; }
+.mcp-result-title { margin: 0; font-weight: 600; color: var(--ok); }
+.mcp-result.is-error .mcp-result-title { color: var(--err); }
+.mcp-dialog { width: min(680px, 94vw); }
+.mcp-argv { display: block; line-height: 1.8; }
+.mcp-arg { padding: 1px 3px; border-radius: 3px; background: #e9edf3; }
+.mcp-files, .mcp-current { margin: 0; font-size: 13px; }
+.mcp-warnings { display: grid; gap: 6px; }
+.mcp-warnings:empty { display: none; }

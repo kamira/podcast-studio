@@ -1212,3 +1212,182 @@ def test_pitch_curve_passes_every_applied_point():
             assert f"{x * 500:.1f} {39 - y / 7.2 * 33:.1f}" in g["d"]
     assert abs(got[0]["mid"] - got[0]["lin"]) < 1e-12                        # 圓弧 0% 為折線
     assert got[1]["mid"] != got[2]["mid"]
+
+
+
+# ---------- CHG-20261022-02 T3:設定 › MCP 註冊子頁 ----------
+
+def _mcp_sub() -> str:
+    html = _settings_html()
+    start = html.index('<div class="subpage settings-sub" data-sub="mcp"')
+    return html[start:html.index("\n  </div>\n", start)]
+
+
+def _mcp_dialog() -> str:
+    html = _index_text()
+    start = html.index('<dialog id="mcp-dialog"')
+    return html[start:html.index("</dialog>", start)]
+
+
+def _mcp_panel_js() -> str:
+    js = _app_js()
+    return js[js.index("  const McpPanel = {"):js.index("// McpPanel 結束")]
+
+
+def _js_mcp_view_src() -> str:
+    js = _app_js()
+    return js[js.index("function mcpView("):js.index("// mcpView 結束")]
+
+
+def _visible_text(html: str) -> str:
+    text = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def _assert_traditional(text: str):
+    from opencc import OpenCC
+    conv = OpenCC("s2t").convert
+    bad = sorted({ch for ch in text if conv(ch) != ch})
+    assert not bad, f"含簡體字:{bad}"
+    assert re.search(r"[一-鿿]", text)
+
+
+def test_mcp_subnav_and_subpage_exist():
+    html = _settings_html()
+    assert '<a class="subnav-link" href="#/settings/mcp" data-sub="mcp">MCP 註冊</a>' in html
+    sub = _mcp_sub()
+    for needed in ('id="mcp-server-cmd"', 'id="mcp-check"', ">重新檢查<", 'id="mcp-claude"', 'id="mcp-codex"',
+                   'data-client="claude"', 'data-client="codex"', ">Claude Code<", ">Codex<",
+                   'id="mcp-claude-action"', 'id="mcp-codex-action"', 'id="mcp-claude-body"', 'id="mcp-codex-body"',
+                   'id="mcp-loading"', 'id="mcp-error"', 'id="mcp-result"', 'id="mcp-result-output"'):
+        assert needed in sub, needed
+    # 子頁不含設定表單欄位(不共用「還原預設 / 儲存」,D14)
+    assert "data-field=" not in sub
+
+
+def test_mcp_dialog_elements():
+    d = _mcp_dialog()
+    for needed in ('class="dialog', 'aria-labelledby="mcp-dialog-title"', 'id="mcp-argv"', 'id="mcp-files"',
+                   'id="mcp-current"', 'id="mcp-warnings"', 'id="mcp-snippet"', 'id="mcp-copy"', ">複製片段<",
+                   'id="mcp-path-note"', 'id="mcp-cancel"', ">取消<", 'id="mcp-confirm"', ">確認執行<", "將執行"):
+        assert needed in d, needed
+    # D12:路徑說明
+    assert "~ 為家目錄、&lt;repo&gt; 為本 repo 位置,執行時展開為絕對路徑" in d
+
+
+def test_mcp_texts_are_traditional_chinese():
+    _assert_traditional(_visible_text(_mcp_sub()) + _visible_text(_mcp_dialog()))
+    code = re.sub(r"^\s*//.*$", "", _mcp_panel_js() + _js_mcp_view_src(), flags=re.M)
+    _assert_traditional("".join(re.findall(r'"((?:[^"\\\n]|\\.)*)"', code)))
+
+
+def test_mcp_subpage_routing_in_app_js():
+    js = _app_js()
+    assert "mcp" in json.loads(_js_const("SUBPAGES", r"(\[[^\]]*\])"))
+    assert json.loads(_js_const("FORM_SUBPAGES", r"(\[[^\]]*\])")) == ["models", "seats", "voice"]
+    assert 'if (sub === "mcp") McpPanel.open();' in js
+
+
+def test_mcp_panel_requests_and_safety():
+    js = _mcp_panel_js()
+    # 進子頁 check:false;「重新檢查」才 check:true;三個端點一律 POST
+    assert 'api("POST", "/api/mcp/status", { check: !!check })' in js
+    assert "this.refresh(false)" in js and "this.refresh(true)" in js
+    assert 'api("POST", "/api/mcp/plan", { client: client, action: action })' in js
+    assert 'api("POST", "/api/mcp/apply", { client: p.client, action: p.action, confirm: true })' in js
+    assert 'api("GET"' not in js
+    # CLI 輸出與註冊內容一律 textContent,不以 HTML 字串插入
+    for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "DOMParser", "createContextualFragment"):
+        assert bad not in js, bad
+    assert 'this.$("mcp-result-output").textContent = ' in js
+    assert "showModal" in js and "navigator.clipboard.writeText" in js
+    # 取消只關對話框,不呼叫 API
+    cancel = js[js.index("    cancel() {"):js.index("    async run() {")]
+    assert "api(" not in cancel
+
+
+MCP_VIEW = [("app.js", "function mcpView(", "// mcpView 結束")]
+
+
+def _cs(**kw):
+    base = {"installed": True, "state": "registered", "command": "~/.local/bin/uv",
+            "args": ["run", "--script", "<repo>/local_models_mcp.py"], "env_keys": [], "health": None,
+            "detail": None, "shadowed": False,
+            "timeout": {"key": "MCP_TOOL_TIMEOUT", "value": "1800000", "suggested": "1800000"}}
+    base.update(kw)
+    return base
+
+
+def _codex(**kw):
+    t = kw.pop("timeout_value", 1800)
+    snippet = "[mcp_servers.local-models]\ntool_timeout_sec = " + str(1800 if t is None else t)
+    return _cs(timeout={"key": "tool_timeout_sec", "value": t, "snippet": snippet}, **kw)
+
+
+def test_mcp_view_states_run_in_js():
+    cases = {
+        "c_reg": ["claude", _cs(), False],
+        "c_reg_checked_ok": ["claude", _cs(health="ok"), True],
+        "c_failed": ["claude", _cs(health="failed", detail="健康檢查失敗原文"), True],
+        "c_other_checked": ["claude", _cs(state="other", command="/opt/x",
+                                          detail="不做健康檢查:註冊內容不是本 repo 的伺服器"), True],
+        "c_unknown_checked": ["claude", _cs(state="unknown", command=None, args=None, shadowed=None,
+                                            detail="狀態不明(設定檔格式無法辨識);不做健康檢查:註冊內容不是本 repo 的伺服器"),
+                              True],
+        "c_shadow": ["claude", _cs(shadowed=True, detail="本 repo 有同名 local / project scope 註冊,會優先於 user scope"),
+                     False],
+        "c_no_timeout": ["claude", _cs(state="absent", command=None, args=None,
+                                       timeout={"key": "MCP_TOOL_TIMEOUT", "value": None, "suggested": "1800000"}),
+                         False],
+        "c_missing": ["claude", _cs(installed=False), False],
+        "x_reg": ["codex", _codex(), False],
+        "x_no_timeout": ["codex", _codex(timeout_value=None, env_keys=["K1"]), False],
+        "x_absent": ["codex", _codex(state="absent", command=None, args=None, timeout_value=None), False],
+        "x_unknown": ["codex", _codex(state="unknown", command=None, args=None, timeout_value=None,
+                                      detail="狀態不明(CLI 輸出格式無法辨識)\nCLI 原文"), False],
+        "x_missing": ["codex", _codex(installed=False, state="unknown", timeout_value=None,
+                                      detail="未安裝(找不到 ~/.local/bin/codex)"), False],
+        "bad": ["codex", None, False],
+    }
+    got = _run_js_funcs(MCP_VIEW, "var C = " + json.dumps(cases, ensure_ascii=True) + ";\nvar result = {};\n"
+                        "Object.keys(C).forEach(function (k) { result[k] = mcpView(C[k][0], C[k][1], C[k][2]); });")
+    g = got["c_reg"]
+    assert g["state"] == "✔ 已註冊(user scope,指向本 repo)" and g["tone"] == "ok"
+    assert g["action"] == "remove" and g["enabled"] is True
+    assert g["health"] == "連線:尚未檢查(按「重新檢查」會啟動一次 MCP 伺服器)"
+    assert g["timeout"] == {"text": "✔ MCP_TOOL_TIMEOUT 已設定(1800000)", "tone": "ok"} and g["snippet"] is None
+    assert got["c_reg_checked_ok"]["health"].startswith("連線:✔ 已連線")
+    f = got["c_failed"]
+    assert f["health"] == "連線:✖ 健康檢查失敗" and f["detail"] == "健康檢查失敗原文"
+    o = got["c_other_checked"]
+    assert o["state"].startswith("⚠ 已註冊,但指向其他位置") and o["action"] == "remove" and o["enabled"]
+    assert o["health"] == "不做健康檢查:註冊內容不是本 repo 的伺服器" and o["detail"] is None
+    assert any("/opt/x" in line for line in o["info"])
+    u = got["c_unknown_checked"]
+    assert u["state"] == "? 狀態不明(設定檔格式無法辨識),請按「重新檢查」" and u["enabled"] is False
+    assert u["health"] == "不做健康檢查:註冊內容不是本 repo 的伺服器" and u["detail"] is None
+    s = got["c_shadow"]
+    assert s["health"] is None and s["warn"] == "本 repo 有同名 local / project scope 註冊,會優先於 user scope"
+    n = got["c_no_timeout"]
+    assert n["state"] == "✖ 未註冊" and n["action"] == "register" and n["enabled"] is True
+    assert n["health"] is None
+    assert n["timeout"]["tone"] == "warn" and "MCP_TOOL_TIMEOUT 尚未設定" in n["timeout"]["text"]
+    assert "1800000" in n["timeout"]["text"] and "不會修改" in n["timeout"]["text"]
+    m = got["c_missing"]
+    assert m["state"] == "— 未安裝(找不到 ~/.local/bin/claude)" and m["enabled"] is False and m["health"] is None
+    x = got["x_reg"]
+    assert x["state"] == "✔ 已註冊(指向本 repo)" and x["action"] == "remove" and x["health"] is None
+    assert x["timeout"] == {"text": "✔ tool_timeout_sec = 1800", "tone": "ok"} and x["snippet"] is None
+    xn = got["x_no_timeout"]
+    assert xn["timeout"] == {"text": "⚠ 沒有 tool_timeout_sec;長工具可能逾時。請手動加入:", "tone": "warn"}
+    assert xn["snippet"] == "[mcp_servers.local-models]\ntool_timeout_sec = 1800"
+    assert "env:K1(已設定)" in xn["info"]
+    xa = got["x_absent"]
+    assert xa["state"] == "✖ 未註冊" and xa["action"] == "register" and xa["timeout"] is None
+    xu = got["x_unknown"]
+    assert xu["state"] == "? 狀態不明(CLI 輸出格式無法辨識),請按「重新檢查」" and xu["detail"] == "CLI 原文"
+    assert xu["enabled"] is False
+    xm = got["x_missing"]
+    assert xm["state"] == "— 未安裝(找不到 ~/.local/bin/codex)" and xm["enabled"] is False and xm["detail"] is None
+    assert got["bad"]["state"].startswith("? 狀態不明") and got["bad"]["enabled"] is False
