@@ -779,3 +779,75 @@ def test_CLI_非0時_ok_為_false_並附錯誤(env):
     r = mr.apply("claude", "register")
     assert r["ok"] is False and r["exit_code"] == 1
     assert "already exists" in r["output"]
+
+
+# ---------- 一次修正 M-1:CLI 異常輸出時的 env 值遮蔽(統整報告 RS-4) ----------
+
+def _codex_get_out(obj, indent=None):
+    return json.dumps(obj, ensure_ascii=False, indent=indent) + "\n"
+
+
+def test_codex_get_非0結束且_stdout_為含_env_的_JSON(env):
+    obj = {"name": "local-models", "transport": {"type": "stdio", "command": env.uv, "args": env.good_args,
+                                                 "env": {ENV_KEY: FAKE_VAL}}}
+    env.set_scenario(codex_get={"code": 2, "stdout": _codex_get_out(obj), "stderr": "warning: 設定檔有未知欄位\n"})
+    st = mr.status(check=False)
+    assert st["codex"]["state"] == "unknown"
+    assert FAKE_VAL not in dump(st)
+    assert "warning" in st["codex"]["detail"]
+
+
+def test_codex_get_command_非字串且_env_為陣列(env):
+    obj = {"name": "local-models", "transport": {"type": "stdio", "command": ["uv"], "args": [],
+                                                 "env": [f"{ENV_KEY}={FAKE_VAL}"]}}
+    env.set_scenario(codex_get={"code": 0, "stdout": _codex_get_out(obj)})
+    st = mr.status(check=False)
+    assert st["codex"]["state"] == "unknown"
+    text = dump(st)
+    assert FAKE_VAL not in text
+    assert ENV_KEY in text
+
+
+@pytest.mark.parametrize("indent", [None, 2])
+def test_codex_get_沒有_transport_頂層有_env(env, indent):
+    obj = {"name": "local-models", "env": {ENV_KEY: FAKE_VAL}}
+    env.set_scenario(codex_get={"code": 0, "stdout": _codex_get_out(obj, indent)})
+    st = mr.status(check=False)
+    assert st["codex"]["state"] == "unknown"
+    assert FAKE_VAL not in dump(st)
+
+
+def test_codex_remove_非0結束且_stdout_為含_env_的_JSON(env):
+    env.codex_register()     # 註冊內容本身沒有 env:秘密值只出現在 CLI 輸出
+    obj = {"error": "remove failed", "server": {"transport": {"env": {ENV_KEY: FAKE_VAL}}}}
+    env.set_scenario(codex_remove={"code": 1, "stdout": _codex_get_out(obj, 2), "stderr": "Error: 無法寫入設定\n",
+                                   "effect": False})
+    r = mr.apply("codex", "remove")
+    assert r["ok"] is False and r["exit_code"] == 1
+    assert FAKE_VAL not in dump(r)
+    assert "無法寫入設定" in r["output"]
+
+
+def test_redact_env_env_為陣列():
+    js = json.dumps({"transport": {"env": [f"{ENV_KEY}={FAKE_VAL}", "孤立值-31"]}}, ensure_ascii=False)
+    out = mr.redact_env(js, [])
+    assert FAKE_VAL not in out and "孤立值-31" not in out
+    assert ENV_KEY in out
+
+
+# ---------- 一次修正:_claude_shadow 型別異常回 None(統整報告 RS-5) ----------
+
+@pytest.mark.parametrize("case", ["projects_not_object", "project_servers_not_object", "mcp_json_servers_not_object"])
+def test_遮蔽判斷型別異常時為無法判斷(env, case):
+    if case == "projects_not_object":
+        env.claude_register(extra={"projects": [str(env.repo)]})
+    elif case == "project_servers_not_object":
+        env.claude_register(extra={"projects": {str(env.repo): {"mcpServers": ["local-models"]}}})
+    else:
+        env.claude_register()
+        (env.repo / ".mcp.json").write_text(json.dumps({"mcpServers": ["local-models"]}), encoding="utf-8")
+    st = mr.status(check=True)
+    assert st["claude"]["state"] == "registered"
+    assert st["claude"]["shadowed"] is None
+    assert env.calls("claude") == []
+    assert "不做健康檢查" in st["claude"]["detail"]

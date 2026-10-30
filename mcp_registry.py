@@ -28,7 +28,10 @@
   apply(client, action) -> {"ok", "exit_code", "output", "status"}
                                  執行 plan 的指令後一律重新查狀態(check=False);ok 以新狀態判斷——register 後為
                                  registered、remove 後為 absent,且結束碼為 0 才是 True(`codex mcp remove` 對不存在項也回 0)
-  redact_env(text, known) -> str 去除 env 值,只留鍵名(D16)
+  redact_env(text, known) -> str 去除 env 值,只留鍵名(D16):整段為 JSON 時所有名為 `env` 的欄位(物件換值、
+                                 陣列的 `K=V` 留鍵名)、已知 env 值、`鍵=值` 行、`Environment:` 段。CLI 文字一律
+                                 stdout、stderr 分別遮蔽後再相接,說明前綴在遮蔽之後才加;CLI 輸出能解析成 JSON 時,
+                                 不論結束碼都先遞迴蒐集其中所有 `env` 欄位的值列入已知值(一次修正 M-1)
   scrub(text) -> str             路徑遮蔽(規則同 studio_server.scrub():repo → `<repo>`、家目錄 → `~`;
                                  另把不在家目錄 / repo 之下的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 換成變數名)
   Busy                           另一個操作執行中(status / plan / apply 共用一把行程內鎖,D13;不進 heavy_lock)
@@ -153,9 +156,48 @@ def scrub(text: str) -> str:
     return text
 
 
+_KV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _KV_LINE = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _KV_TOKEN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=\S*")
 _ENV_HEAD = re.compile(r"^(\s*)Environment:(.*)$")
+
+
+def _mask_env_item(item: Any) -> Any:
+    """env 為陣列時的單一元素:`K=V` 字串留鍵名,其他一律換成遮蔽字樣。"""
+    if isinstance(item, str) and "=" in item:
+        key = item.split("=", 1)[0]
+        if _KV_KEY.fullmatch(key):
+            return f"{key}={MASK}"
+    return MASK
+
+
+def _collect_env_values(obj: Any, known: set) -> None:
+    """遞迴蒐集所有名為 `env` 的欄位中的字串值(dict 取各值;list 取 `K=V` 的 `V`)放進 known。"""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "env" and isinstance(v, dict):
+                known.update(x for x in v.values() if isinstance(x, str) and x)
+            elif k == "env" and isinstance(v, list):
+                for x in v:
+                    if isinstance(x, str) and "=" in x and x.split("=", 1)[1]:
+                        known.add(x.split("=", 1)[1])
+            else:
+                _collect_env_values(v, known)
+    elif isinstance(obj, list):
+        for v in obj:
+            _collect_env_values(v, known)
+
+
+def _collect_from_text(text: str, known: set) -> None:
+    """CLI 文字若整段是 JSON 物件 / 陣列,蒐集其中的 env 值(不論結束碼)。"""
+    stripped = (text or "").strip()
+    if stripped[:1] not in ("{", "["):
+        return
+    try:
+        obj = json.loads(stripped)
+    except ValueError:
+        return
+    _collect_env_values(obj, known)
 
 
 def _mask_json_env(obj: Any) -> Any:
@@ -164,6 +206,8 @@ def _mask_json_env(obj: Any) -> Any:
         for k, v in obj.items():
             if k == "env" and isinstance(v, dict):
                 out[k] = {ek: MASK for ek in v}
+            elif k == "env" and isinstance(v, list):
+                out[k] = [_mask_env_item(x) for x in v]
             else:
                 out[k] = _mask_json_env(v)
         return out
@@ -243,10 +287,13 @@ class _Result(NamedTuple):
     stderr: str
     error: str | None      # 逾時或無法執行時的繁中說明
 
-    def text(self) -> str:
+    def redacted(self, known) -> str:
+        """stdout、stderr 先分別經 redact_env() 再相接(JSON 輸出不會因與 stderr 相接而跳過 JSON 遮蔽)。"""
         if self.error:
             return self.error
-        return "\n".join(s.rstrip("\n") for s in (self.stdout, self.stderr) if s.strip())
+        _collect_from_text(self.stdout, known)
+        _collect_from_text(self.stderr, known)
+        return "\n".join(redact_env(s, known).rstrip("\n") for s in (self.stdout, self.stderr) if s.strip())
 
 
 def _env() -> dict[str, str]:
@@ -309,31 +356,48 @@ def _entry_state(entry: Any, cmd_key: str = "command") -> tuple[str, str | None,
     return state, command, args, env
 
 
-def _has_name(servers: Any) -> bool:
-    return isinstance(servers, dict) and NAME in servers
-
-
 def _claude_shadow(data: Any) -> bool | None:
-    """本 repo 的 local / project scope 是否有同名項;無法判斷回 None。只判斷有無,不取內容。"""
-    shadow = False
-    if isinstance(data, dict):
-        projects = data.get("projects")
-        if isinstance(projects, dict):
-            for key in _variants(ROOT):
-                proj = projects.get(key)
-                if isinstance(proj, dict) and _has_name(proj.get("mcpServers")):
-                    shadow = True
-    else:
+    """本 repo 的 local / project scope 是否有同名項;無法判斷回 None。只判斷有無,不取內容。
+
+    鍵存在但型別不是預期型別(`projects`、`projects[<repo>]`、其 `mcpServers`、`.mcp.json` 本身或其
+    `mcpServers` 不是物件),或 `.mcp.json` 無法讀取 / 解析時,視為無法判斷;已確定有同名項時回 True。
+    """
+    if not isinstance(data, dict):
         return None
+    shadow = False
+    unsure = False
+
+    def look(servers: Any) -> None:
+        nonlocal shadow, unsure
+        if not isinstance(servers, dict):
+            unsure = True
+        elif NAME in servers:
+            shadow = True
+
+    if "projects" in data:
+        projects = data["projects"]
+        if not isinstance(projects, dict):
+            unsure = True
+        else:
+            for key in _variants(ROOT):
+                if key not in projects:
+                    continue
+                proj = projects[key]
+                if not isinstance(proj, dict):
+                    unsure = True
+                elif "mcpServers" in proj:
+                    look(proj["mcpServers"])
     kind, mcp = _read_json(paths()["repo_mcp_json"])
     if kind == "ok":
-        if isinstance(mcp, dict):
-            shadow = shadow or _has_name(mcp.get("mcpServers"))
-        else:
-            return None if not shadow else True
+        if not isinstance(mcp, dict):
+            unsure = True
+        elif "mcpServers" in mcp:
+            look(mcp["mcpServers"])
     elif kind != "missing":
-        return None if not shadow else True
-    return shadow
+        unsure = True
+    if shadow:
+        return True
+    return None if unsure else False
 
 
 def _fmt_num(v):
@@ -384,11 +448,11 @@ def _claude_status(check: bool, known: set) -> dict:
         elif not isinstance(servers[NAME], dict):
             st["detail"] = "狀態不明(設定檔格式無法辨識)"
         else:
+            _collect_env_values({"entry": servers[NAME]}, known)
             state, command, args, env = _entry_state(servers[NAME])
             st.update(state=state, command=command, args=args)
             if env:
                 st["env_keys"] = sorted(str(k) for k in env)
-                known.update(v for v in env.values() if isinstance(v, str))
             if state == "unknown":
                 st["detail"] = "狀態不明(設定檔格式無法辨識)"
     if st["shadowed"] is True and not st["detail"]:
@@ -412,16 +476,16 @@ def _claude_status(check: bool, known: set) -> dict:
             if res.error:
                 st["health"], st["detail"] = "unknown", res.error
             elif res.code != 0:
-                st["health"], st["detail"] = "failed", res.text()
+                st["health"], st["detail"] = "failed", res.redacted(known)
             else:
                 m = re.search(r"^\s*Status:\s*(.+)$", res.stdout, re.MULTILINE)
                 line = m.group(1) if m else ""
                 if "Connected" in line or "✔" in line:
                     st["health"] = "ok"
                 elif any(w in line.lower() for w in ("fail", "error")) or "✘" in line or "✗" in line:
-                    st["health"], st["detail"] = "failed", res.text()
+                    st["health"], st["detail"] = "failed", res.redacted(known)
                 else:
-                    st["health"], st["detail"] = "unknown", "連線狀態不明\n" + res.text()
+                    st["health"], st["detail"] = "unknown", "連線狀態不明\n" + res.redacted(known)
     return st
 
 
@@ -436,29 +500,27 @@ def _codex_status(known: set) -> dict:
     if res.error:
         st["detail"] = res.error
         return st
-    if res.code != 0:
-        if res.code == 1 and NOT_FOUND in res.stderr:
-            st["state"] = "absent"
-        else:
-            st["detail"] = res.text() or f"CLI 結束碼 {res.code}"
-        return st
     try:
         obj = json.loads(res.stdout)
     except ValueError:
         obj = None
+    _collect_env_values(obj, known)      # 不論結束碼與格式,先蒐集 env 值(統整報告 RS-4)
+    if res.code != 0:
+        if res.code == 1 and NOT_FOUND in res.stderr:
+            st["state"] = "absent"
+        else:
+            st["detail"] = res.redacted(known) or f"CLI 結束碼 {res.code}"
+        return st
     transport = obj.get("transport") if isinstance(obj, dict) else None
     if not isinstance(transport, dict):
-        st["detail"] = "狀態不明(CLI 輸出格式無法辨識)\n" + res.text()
+        st["detail"] = "狀態不明(CLI 輸出格式無法辨識)\n" + res.redacted(known)
         return st
-    env = transport.get("env")
-    if isinstance(env, dict):
-        known.update(v for v in env.values() if isinstance(v, str))
     state, command, args, env = _entry_state(transport)
     st.update(state=state, command=command, args=args)
     if env:
         st["env_keys"] = sorted(str(k) for k in env)
     if state == "unknown":
-        st["detail"] = "狀態不明(CLI 輸出格式無法辨識)\n" + res.text()
+        st["detail"] = "狀態不明(CLI 輸出格式無法辨識)\n" + res.redacted(known)
     t = obj.get("tool_timeout_sec")
     if isinstance(t, (int, float)) and not isinstance(t, bool):
         st["timeout"] = {"key": "tool_timeout_sec", "value": _fmt_num(t), "snippet": _codex_snippet(t)}
@@ -554,6 +616,7 @@ def apply(client, action) -> dict:
         res = _run(argv)
         new, known2 = _status(False)
     known |= known2
+    output = res.redacted(known)
     expected = "registered" if action == "register" else "absent"
     ok = res.code == 0 and new[client]["state"] == expected
-    return _clean_obj({"ok": ok, "exit_code": res.code, "output": res.text(), "status": new}, known)
+    return _clean_obj({"ok": ok, "exit_code": res.code, "output": output, "status": new}, known)
