@@ -8,6 +8,7 @@
 > 2026-10-28 依 CHG-20261028-01 結構文件更新:新增 `.review/`(本機審議 Codex 席的 PR head 唯讀檢視,ignored);`scripts/local_review.py` 限制改記。
 > 2026-10-28 依 CHG-20261028-02 結構文件更新:新增 `scripts/review_decision.py`(統整席判定留言,治理基礎設施)、`outputs/.tmp/review_decision/`(判定 JSON,ignored)、`features/review_decision.feature`;`review_gate.py` 改驗意見留言與統整判定。
 > 2026-10-30 依 CHG-20261030-02 結構文件更新:職責表新增 `docs/changes/screens/`(給統整席核對的畫面截圖,DIR-6 第 11 條)。
+> 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry.py`、`tests/test_mcp_registry.py`、`tests/test_server_mcp.py`、`tests/integration/test_mcp_registry_real.py`、`features/mcp_registry.feature`;設定頁新增「MCP 註冊」子頁;`tests/ui_check.py` 新增 `mcp` 組。
 
 ## 樹狀
 
@@ -26,6 +27,7 @@ podcast-studio/
 ├── project.py                 # 專案資料模型:分句、停頓、標註、版本、.trash(CHG-20261022-04 T2)
 ├── timeline.py                # 時間軸計算 layout():片段、字幕 cue、畫面軌(CHG-20261022-04 T4)
 ├── tts_service.py             # 逐句合成服務:髒片段、快取、語速後製(CHG-20261022-04 T3)
+├── mcp_registry.py            # local-models 的 MCP 註冊管理(Claude Code / Codex user scope,只經官方 CLI;CHG-20261022-02 T1)
 ├── breezy_worker.py           # BreezyVoice worker(在 BreezyVoice venv 執行:synth / annotate;CHG-20261022-04 T1)
 ├── static/                    # 網頁前端(原生 HTML/JS/CSS,免建置)
 │   ├── index.html             # 首頁(精靈 / 完整模式兩張卡片)、精靈、完整模式、設定頁(含「進階流程」節點畫布)、免責說明頁
@@ -65,7 +67,7 @@ podcast-studio/
 │   └── knowledge/{INDEX.md,directives.md,patterns.md,vocabulary.json}
 ├── features/                  # 行為規格(Gherkin .feature,CHG 的 Behaviour spec)
 │   ├── ci.feature             # CHG-20261022-03
-│   └── …                      # canvas、file_dnd、heavy_lock、pause_tone、settings、timeline_editor、wizard_speed
+│   └── …                      # canvas、file_dnd、heavy_lock、mcp_registry、pause_tone、settings、timeline_editor、wizard_speed
 ├── scripts/                   # 開發流程腳本(CHG-20261022-03)
 │   ├── ci/
 │   │   ├── commit_check.py        # commit 引用 CHG 編號檢查
@@ -81,7 +83,7 @@ podcast-studio/
 │   ├── conftest.py            # 把 repo 根目錄放進 sys.path
 │   ├── test_*.py              # 產品程式的 pytest(CHG-20261022-01)
 │   ├── ui_check.py            # UI 互動檢查(Playwright 無頭 Chromium;不屬 pytest,見下表)
-│   ├── integration/           # 真模型整合測試(test_breezy_worker_real.py;以 BreezyVoice venv 執行,不列入 check.sh)
+│   ├── integration/           # 真模型 / 真 CLI 整合測試(test_breezy_worker_real.py 以 BreezyVoice venv 執行;test_mcp_registry_real.py 用真 claude / codex CLI 與暫存設定目錄;不列入 check.sh)
 │   └── ci/                    # scripts/ 的單元測試(unittest)
 ├── .ai-sdlc/                  # vendored ai-sdlc v1.66.0(不修改內容)
 │   ├── README.md              # 版本、來源、MIT 授權、更新方式
@@ -118,7 +120,7 @@ podcast-studio/
 | `tools/` | 第三方工具與 venv(約 1.9 GB) | `.gitignore`;無 `.git` | 〔觀察〕 |
 | `.claude/` | Claude 桌面 app 設定(追蹤檔只有 `launch.json`) | `launch.json` 用 `uv` 絕對路徑,參數 `run --script studio_server.py`(不帶設定檔路徑);`.claude/worktrees/` 是 Claude 桌面 app 為派發施工建立的 agent worktree,列入 `.gitignore`,避免主工作副本被判為不乾淨而讓 `scripts/deploy_local.sh` 中止(CHG-20261022-03 T9) | 〔觀察〕 |
 | `docs/knowledge/` | 使用者教過的規則:`INDEX.md`、`directives.md`(DIR-n)、`patterns.md`、`vocabulary.json` | 只改本目錄的 commit 免引用 CHG 編號(CHG-20261022-03) | 〔觀察〕 |
-| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03(「統整席判定需修正」場景由 CHG-20261028-02 改寫);`local_review_codex.feature` 屬 CHG-20261028-01;`review_decision.feature` 屬 CHG-20261028-02;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04(對應功能隨該筆合併 PR 進 main) | 〔觀察〕 |
+| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03(「統整席判定需修正」場景由 CHG-20261028-02 改寫);`local_review_codex.feature` 屬 CHG-20261028-01;`review_decision.feature` 屬 CHG-20261028-02;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04(對應功能隨該筆合併 PR 進 main);`mcp_registry` 屬 CHG-20261022-02 | 〔觀察〕 |
 | `scripts/ci/` | CI 治理檢查:`commit_check.py`、`plan_check_changed.py`、`review_gate.py`(驗意見留言與統整判定)、`secret_scan.py`、`secret_allowlist.txt` | 只用 Python 標準函式庫;CI 一律從 base 分支的 trusted/ 副本(CI 執行期目錄,不在 repo 內)執行 | 〔觀察〕 |
 | `scripts/local_review.py` | 本機審議會(DIR-1 六席,各席獨立作答一次),以 `gh pr comment` 貼出各席意見(建議等級不具否決效力,DIR-6) | 只讀 PR 資料、主工作副本不 checkout;拒絕 fork 與非擁有者 PR;diff 經過濾後超過 30000 字時,以 head sha 在 `.review/pr-<編號>-<sha12>/` 建 `--no-checkout` 的 detached worktree(不寫出追蹤檔、停用 hook)供 Codex 席以 `git show` / `git diff --no-textconv --no-ext-diff` 唯讀讀取完整程式,審完(含例外)以 `safe_remove_view()` 移除——本次與舊檢視共用,只在目錄內僅有 `.git` 時刪該指標檔與空目錄並 `git worktree prune`(不用 git 的強制移除、不遞迴刪除),否則留下目錄並警告;同名舊目錄另須是登記的 worktree,否則拒絕、不刪;Ollama 席仍依 `num_ctx` 截短(CHG-20261028-01);非 think 的 Ollama 席在 diff 截到 0 仍放不進時截短 CHG 並記注意行(CHG-20261028-02);互讀階段已移除;compliance 席參考資料去除 directive「歷史」區塊、上限 20000 字(CHG-20261028-02 DIR-5 修正) | 〔觀察〕 |
 | `scripts/review_decision.py` | 驗證統整席子代理寫出的判定 JSON,以 `gh pr comment` 貼出帶 `review-decision` 標記的判定留言(DIR-6) | 治理基礎設施(需 `infra-approved`);不呼叫模型、不寫檔;拒絕 fork、非擁有者 PR、不在 main 執行;需目前 head 的六席意見留言;`model`、`effort` 只取自參數;JSON 文字經 `sanitize()` 放在程式碼區塊內(CHG-20261028-02) | 〔觀察〕 |
@@ -128,7 +130,8 @@ podcast-studio/
 | `tests/`(根層) | 產品程式的 pytest:設定、節點、執行器、重型鎖、伺服器核心 / 檔案 / 設定 API、前端靜態檢查、預設範本 | 以 `./scripts/check.sh` 執行;模型呼叫一律以替身取代;ADP-6 的結案以 ACC 為準 | 〔觀察〕 |
 | `tests/ui_check.py` | UI 互動檢查(CHG-20261022-01 T14):PEP 723 script(playwright 1.64.1),本行程內以替身執行器與替身 Ollama 清單啟動 `create_app()`(隨機空閒埠,設定資料庫與 `outputs/`、`workflows/` 放暫存目錄),以無頭 Chromium 操作 ⚙ → 設定 › 進階流程、拖節點、連線、拖檔、釘住、設定存檔;截圖寫 `outputs/ui_check/` | `uv run --script tests/ui_check.py`;需先安裝 Chromium(前置 P2);檔名不是 `test_*.py`,`./scripts/check.sh` 與 CI 不執行 | 〔觀察〕 |
 | `tests/ui_check.py`(CHG-20261022-04 T9 擴充) | 拆成 `canvas`(上一列)與 `editor` 兩組,各用自己的暫存目錄與伺服器;不帶參數兩組都跑,`--only editor` 只跑 editor;editor 的合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身,匯出與注音以替身取代;截圖 `home.png`、`wizard.png`、`full.png`、`editor.png`、`tone.png`、`disclaimer.png` | DIR-5 修正輪加入「合成中途試聽」與「停頓 0 秒仍可拖拉」情境 | 〔觀察〕 |
-| `tests/integration/` | 真模型整合測試(`test_breezy_worker_real.py`:兩句合成與 `annotate`) | 以 `tools/BreezyVoice/.venv/bin/python -m pytest` 在本機執行,不列入 `./scripts/check.sh` 與 CI | 〔觀察〕 |
+| `tests/ui_check.py`(CHG-20261022-02 T3 擴充) | 新增 `mcp` 組(`--only mcp`):假 `claude` / `codex` CLI 與暫存 `HOME`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`,操作「設定 › MCP 註冊」子頁與確認框;截圖 `mcp.png`、`mcp-confirm.png`;結束後比對真實設定不變 | 不帶 `--only` 時依 canvas → editor → mcp 執行 | 〔觀察〕 |
+| `tests/integration/` | 真模型整合測試(`test_breezy_worker_real.py`:兩句合成與 `annotate`);真 CLI 整合測試(`test_mcp_registry_real.py`,CHG-20261022-02 T1) | `test_breezy_worker_real.py` 以 `tools/BreezyVoice/.venv/bin/python -m pytest` 在本機執行;`test_mcp_registry_real.py` 以 `./scripts/check.sh tests/integration/test_mcp_registry_real.py` 手動執行(`tests/conftest.py` 只在命令列明確指定時收集);皆不列入 `./scripts/check.sh` 預設範圍與 CI | 〔觀察〕 |
 | `docs/changes/review/` | DIR-5 統整報告(`<CHG-ID>-summary.md`) | 檔名不符 `CHG-*.md`,不受 `doc_integrity_check` 的 CHG 欄位檢查與 `plan_check_changed.py` 檢查(使用者 2026-10-28 決定,RS-41) | 〔觀察〕 |
 | `docs/changes/screens/` | 給統整席核對的畫面截圖(`<CHG-ID>/<task>-<原檔名>`,由派發者自 `outputs/ui_check/` 複製並 commit 進該 PR,DIR-6 第 11 條) | 檔名不符 `CHG-*.md`,不受 `doc_integrity_check` 的 CHG 欄位檢查與 `plan_check_changed.py` 檢查;`docs/` 下非 `*.py`、`*.sh`,屬 `review_gate.py` 免審議路徑;截圖隨 repo 公開(CHG-20261030-02) | 〔推論〕(本筆不建目錄,第一個使用者建立) |
 | `tests/ci/` | `scripts/` 的單元測試 | `python3 -m unittest discover -s tests/ci -v`(`./scripts/check.sh` 也會一併收集) | 〔觀察〕 |
@@ -155,3 +158,13 @@ podcast-studio/
 | `features/prosody_trim.feature` | 片段靜音裁切、連音、清晰度、語調折線、合音與合音詞庫的行為規格 |
 | `tests/test_fusion.py` | 合音規則與 `/api/fusion/suggest` 的測試 |
 | `tests/integration/test_shape_real.py`、`tests/integration/shape_metrics.py` | `breezy_worker shape` 的真 venv 整合測試與量測輔助(不列入 `check.sh`) |
+
+## CHG-20261022-02 新增
+
+| 路徑 | 用途 |
+|------|------|
+| `mcp_registry.py` | local-models 的 MCP 註冊管理模組:Claude Code 與 Codex 的 user scope 註冊狀態查詢、指令組裝(`plan`)與執行(`apply`);寫設定只經 `~/.local/bin/claude`、`~/.local/bin/codex` 的 `mcp add` / `mcp remove`;只用標準庫,不匯入 repo 內其他模組 |
+| `tests/test_mcp_registry.py` | `mcp_registry.py` 的 pytest:以假 CLI 腳本與暫存 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 驗證狀態判斷、指令、env 值遮蔽、鎖與真實設定不變 |
+| `tests/test_server_mcp.py` | `studio_server.py` 的 `/api/mcp/status`、`/api/mcp/plan`、`/api/mcp/apply` 端點測試(安全中介層、`confirm`、欄位與列舉檢查、409) |
+| `tests/integration/test_mcp_registry_real.py` | 真 CLI 整合測試:暫存 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 下跑註冊 → 查詢 → 移除 → 查詢,斷言真實設定不變(不列入 `check.sh`,本機手動執行) |
+| `features/mcp_registry.feature` | MCP 註冊管理的行為規格(使用者故事 1~7:狀態顯示、開頁不啟動伺服器、重新檢查、確認框、移除、逾時提醒、跨站拒絕) |
