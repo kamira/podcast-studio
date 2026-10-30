@@ -152,15 +152,16 @@
 
 - 日期 / 分支:2026-10-27(UTC+0)/ 全分支
 - tags/scope:cicd, review
-- 情境:已過確認閘的 CHG,自 CHG-20261022-04 T3 起的施工。
+- 情境:已過確認閘的 CHG(含 CHG 修訂(修訂 n)的施工),自 CHG-20261022-04 T3 起的施工。
 - 規則:
   1. 施工期:由 main 開整合分支 `chg/<CHG-ID>-impl`;每個 task 仍各開一個 PR(DIR-2 第 1 條),但 base 為整合分支,施工期不跑本機審議、不跑 CI(`ci.yml` 只對 main 觸發)、不合進 main;CI 四項於第 5 條的合併 PR 執行。
   2. 全部 task 完成後,對每個 task PR 逐一跑本機審議(DIR-1 席位不變)。
-  3. 審議全部完成後,由**單一模型**(預設 Opus、effort medium,與施工者不同的子代理;使用者可改指定)讀取全部審議留言,統整成一份報告:每項發現的出處(PR、席位)、是否成立、跨 task 的共同問題、建議修正。報告寫在整合分支的 `docs/changes/review/<CHG-ID>-summary.md`(不放在 `docs/changes/` 根目錄,避免符合 CI `chg` 檢查的 CHG 檔名規則)。此報告是施工期的修正依據,不是合併判定;合併判定見第 5 條。
+  3. 審議全部完成後,由**單一模型**(預設 Opus、effort medium,與施工者不同的子代理;使用者可改指定)讀取全部審議留言,統整成一份報告:每項發現的出處(PR、席位)、是否成立、跨 task 的共同問題、建議修正。報告寫在整合分支的 `docs/changes/review/<CHG-ID>-summary.md`(不放在 `docs/changes/` 根目錄,避免符合 CI `chg` 檢查的 CHG 檔名規則)。此報告是施工期的修正依據,不是合併判定;合併判定見第 5 條。施工期即使對個別 task PR 跑過意見或統整判定(DIR-6),仍須在全部 task 完成後做本條的統整與第 4 條的一次修正,逐 PR 的判定不能取代;同一 head 已貼出的意見留言可作為第 2 條的審議結果,不必重跑。
   4. 由開發的模型依統整報告在整合分支一次修正。
   5. 以一個 PR 將整合分支合進 main;該 PR 跑六席意見、統整席判定(DIR-6)與 CI 四項,merge 條件同 DIR-4 第 1 條(統整判定 `merge`、CI 全綠);不適用時停下問使用者。
   6. 合併 PR 統整判定 `fix` 時依 DIR-6 第 7 條處理;連續兩輪 `fix` 依 DIR-4 第 2 條交使用者。
   7. DIR-1「獨立階段不得看到前輪判決」的例外:第 5 條合併 PR 送審內容中的統整報告(`docs/changes/review/<CHG-ID>-summary.md`)與 CHG 的修訂補記、派發記錄,屬本條規定的必要產出,必然記載第 2 條個別審議的結果,不視為違反該隔離要求;送審時仍去除 CHG「## 審議」節,並指示各席以程式與規格獨立判斷,不得以前輪判決作為本輪判決的依據。合併 PR 的統整席(DIR-6)本來就讀全部意見與前輪紀錄,不需本例外。
+  8. **合入前先記錄核准**:改到 `docs/`、`features/` 以外路徑的 task PR,合入整合分支前須有使用者核准(DIR-2 第 3 條)。派發者取得核准後,先在該 PR 的分支以一個只改 CHG「## 派發記錄」的 commit 寫入使用者核准原話(以選項核准時寫選項標籤與問題原文)並 push,再合入;順序可由該 commit 時間早於合入時間核對。此 commit 不要求重跑意見與統整。
 - 原因:使用者指示(2026-10-27,原話):「目前審議調整為全部修改完後再進行個別審議,並且審議完後再統一整理全部審議一次 統整報告再由開發的model進行修改」;補充:「目前審議調整為全部修改完後再進行個別審議,並且審議完後再統一由單一模型整理全部審議一次 統整報告再由開發的model進行修改」
 - 信度:使用者確認(整合分支機制、統整報告落點與預設統整模型為 agent 補上的執行細節,使用者可推翻)
 - 狀態:生效
@@ -174,6 +175,9 @@
   - 2026-10-28 修訂(第 1 條補明 task PR 不跑 CI、CI 於合併 PR 執行;第 3 條報告落點改為 `docs/changes/review/`。依據:CHG-20261022-04 DIR-5 統整報告 RS-1、RS-41,使用者 2026-10-28 指示照報告建議處理(原話節錄:「RS-41 change the DIR-5 report location and git mv the file; RS-1 add the CI wording to DIR-5」)。)原敘述:
     - 第 1 條:施工期:由 main 開整合分支 `chg/<CHG-ID>-impl`;每個 task 仍各開一個 PR(DIR-2 第 1 條),但 base 為整合分支,施工期不跑本機審議、不合進 main。
     - 第 3 條(落點句):報告寫在整合分支的 `docs/changes/<CHG-ID>-review-summary.md`。
+  - 2026-10-30 依 CHG-20261030-02(使用者 2026-10-30 對 CHG-20261029-01 修訂 1 統整報告 U-4 的決定,原話:「修訂 DIR-5 並補一條 (Recommended)」,說明「DIR-5 補明 CHG 修訂也適用、逐 PR 審議不能取代第 3 條;另補『程式 task PR 合入前先在派發記錄寫核准原話』(另開帳本修訂)」;確認閘 2026-10-30 原話「Approve all」)修訂情境與第 3 條,新增第 8 條(無原敘述)。原敘述:
+    - 情境:已過確認閘的 CHG,自 CHG-20261022-04 T3 起的施工。
+    - 第 3 條:審議全部完成後,由**單一模型**(預設 Opus、effort medium,與施工者不同的子代理;使用者可改指定)讀取全部審議留言,統整成一份報告:每項發現的出處(PR、席位)、是否成立、跨 task 的共同問題、建議修正。報告寫在整合分支的 `docs/changes/review/<CHG-ID>-summary.md`(不放在 `docs/changes/` 根目錄,避免符合 CI `chg` 檢查的 CHG 檔名規則)。此報告是施工期的修正依據,不是合併判定;合併判定見第 5 條。
 
 ## DIR-6 — 審議席提供意見,單一獨立統整席判定可否合併
 
@@ -183,14 +187,16 @@
 - 規則:
   1. **意見席**:DIR-1 席位表的六席(risk、impact、drift、compliance、security、consistency)只提供意見。各席輸出的 `pass / concern / fail` 是建議等級,**不具否決效力**;沒有回答(`no-answer`)也不擋 merge。席位分配、序列執行、逾時、Codex 限制、送審 CHG 去除「## 審議」節等規定照 DIR-1。
   2. **統整席**:同一 head 的意見留言貼出後,派發者派**一個**獨立 Claude subagent 擔任統整席(預設 Opus、effort medium;使用者可改指定)。統整席不得是該 PR 的施工者,也不得是同一 PR 前一輪的統整席子代理(每輪新派)。
-  3. 統整席讀取:該 head 的意見留言全文、CHG 全文(含「## 審議」節與派發記錄)、完整程式(`gh pr diff`;過大時 `git fetch origin <head sha>` 後以 `git show <head>:<路徑>` 讀取)。統整席只讀,不改檔、不另開 PR、不貼留言;唯一寫出物是判定 JSON(`outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,格式見 `scripts/review_decision.py --schema`)。
+  3. 統整席讀取:該 head 的意見留言全文、CHG 全文(含「## 審議」節與派發記錄)、完整程式(`gh pr diff`;過大時 `git fetch origin <head sha>` 後以 `git show <head>:<路徑>` 讀取)。統整席只讀,不改檔、不另開 PR、不貼留言;唯一寫出物是判定 JSON(`outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,格式見 `scripts/review_decision.py --schema`)。在暫存目錄匯出 head 副本並執行 repo 內既有測試,依第 12 條。
   4. 統整席判定 `merge`(可合併)或 `fix`(需修正):逐席列出建議等級、是否採納與理由;每項發現核對程式後判斷是否成立;`no-answer` 的席位逐一列出,並由統整席以該席的判決問題自行檢視、寫出結果;`fix` 必須列出修法(位置、改法、理由);需使用者決定的事項列入 `needs_user`,有任何一項即不得判 `merge`。
   5. 派發者以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定留言(標記 `<!-- review-decision CHG-… sha=<head> decision=merge|fix model=… effort=… -->`)。`model`、`effort` 由派發者填,不信任子代理自填。**派發者不得修改 JSON 內容**;格式不合格重派一次,仍不合格交使用者。
   6. CI `review` 檢查:需要擁有者對目前 head 的意見留言(標記含六席)與排在其後、CHG 相同的擁有者判定留言,且判定為 `merge`。
   7. 判定 `fix`:由開發的模型依修法清單修正,產生新 head 後重跑意見與統整(新派子代理)。同一 PR **連續兩輪**判定 `fix` 時停下交使用者。
   8. 統整席的職責就是讀全部意見與前輪紀錄,**不受 DIR-1 第 11 條(送審 CHG 去除審議紀錄;獨立階段不得看到前輪判決)約束**;意見席的隔離不變。
   9. 統整判定 `merge` 不能取代使用者在確認閘的判斷;判定只決定 DIR-4 預授權的條件是否成立。
-  10. **統整席的資料外送例外**:統整席是 Claude subagent(雲端,Anthropic),讀取的待審資料會送出本機。這是 DIR-1 第 9 條(Codex 席,只限審議席位)之外、另一項**使用者明示**的資料外送例外(使用者 2026-10-28 選擇統整席為「Opus medium(獨立子代理)」,確認閘原話「全部照草案核准」)。範圍只限:本 repo(已公開)PR 的意見留言、CHG 全文、PR diff 與 head 的檔案內容;不含 `config/studio.db`、`outputs/` 產出物、使用者聲線檔或其他 repo 外的資料,也不擴及審議以外的用途。施工者本來就是 Claude subagent(DIR-3),統整席不是新的資料去處。
+  10. **統整席的資料外送例外**:統整席是 Claude subagent(雲端,Anthropic),讀取的待審資料會送出本機。這是 DIR-1 第 9 條(Codex 席,只限審議席位)之外、另一項**使用者明示**的資料外送例外(使用者 2026-10-28 選擇統整席為「Opus medium(獨立子代理)」,確認閘原話「全部照草案核准」)。範圍只限:本 repo(已公開)PR 的意見留言、CHG 全文、PR diff 與 head 的檔案內容(含 head 內 `docs/changes/screens/<CHG-ID>/` 的畫面截圖,第 11 條;以及依第 12 條執行 repo 內既有測試的輸出);不含 `config/studio.db`、`outputs/` 產出物(含 `outputs/ui_check/` 截圖)、使用者聲線檔或其他 repo 外的資料,也不擴及審議以外的用途。統整席 prompt 不得指定 `outputs/` 下任何路徑供統整席讀取(第 3 條判定 JSON 的寫出路徑除外)。施工者本來就是 Claude subagent(DIR-3),統整席不是新的資料去處。
+  11. **畫面截圖改由 repo 內檔提供**:要給統整席核對畫面時,派發者在跑意見(`local_review.py`)之前,把 repo 內測試(如 `tests/ui_check.py`)寫到 `outputs/ui_check/` 的截圖中、該 PR 需要核對的幾張,複製到 `docs/changes/screens/<CHG-ID>/<task>-<原檔名>` 並 commit 進該 PR;統整席只以 `git show <head>:<路徑>` 或第 12 條的副本讀 head 內的截圖。複製前派發者確認截圖由 repo 內測試以替身 / 測試文稿產生,畫面不含使用者聲線檔、`config/studio.db` 或 `projects/` 使用者專案的內容(截圖 commit 後隨 repo 公開);不符就不複製。`tests/ui_check.py` 的截圖位置不變。
+  12. **暫存副本執行測試**:統整席可在 repo 外的暫存目錄(如 session scratchpad)以 `git archive <head sha> | tar -x -C <暫存目錄>` 匯出 head 副本(不用 `git worktree add`),在副本內執行 repo 內既有測試:`UV_OFFLINE=1 ./scripts/check.sh`(可帶測試路徑或 pytest 參數)與 `python3 -m unittest discover -s tests/ci`。界線:只在暫存目錄;不改 repo(含主工作副本、`.git` 的 ref 與 PR 分支;`git fetch origin <head sha>` 屬第 3 條既有讀取);不連網(不對 127.0.0.1 以外的位址連線;依賴快取不足而無法離線執行時,在判定 JSON 記「無法離線執行」,不得改為連網);不執行 `tests/integration/`、`tests/ui_check.py`、`studio_server.py`、`local_models_mcp.py`、`scripts/` 下的治理腳本或統整席自寫的程式。唯一寫出物仍是判定 JSON;副本不得放在 repo 內或 `outputs/`。統整席只在判定 JSON 引用與發現相關的測試結果摘要,不整段轉貼測試輸出。
 - 原因:使用者指示(2026-10-28,原話):「改為審議席提供意見 最後統整為單一獨立審議席全部審議再決議如何修」;追問後選擇:合併由統整席決定、統整席 Opus medium、CI 閘改看統整判定、PR #76 重審暫停待新流程生效。與 DIR-2 第 3 條「merge 的停點只准加嚴」的關係:本條移除 risk、security、compliance 三席的單席否決,是**使用者明示指示的規則變更**(2026-10-28 原話如上;確認閘 2026-10-28 原話「全部照草案核准」),不是 agent 自行放寬;DIR-2 第 3 條的停點本身(程式變更須使用者核准或依 DIR-4 預授權、治理基礎設施需 `infra-approved`)不變。
 - 信度:使用者確認(第 2 條模型、第 6 條閘、第 10 條統整席為雲端 Claude 為使用者選擇;呼叫方式、標記格式、JSON 欄位、連續兩輪停下、隔離不適用為 agent 補上的執行細節,見 CHG-20261028-02 代決事項,使用者可推翻)
 - 狀態:生效(CHG-20261028-02 合進 main 時)
@@ -199,6 +205,9 @@
     - 原因(停點關係句):本條移除否決席的單席否決,是**使用者明示指示的規則變更**,……
   - 2026-10-28 依 CHG-20261028-02 DIR-5 統整報告 M-4(CHG 記錄補正時一併調整用語,意思不變)修訂。原敘述:
     - 第 3 條(片段):統整席只讀,不改檔、不開 PR、不貼留言;
+  - 2026-10-30 依 CHG-20261030-02(使用者 2026-10-30 對 CHG-20261029-01 修訂 1 統整報告 U-2、U-3 的決定,原話:U-2「截圖改存 repo」,說明「Interaction spec 截圖 commit 進 repo,統整席讀 repo 內檔」,做法「派發者複製進 docs(Recommended)」;U-3「明示允許 (Recommended)」,說明「寫明界線：只在暫存目錄、不改 repo、不連網」;確認閘 2026-10-30 原話「Approve all」)修訂第 3、10 條,新增第 11、12 條(無原敘述)。原敘述:
+    - 第 3 條:統整席讀取:該 head 的意見留言全文、CHG 全文(含「## 審議」節與派發記錄)、完整程式(`gh pr diff`;過大時 `git fetch origin <head sha>` 後以 `git show <head>:<路徑>` 讀取)。統整席只讀,不改檔、不另開 PR、不貼留言;唯一寫出物是判定 JSON(`outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,格式見 `scripts/review_decision.py --schema`)。
+    - 第 10 條:**統整席的資料外送例外**:統整席是 Claude subagent(雲端,Anthropic),讀取的待審資料會送出本機。這是 DIR-1 第 9 條(Codex 席,只限審議席位)之外、另一項**使用者明示**的資料外送例外(使用者 2026-10-28 選擇統整席為「Opus medium(獨立子代理)」,確認閘原話「全部照草案核准」)。範圍只限:本 repo(已公開)PR 的意見留言、CHG 全文、PR diff 與 head 的檔案內容;不含 `config/studio.db`、`outputs/` 產出物、使用者聲線檔或其他 repo 外的資料,也不擴及審議以外的用途。施工者本來就是 Claude subagent(DIR-3),統整席不是新的資料去處。
 
 
 ## DIR-7 — 威脅模型:已能寫入本機檔案的攻擊者不在範圍

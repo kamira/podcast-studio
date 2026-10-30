@@ -2,7 +2,7 @@
 
 - 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
 - 分支(Branch):main
-- 版本:v1.12(變更歷程見 §11)
+- 版本:v1.13(變更歷程見 §11)
 - 日期:2026-10-22
 - 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24;v1.5 修改 FR-21、FR-25、FR-31、FR-34 並新增 ADP-12,待 CHG-20261022-01/04 修訂 2 確認閘)
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
@@ -243,10 +243,10 @@
 - **CI/CD(v1.4,CHG-20261022-03 / DIR-2)**:
   - 每個步驟一個 PR:開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號(只改 `docs/knowledge/` 者除外),不直接 push main。
   - merge 前 `document`、`chg`、`program`、`review` 四項 check 必須全部通過。`review` 檢查看擁有者對目前 head 的六席意見留言,以及排在其後、CHG 相同的統整判定留言(`review-decision` 標記)為 `merge`(DIR-6,CHG-20261028-02);各席判決為意見,不具否決效力。
-  - 改到任何程式路徑的 PR,不論風險分級,merge 前一律等使用者核准;只改 `docs/`、`features/` 的 PR 可在 CI 綠後自動 merge。
+  - 改到任何程式路徑的 PR,不論風險分級,merge 前一律等使用者核准;只改 `docs/`、`features/` 的 PR 可在 CI 綠後自動 merge。DIR-5 整合分支的 task PR 同樣適用:合入前先在 CHG「## 派發記錄」寫入使用者核准原話並 commit,再合入(DIR-5 第 8 條,CHG-20261030-02)。
   - 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/review_decision.py`、`scripts/deploy_local.sh`)的 PR,另需擁有者留言 `<!-- infra-approved sha=<head> -->`。
   - main 只允許 squash merge,squash 標題帶 CHG 編號。
-  - 本機審議以 `scripts/local_review.py` 執行(六席意見);DIR-1 第 10 條(暫停 27B)期間,一律帶 `--codex-seats risk,security,compliance`。意見留言貼出後,派發者派一個獨立 Claude subagent(預設 Opus、effort medium,非該 PR 施工者)擔任統整席,寫判定 JSON 至 `outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,再以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定;派發者不得修改 JSON 內容(DIR-6)。統整席是雲端 Claude,讀取待審資料屬 DIR-6 第 10 條的使用者明示資料外送例外,範圍只限本 repo(已公開)PR 的意見留言、CHG 全文、diff 與 head 檔案內容,不含 `config/studio.db`、`outputs/`、聲線檔等repo 外資料;DIR-1 第 9 條(Codex 席)的例外不因此擴大。依 DIR-1 第 12 條,Codex 因用量額度用盡而無法作答時,Codex 擔任的席位(risk、security、compliance)由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,留言模型標記註明代答;其待審資料交給雲端 Claude 屬資料外送例外,範圍同 DIR-6 第 10 條;至使用者明示恢復 Codex 為止。
+  - 本機審議以 `scripts/local_review.py` 執行(六席意見);DIR-1 第 10 條(暫停 27B)期間,一律帶 `--codex-seats risk,security,compliance`。意見留言貼出後,派發者派一個獨立 Claude subagent(預設 Opus、effort medium,非該 PR 施工者)擔任統整席,寫判定 JSON 至 `outputs/.tmp/review_decision/pr-<編號>-<sha12>.json`,再以 `python3 scripts/review_decision.py --pr <編號> --decision-file <JSON> --model <實際模型> --effort <等級>` 貼出判定;派發者不得修改 JSON 內容(DIR-6)。統整席是雲端 Claude,讀取待審資料屬 DIR-6 第 10 條的使用者明示資料外送例外,範圍只限本 repo(已公開)PR 的意見留言、CHG 全文、diff 與 head 檔案內容(含派發者複製進 `docs/changes/screens/<CHG-ID>/` 的畫面截圖,DIR-6 第 11 條),不含 `config/studio.db`、`outputs/`(統整席 prompt 不得指定 `outputs/` 下任何路徑供統整席讀取,DIR-6 第 3 條判定 JSON 的寫出路徑除外)、聲線檔等 repo 外資料;統整席可在暫存目錄以 `git archive` 匯出 head 副本,離線執行 repo 內既有測試,不改 repo、不連網,唯一寫出物仍是判定 JSON(DIR-6 第 12 條);DIR-1 第 9 條(Codex 席)的例外不因此擴大。依 DIR-1 第 12 條,Codex 因用量額度用盡而無法作答時,Codex 擔任的席位(risk、security、compliance)由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,留言模型標記註明代答;其待審資料交給雲端 Claude 屬資料外送例外,範圍同 DIR-6 第 10 條;至使用者明示恢復 Codex 為止。
 
 ## 9. 導入盤點:具名待補項
 
@@ -298,3 +298,4 @@
 | v1.10 | 2026-10-29 | §4 新增 4.6「可選功能(optional;只有使用者提到才處理,不屬待辦)」,收「AI 寫稿可用對話方式調整草稿內容」一條並照錄使用者原話;不給 FR 編號、不列優先級、不列入 §7 與 §9 | 使用者 2026-10-29 指示;CHG-20261029-01 DIR-5 修正 M-6 |
 | v1.11 | 2026-10-30 | FR-39 與 §7 FR-39/40 驗收條件改為「詞庫有顯示字時以顯示字送模型、不加注音,否則以注音標註」(對齊 CHG-20261029-01 修訂 1 R1-4);不新增 ADP 項 | 使用者 2026-10-30 以選項選「一起改」;CHG-20261029-01 修訂 1 結構文件更新 |
 | v1.12 | 2026-10-30 | FR-31 補充「兩張卡片只顯示圖示與名稱,不放說明文字」,§7 FR-31/34/35 驗收條件同步 | 使用者 2026-10-29 原話「另外card不需要description」;CHG-20261030-01 T1 |
+| v1.13 | 2026-10-30 | §8 CI/CD 約定:程式 PR 核准一項補 DIR-5 整合分支 task PR 合入前先記錄核准原話;本機審議一項補統整席讀 repo 內截圖(`docs/changes/screens/`)與暫存副本離線執行既有測試 | 使用者 2026-10-30 對 CHG-20261029-01 修訂 1 統整報告 U-2~U-4 的決定;CHG-20261030-02;DIR-5、DIR-6 |
