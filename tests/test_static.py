@@ -711,6 +711,11 @@ def test_home_has_exactly_two_cards_with_titles():
     titles = [re.search(r'<span class="card-title">([^<]*)</span>', body).group(1) for _, _, body in cards]
     assert titles == ["精靈", "完整模式"]
     assert [href for _, href, _ in cards] == ["#/wizard", "#/full"]
+    # CHG-20261030-01:卡片只顯示圖示與名稱,不放說明文字
+    for _, _, body in cards:
+        assert re.findall(r'<span class="([^"]+)"', body) == ["card-icon", "card-title"]
+    assert "card-desc" not in home
+    assert "card-desc" not in (STATIC / "style.css").read_text(encoding="utf-8")
 
 
 def test_cards_route_to_wizard_and_full_pages():

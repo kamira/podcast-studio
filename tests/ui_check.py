@@ -1221,6 +1221,10 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         cards = home.locator(".home-cards .card")
         expect(cards).to_have_count(2)
         expect(cards.locator(".card-title")).to_have_text(["精靈", "完整模式"])
+        # CHG-20261030-01:卡片只顯示圖示與名稱,不放說明文字
+        expect(home.locator(".card-desc")).to_have_count(0)
+        check([t.replace("✦", "").replace("▤", "").strip() for t in cards.all_inner_texts()] == ["精靈", "完整模式"],
+              "首頁卡片除圖示外只應有名稱")
         expect(home.locator('.page-header [aria-label="設定"]')).to_have_count(1)
         expect(home.locator('.page-header [aria-label="設定"]')).to_be_visible()
         check(home.locator('[aria-label="設定"]').count() == 1, "首頁應恰好一個設定圖示")
