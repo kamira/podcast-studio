@@ -29,7 +29,13 @@
   (CHG-20261029-01 修訂 1 T13)清晰度低於 25% 的警告(整句與字詞)、時間軸的自動補點與放大峰谷、
   合音由詞庫套用時帶顯示字;截圖 clarity-warn.png、pitch-auto.png。替身 shape worker 以
   `breezy_worker.expand_points` 算出 pitch_points(其中一點示意吸附,位置與前端試算不同)。
-不帶參數兩組都跑(先 canvas 再 editor);`--only editor` 只跑 editor。
+- `mcp`(CHG-20261022-02 T3):設定 › MCP 註冊——開頁狀態(不呼叫 claude)、重新檢查、註冊 / 移除確認框
+  (指令與 plan 逐元素相同、取消不呼叫 CLI)、tool_timeout_sec 提醒與片段、CLI 失敗原文、指向其他位置時
+  不做健康檢查、未安裝時按鈕停用、畫面不含 env 值;截圖 mcp.png、mcp-confirm.png。CLI 一律是暫存
+  `HOME/.local/bin/` 內的假 `claude` / `codex` 腳本,本行程的 `HOME`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`
+  指到暫存目錄、`mcp_registry.ROOT` 換成暫存 repo,結束時還原;**不呼叫真 CLI、不讀寫真實設定**,
+  只以唯讀方式比對真實 `~/.codex/config.toml` 的 SHA-256 與真實 `~/.claude.json` 的 `mcpServers` 鍵前後相同。
+不帶參數三組都跑(canvas → editor → mcp);`--only editor`、`--only mcp` 只跑該組。
 
 editor 的替身:語音合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身腳本
 (每句寫一個真的 16 kHz 正弦波 WAV,預覽可實際播放);聲線設定以替身 `taiwan_ai.role_config` 提供;
@@ -1952,6 +1958,363 @@ def run_editor_checks(page, base: str, root: Path, stubs: EditorStubs, problems:
         raise StepFailed(f"步驟「{step['name']}」:{type(e).__name__}:{str(e).splitlines()[0] if str(e) else ''}") from None
 
 
+# ---------- mcp 組(CHG-20261022-02 T3):設定 › MCP 註冊 ----------
+
+MCP_SHOTS = ("mcp.png", "mcp-confirm.png")
+MCP_ENV_KEY = "SECRET" + "_KEY"   # 以拼接組出鍵名,避免秘密掃描的 password-assignment 規則誤判(同 T1 ENV_KEY)
+MCP_FAKE_VAL = "秘密值-7f3a"       # 假 env 值:畫面任何地方都不得出現(D16)
+MCP_ENV_VARS = ("HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "FAKE_LOG", "FAKE_SCENARIO")
+
+# 假 claude / codex(依檔名決定扮演哪一個;行為同 tests/test_mcp_registry.py 的 FAKE_CLI):
+# 只讀寫 CLAUDE_CONFIG_DIR / CODEX_HOME 底下的檔案;收到的 argv 與 cwd 記到 FAKE_LOG;
+# FAKE_SCENARIO 可依「工具_子指令」覆寫結束碼與輸出。
+MCP_FAKE_CLI = r'''#!__PYTHON__
+# -*- coding: utf-8 -*-
+import json, os, sys
+from pathlib import Path
+
+tool = Path(sys.argv[0]).name
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"tool": tool, "argv": args, "cwd": os.getcwd(),
+                        "uv_offline": os.environ.get("UV_OFFLINE")}, ensure_ascii=False) + "\n")
+sc_path = Path(os.environ["FAKE_SCENARIO"])
+sc = json.loads(sc_path.read_text(encoding="utf-8")) if sc_path.exists() else {}
+op = args[1] if len(args) > 1 else ""
+spec = sc.get(tool + "_" + op, {})
+NAME = "local-models"
+
+
+def finish(code, stdout="", stderr=""):
+    code = spec.get("code", code)
+    sys.stdout.write(spec.get("stdout", stdout))
+    sys.stderr.write(spec.get("stderr", stderr))
+    sys.exit(code)
+
+
+effect = "code" not in spec or spec["code"] == 0
+if tool == "claude":
+    cfg = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+    data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
+    servers = data.get("mcpServers") or {}
+    if op == "add":
+        cmd = args[args.index("--") + 1:]
+        if NAME in servers:
+            finish(1, stderr="MCP server local-models already exists in user config\n")
+        if effect:
+            servers[NAME] = {"type": "stdio", "command": cmd[0], "args": cmd[1:], "env": {}}
+            data["mcpServers"] = servers
+            cfg.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        finish(0, stdout="Added stdio MCP server local-models with command: %s to user config\n"
+                          "File modified: %s\n" % (" ".join(cmd), cfg))
+    if op == "remove":
+        if NAME not in servers:
+            finish(1, stderr='No MCP server named "local-models" in user scope\n')
+        if effect:
+            del servers[NAME]
+            cfg.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        finish(0, stdout="Removed MCP server local-models from user config\nFile modified: %s\n" % cfg)
+    if op == "get":
+        if NAME not in servers:
+            finish(1, stderr='No MCP server named "local-models". Run `claude mcp add` to add one.\n')
+        e = servers[NAME]
+        env_lines = "".join("    %s=%s\n" % kv for kv in (e.get("env") or {}).items())
+        finish(0, stdout="local-models:\n  Scope: User config (available in all your projects)\n"
+                         "  Status: ✔ Connected\n  Type: stdio\n  Command: %s\n  Args: %s\n"
+                         "  Environment:\n%s\nTo remove this server, run: claude mcp remove local-models -s user\n"
+                         % (e.get("command"), " ".join(e.get("args") or []), env_lines))
+    finish(2, stderr="假 claude:不認得的指令\n")
+
+state_path = Path(os.environ["CODEX_HOME"]) / "fake_state.json"
+state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+if op == "add":
+    cmd = args[args.index("--") + 1:]
+    if effect:
+        state[NAME] = {"command": cmd[0], "args": cmd[1:], "env": None, "tool_timeout_sec": None}
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    finish(0, stdout="Added global MCP server 'local-models'.\n")
+if op == "remove":
+    if NAME not in state:
+        finish(0, stdout="No MCP server named 'local-models' found.\n")
+    if effect:
+        del state[NAME]
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    finish(0, stdout="Removed global MCP server 'local-models'.\n")
+if op == "get":
+    if NAME not in state:
+        finish(1, stderr="Error: No MCP server named 'local-models' found.\n")
+    e = state[NAME]
+    finish(0, stdout=json.dumps({
+        "name": NAME, "enabled": True, "disabled_reason": None,
+        "transport": {"type": "stdio", "command": e["command"], "args": e["args"], "env": e["env"],
+                      "env_vars": [], "cwd": None},
+        "enabled_tools": None, "disabled_tools": None, "startup_timeout_sec": None,
+        "tool_timeout_sec": e["tool_timeout_sec"]}, ensure_ascii=False) + "\n")
+finish(2, stderr="假 codex:不認得的指令\n")
+'''
+
+
+def real_home() -> Path:
+    import os
+    import pwd
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def real_mcp_snapshot() -> dict:
+    """唯讀:真實 ~/.codex/config.toml 的 SHA-256 與真實 ~/.claude.json 的 mcpServers 鍵(不存在時為 None)。"""
+    import hashlib
+    home = real_home()
+    snap = {}
+    toml = home / ".codex" / "config.toml"
+    snap["codex"] = hashlib.sha256(toml.read_bytes()).hexdigest() if toml.is_file() else None
+    cj = home / ".claude.json"
+    snap["claude"] = None
+    if cj.is_file():
+        for _ in range(10):   # Claude Code 執行中會頻繁改寫該檔;讀到寫一半時重試
+            try:
+                snap["claude"] = json.dumps(json.loads(cj.read_text(encoding="utf-8")).get("mcpServers"),
+                                            sort_keys=True, ensure_ascii=False)
+                break
+            except (ValueError, OSError):
+                time.sleep(0.2)
+        else:
+            snap["claude"] = "無法讀取"
+    return snap
+
+
+class McpStubs:
+    """暫存 HOME(含假 `~/.local/bin/claude`、`codex`、`uv`)、CLAUDE_CONFIG_DIR(= 暫存 HOME)、
+    CODEX_HOME(= 暫存 HOME/.codex);repo 根目錄替身為暫存 repo。"""
+
+    def __init__(self, tmp: Path, root: Path):
+        self.tmp = tmp
+        self.root = root
+        self.home = tmp / "home"
+        self.bin = self.home / ".local" / "bin"
+        self.claude_dir = self.home
+        self.codex_dir = self.home / ".codex"
+        self.log = tmp / "fake_log.jsonl"
+        self.scenario = tmp / "scenario.json"
+        for d in (self.bin, self.codex_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        script = MCP_FAKE_CLI.replace("__PYTHON__", sys.executable)
+        for tool in ("claude", "codex"):
+            p = self.bin / tool
+            p.write_text(script, encoding="utf-8")
+            p.chmod(0o755)
+        (self.bin / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (self.bin / "uv").chmod(0o755)
+        self.uv = str(self.bin / "uv")
+        self.good_args = ["run", "--script", str(root / "local_models_mcp.py")]
+
+    def env(self) -> dict:
+        return {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(self.claude_dir), "CODEX_HOME": str(self.codex_dir),
+                "FAKE_LOG": str(self.log), "FAKE_SCENARIO": str(self.scenario)}
+
+    def set_scenario(self, **kw):
+        self.scenario.write_text(json.dumps(kw, ensure_ascii=False), encoding="utf-8")
+
+    def calls(self, tool=None, op=None) -> list:
+        if not self.log.exists():
+            return []
+        rows = [json.loads(x) for x in self.log.read_text(encoding="utf-8").splitlines() if x.strip()]
+        return [r for r in rows if (tool is None or r["tool"] == tool)
+                and (op is None or (len(r["argv"]) > 1 and r["argv"][1] == op))]
+
+    def claude_register(self, command=None, env=None):
+        obj = {"oauthAccount": {"emailAddress": "假帳號-ui-3e8c@example.com"}, "numStartups": 3,
+               "mcpServers": {"local-models": {"type": "stdio", "command": command or self.uv,
+                                               "args": self.good_args, "env": env or {}}}}
+        (self.claude_dir / ".claude.json").write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+
+    def claude_settings(self, env):
+        (self.claude_dir / "settings.json").write_text(json.dumps({"env": env}), encoding="utf-8")
+
+    def codex_state(self) -> dict:
+        p = self.codex_dir / "fake_state.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+    def codex_update(self, **fields):
+        st = self.codex_state()
+        st["local-models"].update(fields)
+        (self.codex_dir / "fake_state.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+
+
+def run_mcp_checks(page, base: str, stubs: McpStubs, problems: list) -> None:
+    from playwright.sync_api import expect
+
+    step = {"name": ""}
+
+    def begin(name):
+        step["name"] = name
+        print(f"・{name}", flush=True)
+
+    claude, codex = page.locator("#mcp-claude"), page.locator("#mcp-codex")
+    dialog = page.locator("#mcp-dialog")
+    kv = MCP_ENV_KEY + "=" + MCP_FAKE_VAL
+    home = str(real_home())
+
+    def clean_page():
+        """畫面文字(含對話框)不含 env 值、暫存目錄與家目錄的絕對路徑。"""
+        text = page.evaluate("() => document.body.innerText + '\\n' + document.getElementById('mcp-dialog').innerText")
+        check(MCP_FAKE_VAL not in text, "畫面不得出現 env 值")
+        for p in {str(stubs.tmp), str(stubs.tmp.resolve()), home}:
+            check(p not in text, "畫面不得出現暫存目錄或家目錄的絕對路徑")
+
+    def argv_shown():
+        return page.locator("#mcp-argv .mcp-arg").all_text_contents()
+
+    def open_dialog(client):
+        with page.expect_response(lambda r: r.url.endswith("/api/mcp/plan")) as resp:
+            page.locator(f"#mcp-{client}-action").click()
+        expect(dialog).to_be_visible()
+        return resp.value.json()
+
+    def recheck():
+        with page.expect_response(lambda r: r.url.endswith("/api/mcp/status")):
+            page.locator("#mcp-check").click()
+        expect(page.locator("#mcp-check")).to_be_enabled()
+
+    try:
+        begin("設定 › MCP 註冊:開頁顯示兩個 client 的狀態,不呼叫 claude")
+        stubs.claude_register(env={MCP_ENV_KEY: MCP_FAKE_VAL})
+        stubs.claude_settings({"MCP_TOOL_TIMEOUT": "1800000"})
+        page.goto(base + "/#/settings/mcp")
+        expect(page.locator('.subnav-link[data-sub="mcp"]')).to_have_attribute("aria-current", "page")
+        expect(page.locator('.subpage[data-sub="mcp"]')).to_be_visible()
+        expect(page.locator("#cfg-actions")).to_be_hidden()
+        expect(claude.locator(".mcp-state")).to_have_text("✔ 已註冊(user scope,指向本 repo)")
+        expect(codex.locator(".mcp-state")).to_have_text("✖ 未註冊")
+        expect(page.locator("#mcp-loading")).to_be_hidden()
+        expect(page.locator("#mcp-server-cmd")).to_have_text("~/.local/bin/uv run --script <repo>/local_models_mcp.py")
+        expect(claude.locator(".mcp-health")).to_have_text("連線:尚未檢查(按「重新檢查」會啟動一次 MCP 伺服器)")
+        expect(claude.locator(".mcp-timeout")).to_have_text("✔ MCP_TOOL_TIMEOUT 已設定(1800000)")
+        expect(claude.locator(".mcp-info")).to_contain_text(MCP_ENV_KEY + "(已設定)")
+        expect(page.locator("#mcp-claude-action")).to_have_text("移除")
+        expect(page.locator("#mcp-claude-action")).to_be_enabled()
+        expect(page.locator("#mcp-codex-action")).to_have_text("註冊")
+        expect(page.locator("#mcp-codex-action")).to_be_enabled()
+        check(stubs.calls("claude") == [], f"開頁不得呼叫 claude:{stubs.calls('claude')}")
+        check(len(stubs.calls("codex", "get")) >= 1, "開頁應呼叫 codex mcp get --json")
+        check(all(c["uv_offline"] == "1" for c in stubs.calls()), "CLI 子程序應帶 UV_OFFLINE=1")
+        clean_page()
+
+        begin("按「重新檢查」→ 呼叫 claude mcp get 一次並顯示連線結果")
+        recheck()
+        expect(claude.locator(".mcp-health")).to_have_text(re.compile(r"^連線:✔ 已連線"))
+        got = stubs.calls("claude")
+        check(len(got) == 1 and got[0]["argv"] == ["mcp", "get", "local-models"], f"應恰呼叫 claude mcp get 一次:{got}")
+        check(Path(got[0]["cwd"]).resolve() == stubs.root.resolve(), "claude mcp get 的 cwd 應為 repo 根目錄")
+        clean_page()
+
+        begin("Codex「註冊」→ 確認框的指令與 plan 回應逐元素相同,含路徑說明")
+        plan = open_dialog("codex")
+        want = ["~/.local/bin/codex", "mcp", "add", "local-models", "--", "~/.local/bin/uv", "run", "--script",
+                "<repo>/local_models_mcp.py"]
+        check(plan["argv"] == want, f"plan 的 argv 不符:{plan['argv']}")
+        check(argv_shown() == plan["argv"], f"確認框的指令應與 plan 逐元素相同:{argv_shown()}")
+        expect(page.locator("#mcp-dialog-title")).to_have_text("確認:註冊到 Codex")
+        expect(page.locator("#mcp-files")).to_contain_text("~/.codex/config.toml")
+        expect(page.locator("#mcp-warnings")).to_contain_text("無法設定 tool_timeout_sec")
+        expect(page.locator("#mcp-path-note")).to_have_text("~ 為家目錄、<repo> 為本 repo 位置,執行時展開為絕對路徑。")
+        expect(page.locator("#mcp-current")).to_be_hidden()
+
+        begin("按「取消」→ 不呼叫 CLI、不註冊")
+        n = len(stubs.calls())
+        page.locator("#mcp-cancel").click()
+        expect(dialog).to_be_hidden()
+        page.wait_for_timeout(300)
+        check(len(stubs.calls()) == n, "按「取消」後不得再呼叫 CLI")
+        check(stubs.codex_state() == {}, "按「取消」後不得註冊")
+
+        begin("再按「註冊」→「確認執行」→ 已註冊,顯示沒有 tool_timeout_sec 的提醒與片段")
+        open_dialog("codex")
+        page.locator("#mcp-confirm").click()
+        expect(dialog).to_be_hidden()
+        expect(page.locator("#mcp-result-title")).to_have_text("已註冊到 Codex")
+        expect(codex.locator(".mcp-state")).to_have_text("✔ 已註冊(指向本 repo)")
+        expect(codex.locator(".mcp-timeout")).to_have_text("⚠ 沒有 tool_timeout_sec;長工具可能逾時。請手動加入:")
+        expect(codex.locator(".mcp-snippet")).to_have_text("[mcp_servers.local-models]\ntool_timeout_sec = 1800")
+        expect(codex.locator(".mcp-copy")).to_be_visible()
+        adds = stubs.calls("codex", "add")
+        check(len(adds) == 1 and adds[0]["argv"] == ["mcp", "add", "local-models", "--", stubs.uv, *stubs.good_args],
+              f"codex mcp add 應恰呼叫一次且參數正確:{adds}")
+        check(stubs.codex_state()["local-models"]["args"] == stubs.good_args, "暫存 Codex 設定應已註冊本 repo")
+        clean_page()
+
+        begin("手動加 tool_timeout_sec 後重新檢查 → 顯示 tool_timeout_sec = 1800(截圖 mcp.png)")
+        stubs.codex_update(tool_timeout_sec=1800.0, env={MCP_ENV_KEY: MCP_FAKE_VAL})
+        recheck()
+        expect(page.locator("#mcp-result")).to_be_hidden()
+        expect(codex.locator(".mcp-timeout")).to_have_text("✔ tool_timeout_sec = 1800")
+        expect(codex.locator(".mcp-snippet")).to_have_count(0)
+        expect(claude.locator(".mcp-health")).to_have_text(re.compile(r"^連線:✔ 已連線"))
+        expect(page.locator("#mcp-codex-action")).to_have_text("移除")
+        clean_page()
+        page.evaluate("() => { document.getElementById('toast').hidden = true; }")   # 前一步的提示訊息不入鏡
+        page.screenshot(path=str(SHOT_DIR / "mcp.png"))
+
+        begin("Codex「移除」確認框:有 tool_timeout_sec 時顯示逾時消失警告與片段(截圖 mcp-confirm.png)")
+        plan = open_dialog("codex")
+        check(argv_shown() == plan["argv"] == ["~/.local/bin/codex", "mcp", "remove", "local-models"],
+              f"移除指令不符:{argv_shown()}")
+        expect(page.locator("#mcp-dialog-title")).to_have_text("確認:從 Codex 移除")
+        expect(page.locator("#mcp-warnings")).to_contain_text("tool_timeout_sec = 1800 會一起消失,重新註冊也不會帶回")
+        expect(page.locator("#mcp-current")).to_contain_text("tool_timeout_sec = 1800")
+        expect(page.locator("#mcp-current")).to_contain_text(MCP_ENV_KEY + "(已設定)")
+        expect(page.locator("#mcp-snippet")).to_have_text("[mcp_servers.local-models]\ntool_timeout_sec = 1800")
+        expect(page.locator("#mcp-copy")).to_be_visible()
+        expect(page.locator("#mcp-confirm")).to_have_class(re.compile(r"\bbtn-danger\b"))
+        clean_page()
+        page.screenshot(path=str(SHOT_DIR / "mcp-confirm.png"))
+        page.locator("#mcp-cancel").click()
+        expect(dialog).to_be_hidden()
+        check(len(stubs.calls("codex", "remove")) == 0, "按「取消」後不得呼叫 codex mcp remove")
+
+        begin("假 CLI 回非 0 → 畫面顯示 CLI 錯誤原文,且不含 env 值")
+        stubs.set_scenario(codex_remove={"code": 1, "stderr": "假錯誤:無法寫入設定檔\n" + kv + "\n"})
+        open_dialog("codex")
+        page.locator("#mcp-confirm").click()
+        expect(dialog).to_be_hidden()
+        expect(page.locator("#mcp-result-title")).to_have_text("執行失敗(結束碼 1)")
+        expect(page.locator("#mcp-result-output")).to_contain_text("假錯誤:無法寫入設定檔")
+        expect(page.locator("#mcp-result-output")).to_contain_text(MCP_ENV_KEY)
+        expect(codex.locator(".mcp-state")).to_have_text("✔ 已註冊(指向本 repo)")
+        clean_page()
+        stubs.set_scenario()
+
+        begin("Claude 健康檢查失敗 → 顯示失敗與 CLI 錯誤原文,不含 env 值")
+        stubs.set_scenario(claude_get={"code": 1, "stderr": "健康檢查失敗:無法連線\n  Environment:\n    " + kv + "\n"})
+        recheck()
+        expect(claude.locator(".mcp-health")).to_have_text("連線:✖ 健康檢查失敗")
+        expect(claude.locator(".mcp-detail")).to_contain_text("健康檢查失敗:無法連線")
+        expect(claude.locator(".mcp-detail")).to_contain_text(MCP_ENV_KEY)
+        clean_page()
+        stubs.set_scenario()
+
+        begin("Claude 指向其他位置 → 重新檢查不呼叫 claude,顯示「不做健康檢查」")
+        stubs.claude_register(command="/opt/其他位置/uv")
+        n = len(stubs.calls("claude"))
+        recheck()
+        expect(claude.locator(".mcp-state")).to_have_text(re.compile(r"^⚠ 已註冊,但指向其他位置"))
+        expect(claude.locator(".mcp-health")).to_have_text("不做健康檢查:註冊內容不是本 repo 的伺服器")
+        expect(page.locator("#mcp-claude-action")).to_have_text("移除")
+        check(len(stubs.calls("claude")) == n, "Claude 指向其他位置時重新檢查不得呼叫 claude")
+
+        begin("Codex 未安裝(假 CLI 不存在)→ 按鈕停用")
+        (stubs.bin / "codex").unlink()
+        recheck()
+        expect(codex.locator(".mcp-state")).to_have_text("— 未安裝(找不到 ~/.local/bin/codex)")
+        expect(page.locator("#mcp-codex-action")).to_be_disabled()
+        clean_page()
+    except StepFailed as e:
+        raise StepFailed(f"步驟「{step['name']}」:{e}") from None
+    except AssertionError as e:
+        raise StepFailed(f"步驟「{step['name']}」:畫面不符預期({str(e).splitlines()[0] if str(e) else 'AssertionError'})") from None
+    except Exception as e:  # Playwright 逾時等
+        raise StepFailed(f"步驟「{step['name']}」:{type(e).__name__}:{str(e).splitlines()[0] if str(e) else ''}") from None
+
+
 # ---------- 執行一組檢查 ----------
 
 def run_suite(browser, suite: str) -> int:
@@ -1959,7 +2322,10 @@ def run_suite(browser, suite: str) -> int:
     from playwright.sync_api import Error as PwError
     import uvicorn
 
+    import os
+
     import heavy_lock
+    import mcp_registry
     import nodes
     import project
     import settings
@@ -1970,10 +2336,17 @@ def run_suite(browser, suite: str) -> int:
     print(f"── {suite} ──", flush=True)
     tmp = Path(tempfile.mkdtemp(prefix=f"ui_check-{suite}-")).resolve()
     saved: list[tuple] = []
+    saved_env: dict[str, str | None] = {}
+    real_before = real_mcp_snapshot() if suite == "mcp" else None
 
     def patch(obj, attr, value):
         saved.append((obj, attr, getattr(obj, attr)))
         setattr(obj, attr, value)
+
+    def patch_env(values: dict):
+        for k, v in values.items():
+            saved_env.setdefault(k, os.environ.get(k))
+            os.environ[k] = v
 
     server = None
     thread = None
@@ -2004,6 +2377,16 @@ def run_suite(browser, suite: str) -> int:
             patch(tts_service, "_shape_argv", stubs.shape_argv)
             patch(taiwan_ai, "role_config", lambda role: {"wav": "voice/voice.wav", "text": VOICE_TEXT})
             kwargs = {"render": stubs.render, "annotate": stubs.annotate}
+        elif suite == "mcp":
+            # 本行程內把 HOME / CLAUDE_CONFIG_DIR / CODEX_HOME 指到暫存目錄(CLI 路徑因此是暫存的假 CLI),
+            # mcp_registry.ROOT 換成暫存 repo;結束時還原。不呼叫真 CLI、不讀寫真實設定。
+            stubs = McpStubs(tmp, root)
+            patch_env(stubs.env())
+            patch(mcp_registry, "ROOT", root)
+            outside = [k for k, v in mcp_registry.paths().items() if not str(v).startswith(str(tmp))]
+            if outside:
+                print(f"UI 檢查失敗(mcp):步驟「暫存設定目錄」:{'、'.join(outside)} 不在暫存目錄", file=sys.stderr)
+                return 1
         app = ss.create_app(runner=runner, root=root, ollama_tags=lambda: list(STUB_TAGS), **kwargs)
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
                                                proxy_headers=False, server_header=False))
@@ -2027,6 +2410,8 @@ def run_suite(browser, suite: str) -> int:
             try:
                 if suite == "editor":
                     run_editor_checks(page, base, root, stubs, problems)
+                elif suite == "mcp":
+                    run_mcp_checks(page, base, stubs, problems)
                 else:
                     run_checks(page, base, root, runner, settings, problems)
                 csp = page.evaluate("window.__csp || []")
@@ -2049,8 +2434,17 @@ def run_suite(browser, suite: str) -> int:
             thread.join(timeout=10)
         for obj, attr, value in reversed(saved):
             setattr(obj, attr, value)
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         shutil.rmtree(tmp, ignore_errors=True)
 
+    if real_before is not None and real_mcp_snapshot() != real_before:
+        print(f"UI 檢查失敗({suite}):步驟「確認真實設定不變」:真實 ~/.codex/config.toml 或 "
+              "~/.claude.json 的 mcpServers 被改動", file=sys.stderr)
+        return 1
     if problems:
         print(f"UI 檢查失敗({suite}):步驟「瀏覽器 console 與 CSP」:", file=sys.stderr)
         for p in problems:
@@ -2059,15 +2453,16 @@ def run_suite(browser, suite: str) -> int:
     return 0
 
 
-SUITES = {"canvas": CANVAS_SHOTS, "editor": EDITOR_SHOTS}
+SUITES = {"canvas": CANVAS_SHOTS, "editor": EDITOR_SHOTS, "mcp": MCP_SHOTS}
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="UI 互動檢查(無頭 Chromium)")
-    ap.add_argument("--only", choices=["editor"],
-                    help="只跑指定的一組檢查(editor = CHG-20261022-04 的首頁、精靈、完整模式與剪輯);不帶則全部")
+    ap.add_argument("--only", choices=["editor", "mcp"],
+                    help="只跑指定的一組檢查(editor = CHG-20261022-04 的首頁、精靈、完整模式與剪輯;"
+                         "mcp = CHG-20261022-02 的設定 › MCP 註冊);不帶則全部")
     args = ap.parse_args(argv)
-    suites = [args.only] if args.only else ["canvas", "editor"]
+    suites = [args.only] if args.only else ["canvas", "editor", "mcp"]
 
     try:
         from playwright.sync_api import Error as PwError, expect, sync_playwright

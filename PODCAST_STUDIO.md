@@ -168,6 +168,17 @@ args = ["run", "--script", "/Users/weiss/Documents/github/podcast-studio/local_m
 tool_timeout_sec = 1800
 ```
 
+> **網頁操作(CHG-20261022-02,FR-22)**:也可以在網頁設定頁「MCP 註冊」子頁(首頁右上角 ⚙ → 設定 › MCP 註冊,`#/settings/mcp`)查詢、註冊、移除 local-models。網頁一律呼叫上面同樣的官方 CLI(`~/.local/bin/claude mcp add/remove -s user`、`~/.local/bin/codex mcp add/remove`),確認框列出完整指令,按「確認執行」後才執行;開頁不啟動 MCP 伺服器,按「重新檢查」才會由 `claude mcp get` 啟動一次做健康檢查。
+
+> **Codex 的 `tool_timeout_sec` 需手動補**:`codex mcp add` 沒有設定 `tool_timeout_sec` 的參數,從網頁(或 CLI)移除再註冊後這一行會消失,長工具(`speak`、`make_video`、`reason(heavy)`)可能逾時。網頁的移除確認框會提醒;註冊後在 `~/.codex/config.toml` 的 `[mcp_servers.local-models]` 段落加回下面這行,再以 `codex mcp get local-models --json` 確認 `tool_timeout_sec` 為 1800:
+>
+> ```toml
+> [mcp_servers.local-models]
+> tool_timeout_sec = 1800
+> ```
+
+> **`MCP_TOOL_TIMEOUT` 不由網頁寫入**:Claude Code 的 `MCP_TOOL_TIMEOUT`(`~/.claude/settings.json` 的 `env`)網頁只讀取並提醒(建議值 `1800000`),不會修改 `~/.claude/settings.json`;沒設定時請依上面的 JSON 片段自行加入。
+
 ### 10.4 設計重點
 
 | 項目 | 處理方式 |

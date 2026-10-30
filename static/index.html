@@ -190,6 +190,7 @@
     <a class="subnav-link" href="#/settings/voice" data-sub="voice">語音預設</a>
     <a class="subnav-link" href="#/settings/flow" data-sub="flow">進階流程</a>
     <a class="subnav-link" href="#/settings/fusion" data-sub="fusion">合音詞庫</a>
+    <a class="subnav-link" href="#/settings/mcp" data-sub="mcp">MCP 註冊</a>
   </nav>
 
   <!-- 設定表單(T12):模型、審議席位與語音預設(CHG-20261022-04 T8)三個子頁共用提示列與「還原預設 / 儲存」;
@@ -336,6 +337,38 @@
           <input type="number" id="fusion-max-rows" min="10" max="10000" step="1" inputmode="numeric"></label>
         <button type="button" class="btn" id="fusion-limits-save">儲存上限</button>
       </div>
+    </section>
+  </div>
+
+  <!-- 設定 › MCP 註冊(CHG-20261022-02 T3,FR-22):只管理 local-models 在 Claude Code / Codex 的 user scope 註冊;
+       狀態、指令與 CLI 輸出一律由 app.js 以 textContent 填入。不屬 FORM_SUBPAGES(不共用「還原預設 / 儲存」,D14) -->
+  <div class="subpage settings-sub" data-sub="mcp" hidden>
+    <section class="settings-section mcp-section">
+      <h2 class="section-title">MCP 註冊</h2>
+      <p class="section-hint">只管理 local-models 在 Claude Code 與 Codex 的 user scope 註冊 · 寫入一律經官方 CLI,執行前先確認 · 開頁不啟動 MCP 伺服器</p>
+      <div class="mcp-server">
+        <span class="mcp-server-label">local-models 伺服器:</span>
+        <code class="mcp-code" id="mcp-server-cmd"></code>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="mcp-check" title="會啟動一次 MCP 伺服器做健康檢查">重新檢查</button>
+      </div>
+      <p class="notice notice-info" id="mcp-loading">讀取註冊狀態中…</p>
+      <p class="notice notice-err" id="mcp-error" role="alert" hidden></p>
+      <div class="mcp-client" id="mcp-claude" data-client="claude">
+        <span class="mcp-name">Claude Code</span>
+        <div class="mcp-body" id="mcp-claude-body"></div>
+        <button type="button" class="btn mcp-action" id="mcp-claude-action" disabled>註冊</button>
+      </div>
+      <div class="mcp-client" id="mcp-codex" data-client="codex">
+        <span class="mcp-name">Codex</span>
+        <div class="mcp-body" id="mcp-codex-body"></div>
+        <button type="button" class="btn mcp-action" id="mcp-codex-action" disabled>註冊</button>
+      </div>
+      <div class="mcp-result" id="mcp-result" role="status" hidden>
+        <p class="mcp-result-title" id="mcp-result-title"></p>
+        <pre class="mcp-pre" id="mcp-result-output"></pre>
+      </div>
+      <p class="section-hint">~ 為家目錄、&lt;repo&gt; 為本 repo 位置 · MCP_TOOL_TIMEOUT 與 tool_timeout_sec 只提醒,網頁不會修改</p>
     </section>
   </div>
 
@@ -487,6 +520,30 @@
     <div class="dialog-actions">
       <button type="button" class="btn" id="wf-cancel">取消</button>
       <button type="submit" class="btn btn-primary" id="wf-submit">存檔</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- MCP 註冊確認框(CHG-20261022-02 T3):指令逐元素列出、會修改的檔案、目前註冊內容、警告、路徑說明;
+     內容一律由 app.js 以 textContent 填入 -->
+<dialog id="mcp-dialog" class="dialog mcp-dialog" aria-labelledby="mcp-dialog-title">
+  <form id="mcp-form" class="dialog-form" method="dialog" novalidate>
+    <h2 id="mcp-dialog-title" class="dialog-title">確認</h2>
+    <p class="dialog-label">將執行:</p>
+    <code class="mcp-code mcp-argv" id="mcp-argv"></code>
+    <p class="mcp-files" id="mcp-files"></p>
+    <p class="mcp-current" id="mcp-current" hidden></p>
+    <div class="mcp-warnings" id="mcp-warnings"></div>
+    <div class="mcp-snippet-box" id="mcp-snippet-box" hidden>
+      <pre class="mcp-pre mcp-snippet" id="mcp-snippet"></pre>
+      <button type="button" class="btn btn-small" id="mcp-copy">複製片段</button>
+    </div>
+    <p class="dialog-hint" id="mcp-path-note">~ 為家目錄、&lt;repo&gt; 為本 repo 位置,執行時展開為絕對路徑。</p>
+    <p class="dialog-hint" id="mcp-var-note" hidden>$CLAUDE_CONFIG_DIR、$CODEX_HOME 為伺服器啟動時指定的設定目錄。</p>
+    <p class="dialog-error" id="mcp-dialog-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="mcp-cancel">取消</button>
+      <button type="button" class="btn btn-primary" id="mcp-confirm">確認執行</button>
     </div>
   </form>
 </dialog>
