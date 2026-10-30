@@ -87,6 +87,25 @@ FastAPI + 原生 JS;只綁 127.0.0.1:7860。本檔提供:
   在執行緒池中執行,不阻塞事件迴圈;回應上限 MAX_TAGS_BYTES。
   所有錯誤訊息與 `_warnings` 一律經 `scrub()`,不送本機絕對路徑。
 
+MCP 註冊 API(CHG-20261022-02 T2,FR-22;邏輯全在 `mcp_registry.py`,本檔只做請求檢查與轉接):
+
+  三個端點一律 POST(查狀態也會啟動 CLI 子程序,要 Origin + Token;GET 回 405)。本文為 JSON 物件、
+  上限 MAX_MCP_BODY(超過 413);不是 JSON 物件、有 MCP_FIELDS 以外的欄位 → 422。瀏覽器只能傳
+  `client`(claude / codex)、`action`(register / remove)兩個列舉值與布林 `check`、`confirm`,
+  CLI 指令、路徑、名稱與 scope 全部由 `mcp_registry` 組出。
+  POST /api/mcp/status           {"check": bool}(可省略或空本文,預設 false)→ 200 `mcp_registry.status(check)`;
+                                 check 不是布林 → 422。check:false 不呼叫 `claude mcp get`(不啟動 MCP 伺服器)
+  POST /api/mcp/plan             {"client", "action"} → 200 `mcp_registry.plan()`({"argv", "files", "current",
+                                 "warnings"};只組指令、不執行寫入)
+  POST /api/mcp/apply            {"client", "action", "confirm": true} → 200 `mcp_registry.apply()`({"ok",
+                                 "exit_code", "output", "status"};CLI 失敗時 ok=false、output 為 CLI 錯誤原文,仍回 200)。
+                                 confirm 缺少或不是 JSON true(含字串 "true"、1)→ 400,不呼叫 CLI
+  plan / apply 的 client、action 不在列舉內(含缺少),或目前狀態不允許該動作(已註冊再註冊、未註冊移除、
+  狀態不明、未安裝)→ 422(`mcp_registry` 丟的 ValueError,繁中訊息);另一個 MCP 操作執行中
+  (`mcp_registry.Busy`,不進 heavy_lock)→ 409。錯誤回應 {"error": 繁中訊息}。
+  回應一律 `Cache-Control: no-store`;字串在 `mcp_registry` 已依「去除 env 值 → scrub → 截斷 64 KB」處理,
+  本檔再經一次 `scrub()`。
+
 專案 API(CHG-20261022-04 T6;資料模型見 project.py 檔頭,專案目錄由 `project.ROOT` 決定):
 
   共通:{p} 為專案名稱(`names.py` 中英日白名單,1~64 字;含 `.`、`..`、`%2e%2e`、`/` 一律 400)。
@@ -217,6 +236,7 @@ from starlette.concurrency import run_in_threadpool  # noqa: E402
 import executor  # noqa: E402
 import fusion  # noqa: E402
 import heavy_lock  # noqa: E402
+import mcp_registry  # noqa: E402
 import media  # noqa: E402
 import names  # noqa: E402
 import nodes  # noqa: E402
@@ -249,6 +269,9 @@ SSE_POLL_SECONDS = 0.05
 SSE_KEEPALIVE_SECONDS = 15.0
 MAX_UPLOAD = 200 * 1024 * 1024   # 上傳上限(CHG 代決事項)
 MAX_CONFIG_BODY = 256 * 1024     # PUT /api/config 本文上限(逐字稿 20000 字以 \uXXXX 跳脫仍在範圍內)
+MAX_MCP_BODY = 4 * 1024          # /api/mcp/* 本文上限(只有 client、action、check、confirm 四個小欄位)
+MCP_FIELDS = {"status": ("check",), "plan": ("client", "action"),
+              "apply": ("client", "action", "confirm")}   # 各端點只接受這些欄位,其餘 422
 OLLAMA_TIMEOUT = 3               # 秒;查 /api/tags 不重試
 MAX_TAGS_BYTES = 4 * 1024 * 1024  # /api/tags 回應上限
 CONFIG_EXTRA_KEYS = ("_warnings", "meta")   # GET 回應附加、PUT 時忽略的鍵
@@ -1434,6 +1457,44 @@ def create_app(runner: Callable | None = None, token: str | None = None,
         body = {"ollama": ollama, **_installed_tools(),
                 "voices": settings.voice_options(settings.MAX_VOICE_OPTIONS)}
         return JSONResponse(_scrub_obj(body), headers={"Cache-Control": "no-store"})
+
+    # ---------- MCP 註冊 API(CHG-20261022-02 T2;回應格式見檔頭) ----------
+
+    async def mcp_call(request: Request, kind: str) -> JSONResponse:
+        """解析本文、檢查欄位後在執行緒池呼叫 mcp_registry;回應一律 no-store、字串經 scrub()。"""
+        try:
+            data = await _json(request, MAX_MCP_BODY, allow_empty=(kind == "status"))
+            _only_keys(data, MCP_FIELDS[kind])
+            if kind == "status":
+                check = data.get("check", False)
+                if not isinstance(check, bool):
+                    raise ApiError(422, "check 必須是 true 或 false")
+                work = functools.partial(mcp_registry.status, check)
+            else:
+                if kind == "apply" and data.get("confirm") is not True:
+                    raise ApiError(400, "執行前需要確認:請帶 {\"confirm\": true}")
+                fn = mcp_registry.plan if kind == "plan" else mcp_registry.apply
+                work = functools.partial(fn, data.get("client"), data.get("action"))
+            body, status = _scrub_obj(await run_in_threadpool(work)), 200
+        except ApiError as e:
+            body, status = {"error": scrub(e.message)}, e.status
+        except mcp_registry.Busy:
+            body, status = {"error": "另一個 MCP 註冊操作執行中,請稍後再試"}, 409
+        except ValueError as e:   # 列舉外的值、狀態不允許該動作(mcp_registry 的繁中訊息)
+            body, status = {"error": scrub(str(e)) or "請求內容不正確"}, 422
+        return JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/mcp/status")
+    async def api_mcp_status(request: Request):
+        return await mcp_call(request, "status")
+
+    @app.post("/api/mcp/plan")
+    async def api_mcp_plan(request: Request):
+        return await mcp_call(request, "plan")
+
+    @app.post("/api/mcp/apply")
+    async def api_mcp_apply(request: Request):
+        return await mcp_call(request, "apply")
 
     # ---------- 專案 API(CHG-20261022-04 T6;回應格式見檔頭) ----------
 
