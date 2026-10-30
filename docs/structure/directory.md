@@ -7,6 +7,7 @@
 > 2026-10-28 依 CHG-20261022-04 結構文件更新(DIR-5 修正輪,以整合分支 `chg/CHG-20261022-04-impl` 的 T1~T9 與修正為準):新增 `breezy_worker.py`、`names.py`、`project.py`、`timeline.py`、`tts_service.py`、`projects/`(ignored)、`static/project.js`、`static/timeline.js`、`static/wizard.js`、`static/edit.js`、`tests/integration/`;`nodes.py` 為十一種節點;`docs/changes/review/` 放 DIR-5 統整報告。
 > 2026-10-28 依 CHG-20261028-01 結構文件更新:新增 `.review/`(本機審議 Codex 席的 PR head 唯讀檢視,ignored);`scripts/local_review.py` 限制改記。
 > 2026-10-28 依 CHG-20261028-02 結構文件更新:新增 `scripts/review_decision.py`(統整席判定留言,治理基礎設施)、`outputs/.tmp/review_decision/`(判定 JSON,ignored)、`features/review_decision.feature`;`review_gate.py` 改驗意見留言與統整判定。
+> 2026-10-30 依 CHG-20261030-02 結構文件更新:職責表新增 `docs/changes/screens/`(給統整席核對的畫面截圖,DIR-6 第 11 條)。
 
 ## 樹狀
 
@@ -129,6 +130,7 @@ podcast-studio/
 | `tests/ui_check.py`(CHG-20261022-04 T9 擴充) | 拆成 `canvas`(上一列)與 `editor` 兩組,各用自己的暫存目錄與伺服器;不帶參數兩組都跑,`--only editor` 只跑 editor;editor 的合成走真正的 `tts_service.synth`,只把 worker 換成本機 Python 替身,匯出與注音以替身取代;截圖 `home.png`、`wizard.png`、`full.png`、`editor.png`、`tone.png`、`disclaimer.png` | DIR-5 修正輪加入「合成中途試聽」與「停頓 0 秒仍可拖拉」情境 | 〔觀察〕 |
 | `tests/integration/` | 真模型整合測試(`test_breezy_worker_real.py`:兩句合成與 `annotate`) | 以 `tools/BreezyVoice/.venv/bin/python -m pytest` 在本機執行,不列入 `./scripts/check.sh` 與 CI | 〔觀察〕 |
 | `docs/changes/review/` | DIR-5 統整報告(`<CHG-ID>-summary.md`) | 檔名不符 `CHG-*.md`,不受 `doc_integrity_check` 的 CHG 欄位檢查與 `plan_check_changed.py` 檢查(使用者 2026-10-28 決定,RS-41) | 〔觀察〕 |
+| `docs/changes/screens/` | 給統整席核對的畫面截圖(`<CHG-ID>/<task>-<原檔名>`,由派發者自 `outputs/ui_check/` 複製並 commit 進該 PR,DIR-6 第 11 條) | 檔名不符 `CHG-*.md`,不受 `doc_integrity_check` 的 CHG 欄位檢查與 `plan_check_changed.py` 檢查;`docs/` 下非 `*.py`、`*.sh`,屬 `review_gate.py` 免審議路徑;截圖隨 repo 公開(CHG-20261030-02) | 〔推論〕(本筆不建目錄,第一個使用者建立) |
 | `tests/ci/` | `scripts/` 的單元測試 | `python3 -m unittest discover -s tests/ci -v`(`./scripts/check.sh` 也會一併收集) | 〔觀察〕 |
 | `.ai-sdlc/` | vendored ai-sdlc v1.66.0:`skills/ai-sdlc-autopilot/{scripts,assets}`、`SHA256SUMS`、`README.md` | 內容一律不修改;版本與來源記在 `.ai-sdlc/README.md` | 〔觀察〕 |
 | `.github/workflows/ci.yml` | GitHub Actions CI:`document`、`chg`、`program`、`review` 四個 job | main ruleset 要求四項全過 | 〔觀察〕 |
