@@ -297,7 +297,6 @@ body {
 .card:hover, .card:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47, 111, 221, .18); }
 .card-icon { font-size: 30px; color: var(--accent); }
 .card-title { font-size: 22px; font-weight: 600; }
-.card-desc { color: var(--muted); line-height: 1.6; }
 .home-recent { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; color: var(--muted); }
 .recent-name { color: var(--fg); }
 .recent-link { color: var(--accent); text-decoration: none; }
