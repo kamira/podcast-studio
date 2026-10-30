@@ -8,13 +8,15 @@
 > 2026-10-28 依 CHG-20261028-01 結構文件更新:CI/CD 流程的本機審議步驟補記 Codex 席讀取完整程式的方式。
 > 2026-10-28 依 CHG-20261028-02 結構文件更新:本機審議改為「六席意見 → 統整席判定」;流程圖補統整席與 `scripts/review_decision.py`;`review` 檢查與 DIR-4 改依統整判定。
 > 2026-10-30 依 CHG-20261030-02 結構文件更新:CI/CD 流程的本機審議步驟補記統整席可依 DIR-6 第 12 條在暫存目錄執行既有測試。
+> 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry` 元件(FR-22)、設定頁「MCP 註冊」子頁、流程 H「MCP 註冊 / 重新檢查」與相依方向 `studio_server` → `mcp_registry`。
 
 ## 分層 / 模組
 
 | 層/模組 | 職責 | 依賴 | 回應需求 | 等級 |
 |---------|------|------|----------|------|
-| 前端 `static/`(`index.html`、`app.js`、`style.css`、`vendor/drawflow.*`;專案編輯器的 `project.js`、`timeline.js`、`wizard.js`、`edit.js` 見「專案編輯器」節) | 首頁右上角 ⚙ 進入設定頁;設定頁子頁:模型、審議席位、語音預設(CHG-20261022-04 T8)、進階流程(節點畫布:拖出節點、連線型別檢查、執行 / 停止、SSE 狀態與預覽、文字輸出可編輯並釘住、檔案拖放、工作流程存檔 / 載入) | `studio_server` 的 HTTP API;Drawflow 0.0.60 | FR-16~21、23、31 | 〔觀察〕 |
-| 入口層:網頁 `studio_server.py` | FastAPI,只綁 `127.0.0.1:7860`;Host / Origin / 權杖中介層;靜態檔、執行 API + SSE、上傳、檔案服務、工作流程存取、設定 API | `executor`、`nodes`、`settings`、`taiwan_ai`(`local_open`、`OLLAMA`、`MFLUX`、`BREEZY`)、fastapi、uvicorn | FR-16~21、23 | 〔觀察〕 |
+| 前端 `static/`(`index.html`、`app.js`、`style.css`、`vendor/drawflow.*`;專案編輯器的 `project.js`、`timeline.js`、`wizard.js`、`edit.js` 見「專案編輯器」節) | 首頁右上角 ⚙ 進入設定頁;設定頁子頁:模型、審議席位、語音預設(CHG-20261022-04 T8)、MCP 註冊(CHG-20261022-02 T3,`McpPanel`)、進階流程(節點畫布:拖出節點、連線型別檢查、執行 / 停止、SSE 狀態與預覽、文字輸出可編輯並釘住、檔案拖放、工作流程存檔 / 載入) | `studio_server` 的 HTTP API;Drawflow 0.0.60 | FR-16~23、31 | 〔觀察〕 |
+| 入口層:網頁 `studio_server.py` | FastAPI,只綁 `127.0.0.1:7860`;Host / Origin / 權杖中介層;靜態檔、執行 API + SSE、上傳、檔案服務、工作流程存取、設定 API、MCP 註冊 API(`/api/mcp/*`,轉接 `mcp_registry`) | `executor`、`nodes`、`settings`、`mcp_registry`、`taiwan_ai`(`local_open`、`OLLAMA`、`MFLUX`、`BREEZY`)、fastapi、uvicorn | FR-16~23 | 〔觀察〕 |
+| MCP 註冊 `mcp_registry.py` | local-models 在 Claude Code / Codex 的 user scope 註冊:查狀態(Claude 唯讀解析 `.claude.json` 頂層 `mcpServers["local-models"]`、Codex 執行 `codex mcp get --json`)、組指令(`plan`)、執行(`apply`,只經官方 CLI 的 `mcp add` / `mcp remove`)、重新檢查(`claude mcp get` 健康檢查);只操作名稱 `local-models`;回傳字串依「去除 env 值 → `scrub()` → 截斷 64 KB」處理;行程內非阻塞鎖(不進 `heavy_lock`) | 標準庫;外部 CLI `~/.local/bin/{claude,codex}`;不匯入其他專案模組 | FR-22 | 〔觀察〕CHG-20261022-02 T1 |
 | 節點引擎 `executor.py` + `nodes.py` | `executor`:流程圖驗證(種類、型別、有環、必填、參數範圍、節點數)、拓撲排序、依序執行、pinned 跳過、上游失敗下游略過、可取消、重型節點包在 `heavy_lock()` 內;`nodes`:十種節點的埠、參數宣告與 `run()` | `heavy_lock`、`media`、`taiwan_ai` | FR-1~7(功能保留)、FR-16、17、20 | 〔觀察〕 |
 | 入口層:MCP `local_models_mcp.py` | 把模型包成 6 個 stdio 工具;每次工具呼叫重讀設定;重型工具在跨行程 `heavy_lock()` 內執行並把 stdout 導向 stderr | `media`、`taiwan_ai`、`settings`、`heavy_lock`、mcp SDK、Ollama `/api/tags` `/api/ps` | FR-8~13、21 | 〔觀察〕 |
 | 設定 `settings.py` | 模型角色與審議席位設定的唯一存取點:`load()` / `save()` / `validate()` / `load_meta()` / `voice_options()`;SQLite `config/studio.db`;一次性從 `config/models.json` 匯入 | sqlite3(標準函式庫) | FR-21、23 | 〔觀察〕 |
@@ -305,6 +307,8 @@ flowchart LR
 
 〔觀察〕CHG-20261022-04 新增的相依:`studio_server` → `project`、`timeline`、`tts_service`、`names`、`media`;`tts_service` → `project`、`media`、`heavy_lock`、`taiwan_ai`、`breezy_worker`(只取常數,worker 本身以子程序執行);`timeline` → `project`;`project` → `names`、`breezy_worker`(注音格式);`nodes` → `project`、`names`(送到素材庫)、`media`(`sniff_binary`)。`media.render_timeline` 在函式內延後匯入 `project` 與 `tts_service`(`tts_service` 在模組層匯入 `media`),避免循環匯入。`breezy_worker.py` 不匯入 repo 內任何模組。
 
+〔觀察〕CHG-20261022-02 新增的相依:`studio_server` → `mcp_registry`(單向);`mcp_registry` 不匯入 repo 內任何模組(自有 `scrub()`,規則同 `studio_server.scrub()`,避免循環匯入),只以子程序呼叫外部 CLI `~/.local/bin/claude`、`~/.local/bin/codex`。
+
 〔觀察〕耦合點:`media.py` 直接讀 `taiwan_ai` 的模組層常數(`OUT`、`MFLUX`)與函式(`role_config`、`reserve`、`unload_llms`);`roles.image` 的讀取端是 `media.generate_image()`、`roles.voice` 的讀取端是 `taiwan_ai.speak()`,兩者每次呼叫經 `taiwan_ai.role_config()` → `settings.load()` 讀一次,網頁與 MCP 兩個行程都經這兩個函式(CHG-20261026-01 T1、T2);設定資料(`config/studio.db`)是網頁與 MCP 兩個行程共享的**資料契約**,只經 `settings.py` 存取(CHG-20261022-01 Global Constraints)。
 
 ## 開發流程(CI/CD)
@@ -368,3 +372,54 @@ flowchart LR
 拖曳語調關鍵點:使用者在時間軸選取的片段上點兩下新增 / 拖曳 / Delete 刪除 → `PATCH segments/{id} {pitch}`(`project.validate` 驗證並存檔)→ 前端 `POST /post {segments: [id]}` → 伺服器取執行中旗標(忙碌 409,前端每秒重試)→ `tts_service.post_process` → 後製鍵未命中時啟動 shape worker → 寫回 `segment.post` → 時間軸依新長度重排、預覽改播新後製檔。
 
 合音:文稿框標示(未決定 / 啟用 / 停用)→ 啟用寫入片段 `fusions`(文稿未存檔先存檔分句)→ 該句 `tts_text` 改變、變髒 → 既有 synth(heavy_lock)重新合成該句;字幕、時間軸顯示原文。
+
+## CHG-20261022-02:MCP 註冊管理
+
+〔觀察〕以整合分支 T1~T3 的程式為準(`mcp_registry.py`、`studio_server.py` 的 `/api/mcp/*`、`static/app.js` 的 `McpPanel`)。介面與端點契約見 `design.md`「CHG-20261022-02」節,讀寫的 repo 外檔案見 `data.md`「repo 外讀寫的檔案」。
+
+### 流程 H:MCP 註冊 / 重新檢查(FR-22)
+
+```mermaid
+sequenceDiagram
+  actor U as 使用者
+  participant B as 瀏覽器(McpPanel)
+  participant S as studio_server
+  participant M as mcp_registry
+  participant C as claude / codex CLI
+  participant L as local_models_mcp.py
+
+  U->>B: 進入 設定 › MCP 註冊(#/settings/mcp)
+  B->>S: POST /api/mcp/status {check:false}(Origin + Token)
+  S->>M: status(False)(取行程內鎖,忙碌 409)
+  M->>M: Claude:唯讀解析 .claude.json 頂層 mcpServers.local-models;<br/>只判斷 projects[<repo>] 與 <repo>/.mcp.json 有無同名項(遮蔽)
+  M->>C: codex mcp get local-models --json(不啟動 MCP 伺服器)
+  M-->>B: 兩邊狀態(去除 env 值 → scrub → 截斷)
+  U->>B: 按「註冊」或「移除」
+  B->>S: POST /api/mcp/plan {client, action}
+  S->>M: plan():狀態不允許時 ValueError → 422
+  M-->>B: argv(逐元素)、會修改的檔案、目前註冊內容、警告
+  B->>U: 確認框 #mcp-dialog
+  U->>B: 確認執行
+  B->>S: POST /api/mcp/apply {client, action, confirm:true}
+  S->>M: apply()
+  M->>C: mcp add / mcp remove(argv list、不經 shell、逾時 30 秒、cwd = repo)
+  C-->>M: 結束碼 + 輸出
+  M->>M: 重新查狀態(同 check=False);結束碼 0 且狀態符合預期才 ok
+  M-->>B: ok、exit_code、CLI 輸出、新狀態
+  U->>B: 按「重新檢查」
+  B->>S: POST /api/mcp/status {check:true}
+  S->>M: status(True)
+  alt Claude 為 registered 且未被遮蔽
+    M->>C: claude mcp get local-models
+    C->>L: 啟動並做健康檢查
+    C-->>M: Status 行 → health ok / failed / unknown
+  else other / absent / unknown / 被遮蔽 / 無法判斷遮蔽 / 未安裝
+    M->>M: 不呼叫 CLI,detail「不做健康檢查:…」
+  end
+  M-->>B: 兩邊狀態 + Claude 連線結果
+```
+
+- 〔觀察〕開頁(`check:false`)不呼叫 `claude mcp get` / `list`,不會啟動 MCP 伺服器;只有「重新檢查」在上圖條件成立時呼叫一次(D8 (b)、D17 (a))。
+- 〔觀察〕所有 CLI 子程序環境沿用伺服器行程(含 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`),另一律帶 `UV_OFFLINE=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`DISABLE_TELEMETRY=1`(只加在子程序,不寫入註冊內容)。
+- 〔觀察〕`status` / `plan` / `apply` 共用 `mcp_registry` 的行程內非阻塞鎖,任一執行中時其他呼叫回 409;不進 `heavy_lock`,不受合成或匯出影響。
+- 〔觀察〕Claude 的 `MCP_TOOL_TIMEOUT`、Codex 的 `tool_timeout_sec` 只讀取並提醒,不寫入;Codex 註冊後沒有 `tool_timeout_sec` 時畫面給手動補的 TOML 片段。

@@ -10,6 +10,8 @@
 
 > 2026-10-30 依 CHG-20261029-01 修訂 1 結構文件更新(以整合分支 `chg/CHG-20261029-01-rev1-impl` 的 T10~T14 為準):清晰度方案 C 取代 v2 與低通;後製鍵演算法標記 `POST_ALGO`;語調 PCHIP 混合曲線與自動補點(`expand_points`、吸附有聲幀);shape stdout 帶 `pitch_points`;合音送顯示字(`tts_text`、`model_units`);前端清晰度警告、語調試算 / 實際套用的畫法、屬性面板合音模式「送模型」「字幕」兩列。
 
+> 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry` 元件與介面、外部 CLI 契約(`claude mcp …`、`codex mcp …`)、`/api/mcp/*` 三個端點列入 HTTP API 表;設計決策 D8~D12(見檔尾「CHG-20261022-02」節)。
+
 ## 關鍵元件
 
 | 元件 | 責任 | 對外介面/契約 | 等級 |
@@ -35,6 +37,7 @@
 | `nodes.REGISTRY` | 十種節點的宣告與 `run()`,包住 `taiwan_ai` / `media` | 見下方「節點登錄表」 | 〔觀察〕 |
 | `executor.validate(graph)` / `run(graph, emit, cancel=None)` | 驗證流程圖;依拓撲順序在呼叫端執行緒執行並以 `emit(dict)` 推送事件 | 見下方「流程圖格式與執行事件」 | 〔觀察〕 |
 | `studio_server.create_app(...)` / `main()` | FastAPI app;`main()` 以 uvicorn 綁 `127.0.0.1:7860`,啟動時呼叫 `project.startup_cleanup()` | 見下方「HTTP API」「專案 API」 | 〔觀察〕 |
+| `mcp_registry`(`status` / `plan` / `apply` / `paths` / `server_argv` / `redact_env` / `scrub`、`Busy`) | local-models 在 Claude Code / Codex 的 user scope 註冊管理;只操作名稱 `local-models`;寫設定只經官方 CLI 的 `mcp add` / `mcp remove`,不直接寫 `.claude.json`、`config.toml`、`~/.claude/settings.json` | 見檔尾「CHG-20261022-02」節 | 〔觀察〕CHG-20261022-02 T1 |
 | `names`(`name_char_ok`、`normalize_name`、`fold_name`) | 工作流程名稱與專案名稱共用的中英日白名單(1~64 字、逐字比對,不做正規化);只差大小寫的比對鍵 | 不合格回錯誤;規則單一來源 | 〔觀察〕CHG-20261022-04 T2 |
 | `project`(`Project`、`validate`、`split_segments`、`tts_text`、`load` / `save` / `update` / `restore` / `trash`、`startup_cleanup`、`subdir`) | 專案資料模型與存取:分句(句尾標點、換行、強制停頓)、停頓與語速正規化、標註驗證與 `字[:注音]` 產生、原子寫入 + history 10 版、`.trash/` 30 天、專案層級鎖 | 不合法丟 `ProjectError`(繁中 `.errors`);`ProjectNotFound`(404)、`ProjectExists`(409);見 `data.md`「專案資料」 | 〔觀察〕CHG-20261022-04 T2、T6、T8 |
 | `timeline.layout(project)` | 純函式:片段起訖(變速後長度 + 停頓)、字幕 cue(超過 24 字切段)、畫面軌起訖、總長(不含片尾停頓) | `{segments:[{id,start,end}], cues:[{segment,start,end,text}], images:[{id,file,start,end}], duration}`;沒有音檔的片段長度 0、不丟錯 | 〔觀察〕CHG-20261022-04 T4;預覽與匯出共用 |
@@ -107,7 +110,19 @@ classDiagram
     reason() / taiwanize() / generate_image()
     speak() / make_video() / list_models()
   }
+  class mcp_registry {
+    NAME = "local-models"
+    CLIENTS / ACTIONS
+    paths() dict
+    server_argv() list
+    status(check) dict
+    plan(client, action) dict
+    apply(client, action) dict
+    redact_env(text, known) str
+    scrub(text) str
+  }
   studio_server ..> executor
+  studio_server ..> mcp_registry
   studio_server ..> nodes
   studio_server ..> settings
   studio_server ..> taiwan_ai
@@ -144,6 +159,9 @@ classDiagram
 | `GET /api/config` | — | `settings.load()` 結果 + `meta: {imported_from, imported_at}`(有 `_warnings` 時 `meta` 為 `{}`) | — |
 | `PUT /api/config` | 設定 JSON(≤ 256 KB;`_warnings`、`meta` 會被忽略) | 200 `{"saved": true, "config"}` | 413;422 非物件或 `validate` 有錯;503 Ollama 連不上(不儲存);500 `save()` 失敗(本文不含本機路徑) |
 | `GET /api/models` | — | `{"ollama": {"reachable", "models", "error"?}, "mflux": {"installed"}, "breezyvoice": {"installed"}, "voices": [...]}` | Ollama 連不上時 `reachable=false`,仍回 200 |
+| `POST /api/mcp/status`(CHG-20261022-02) | `{"check": bool}`(可省略或空本文,預設 false;≤ 4 KB) | 200 `mcp_registry.status(check)`;`check:false` 不呼叫 `claude mcp get` | 413;422 不是 JSON 物件、有 `check` 以外欄位、`check` 不是布林;409 另一個 MCP 操作執行中 |
+| `POST /api/mcp/plan`(CHG-20261022-02) | `{"client", "action"}`(≤ 4 KB) | 200 `mcp_registry.plan()`:`{"argv", "files", "current", "warnings"}`(只組指令、不執行) | 413;422 多餘欄位、列舉外的值、狀態不允許該動作;409 |
+| `POST /api/mcp/apply`(CHG-20261022-02) | `{"client", "action", "confirm": true}`(≤ 4 KB) | 200 `mcp_registry.apply()`:`{"ok", "exit_code", "output", "status"}`;CLI 失敗或結果狀態不符仍回 200(`ok: false`) | 413;422 多餘欄位;400 `confirm` 不是 JSON `true`(不呼叫 CLI);422 列舉外的值、狀態不允許;409 |
 
 - 〔觀察〕**安全中介層**:所有請求(含 GET、`/files/*`、SSE)的 `Host` 必須是 `127.0.0.1:7860` 或 `localhost:7860`;GET / HEAD 以外另要求 `Origin` 完整等於 `http://127.0.0.1:7860` 或 `http://localhost:7860`(缺少或 `null` 拒絕,`OPTIONS` 一律拒絕),且 `X-Studio-Token` 等於啟動權杖(`hmac.compare_digest`)。不符一律 403。
 - 〔觀察〕啟動權杖每次啟動以 `secrets.token_urlsafe(32)` 產生,只存在記憶體與首頁 HTML。
@@ -342,3 +360,39 @@ classDiagram
 - **合音詞庫端點**:`GET /api/settings/fusions`、`PUT` / `DELETE /api/settings/fusions/{word}`(PUT `{"restore": true}` 還原預設詞)、`GET /api/settings/fusions/export?format=json|csv`、`POST /api/settings/fusions/import/preview`(multipart,只在記憶體解析;請求本體上限 = 設定值 + 16 KB,超過即 413)、`POST /api/settings/fusions/import/apply`(預覽代號 128 位元、單次、10 分鐘;交易內比對詞庫版本 SHA-256,不符 409)、`GET` / `PUT /api/settings/fusions/limits`。
 - **前端**:屬性面板「韻律」「語調」百分比拉桿(放開才送出,PATCH 後 `POST /post`)、聲調區「念法 / 清晰度 / 合音」模式;時間軸語調折線 SVG(菱形關鍵點)、合音徽章;文稿框以「textarea + 上方標記層」畫三色波浪底線、點擊浮動窗啟用 / 停用、啟用處常駐浮層(D42);設定頁「合音詞庫」子頁(差異預覽五欄表、拒絕原因區塊、上限設定)。
 - **前端(修訂 1 T13、T14)**:`static/edit.js`——整句清晰度拉桿與字詞清晰度彈出框的拉桿低於 25%(`CLARITY_WARN_BELOW`)時,在說明下方顯示固定文字警告(`.clarity-warn`、`role="status"`、`textContent`),拖動中即時顯示、開啟已存的片段也顯示,只警告、不阻擋;圓弧說明加「曲線一律經過每個實際套用的點」,關鍵點列加「· 自動補點 N 個(虛線,不可拖曳)」;由詞庫套用合音時 PATCH 帶 `display`(文稿框「啟用」、合音模式、屬性面板句子文字三處;規則與手動為空字串);屬性面板合音模式「已套用」列表下方兩列——「送模型」(`.fusion-sent`,純函式 `ttsText(seg)` 與 `project.tts_text()` 同規則,只在前端試算、不呼叫伺服器)與「字幕」(`.fusion-subtitle`,原文加「(原文不變)」),套用或移除合音後重繪,一律 `textContent`;合音模式彈出框不含這兩列,貼近視窗右緣時往左移。`static/timeline.js`——`pitchPath()` 以同一 PCHIP 混合公式繪製(每 2 px 取樣、經過每個點),縱軸 ±7.2 半音、±6 處畫淡色參考線,拖曳仍限 ±6;`pitchModel()`:後製有效、不在後製中且帶 `post.pitch_points` 時依 worker 實際套用的點繪製,否則以 `expandPoints()` 試算(不含吸附)並以淡色虛線(`is-estimate`)繪製;自動補點畫成虛線圓(`.tl-pitch-auto`)、放大峰谷畫成虛線菱形(`.tl-pitch-amp`)並以虛線連到使用者菱形,兩者都不可選取、不可拖曳。
+
+## CHG-20261022-02:MCP 註冊管理
+
+〔觀察〕以整合分支 T1~T3 的程式為準(`mcp_registry.py` 檔頭與實作、`studio_server.py` 檔頭「MCP 註冊 API」);修改步驟 1 的 CLI 實機查證見 CHG-20261022-02。
+
+### `mcp_registry` 介面
+
+- 常數:`NAME = "local-models"`、`CLIENTS = ("claude", "codex")`、`ACTIONS = ("register", "remove")`;子程序逾時 30 秒、單一字串上限 64 KB、讀檔上限 16 MB。
+- `paths()` → `{"claude_cli", "codex_cli", "uv", "claude_json", "claude_settings", "repo_mcp_json", "codex_home"}`,每次呼叫依當下環境變數決定(規則見 `data.md`「repo 外讀寫的檔案」);CLI 與 `uv` 固定為 `~/.local/bin/` 下的絕對路徑。
+- `server_argv()` → `[<uv>, "run", "--script", <repo>/local_models_mcp.py]`。
+- `status(check)` → `{"server", "claude", "codex"}`;每個 client 為 `{"installed", "state", "command", "args", "env_keys", "timeout", "health", "detail", "shadowed"}`。`state` ∈ `registered`(command 等於 `~/.local/bin/uv` 的絕對路徑且 args 逐元素等於 `["run", "--script", "<repo>/local_models_mcp.py"]`)/ `other` / `absent` / `unknown`;`timeout`:Claude 為 `{"key": "MCP_TOOL_TIMEOUT", "value", "suggested": "1800000"}`,Codex 為 `{"key": "tool_timeout_sec", "value", "snippet"}`(`snippet` 為手動補的 TOML 片段);`shadowed` 為 `true` / `false` / `null`(無法判斷;Codex 一律 `false`);`env_keys` 只有鍵名。
+- `plan(client, action)` → `{"argv", "files", "current", "warnings"}`,只組指令、不執行;未安裝、`unknown`、已 `registered` 再註冊、`other` 註冊(只能先移除,D15)、`absent` 移除一律丟繁中 `ValueError`。
+- `apply(client, action)` → `{"ok", "exit_code", "output", "status"}`;執行 `plan` 的指令後一律重新查狀態(同 `check=False`),結束碼 0 且新狀態符合預期(`register` → `registered`、`remove` → `absent`)才 `ok: true`;逾時時 `exit_code` 為 null、`output` 為「CLI 執行逾時(超過 30 秒)」。
+- `redact_env(text, known)`:已知 env 值、`鍵=值` 行的值、JSON `env` 物件的值一律換成「(已設定)」;`scrub(text)`:repo → `<repo>`、家目錄 → `~`,不在家目錄或 repo 之下的 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 顯示為變數名。回傳字串一律依「`redact_env()` → `scrub()` → 截斷 64 KB」處理。
+- `Busy`:`status` / `plan` / `apply` 共用一把行程內非阻塞鎖,執行中時其他呼叫丟 `Busy`(端點 409);不進 `heavy_lock`。`client` / `action` 列舉檢查在取鎖與呼叫 CLI 之前。
+
+### 外部 CLI 契約(Claude Code 2.1.308、codex-cli 0.163.0 實機查證)
+
+- 子程序一律 argv list、`shell=False`、`stdin=DEVNULL`、逾時 30 秒、cwd = repo 根目錄;環境沿用伺服器行程,另一律帶 `UV_OFFLINE=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`DISABLE_TELEMETRY=1`。
+- `claude mcp add -s user local-models -- <uv> run --script <repo>/local_models_mcp.py`:寫入 `.claude.json` 頂層 `mcpServers.local-models`;同名已存在時結束碼 1。
+- `claude mcp remove local-models -s user`:不存在時結束碼 1。
+- `claude mcp get local-models`:人讀文字(Scope / Status / Type / Command / Args / Environment),**會實際啟動註冊內容指定的程式做健康檢查**;本程式只在「重新檢查」且 Claude 為 `registered`、未被遮蔽時呼叫。Status 行含 `Connected` 或 ✔ → `ok`,含 fail / error 或 ✘ / ✗ → `failed`,其他 → `unknown`;非 0 結束 → `failed`;逾時或無法執行 → `unknown`。
+- `codex mcp add local-models -- <uv> run --script <repo>/local_models_mcp.py`:寫入 `config.toml` 的 `[mcp_servers.local-models]`;**沒有設定 `tool_timeout_sec` 的參數**,同名再 add 為無聲覆寫並丟失手動加的 `tool_timeout_sec`。
+- `codex mcp remove local-models`:不存在時**也回 0**,因此成功與否以重新查到的狀態判斷。
+- `codex mcp get local-models --json`:JSON(`transport.command` / `args` / `env`、`tool_timeout_sec` 等),不啟動 MCP 伺服器;結束碼 1 且 stderr 含 `No MCP server named` → `absent`,其他非 0 或非 JSON → `unknown`。
+- 〔觀察〕三個 `/api/mcp/*` 端點一律 POST(GET 回 405),沿用 Host / Origin / `X-Studio-Token` 中介層;瀏覽器只能傳 `client`、`action` 兩個列舉值與布林 `check`、`confirm`,指令、路徑、名稱與 scope 全部由 `mcp_registry` 組出;回應一律 `Cache-Control: no-store`(安全中介層直接回的 403 除外),錯誤回應 `{"error": 繁中訊息}`。
+
+### 設計決策(CHG-20261022-02,使用者 2026-10-30 確認閘核准)
+
+| 決策 | 選項 | 取捨理由 | 等級 |
+|------|------|----------|------|
+| D8 狀態查詢:Claude 端唯讀解析 `.claude.json` 頂層 `mcpServers["local-models"]`,Codex 端 `codex mcp get --json`,`claude mcp get` 只在按「重新檢查」時呼叫 | (a) 每次開頁都跑 CLI vs (b) vs (c) 兩邊都只在按鈕時呼叫 vs (d) 也唯讀解析 `config.toml` | `claude mcp get` / `list` 會啟動 MCP 伺服器(數秒、多一個 `uv` 行程);(c) 開頁看不到狀態;(d) 需 Python 3.11 的 `tomllib` 或加依賴。解析失敗或超過 16 MB 顯示「狀態不明」,不顯示成未註冊 | 〔觀察〕CHG-20261022-02 D8 (b) |
+| D9 Codex `tool_timeout_sec` 只提醒 | (a) 只提醒 + TOML 片段 vs (b) 移除另需勾選 vs (c) 網頁改寫 `config.toml` | `codex mcp add` 無法設定;(c) 違反 FR-22「不直接編輯」、可能弄壞註解與其他段落 | 〔觀察〕CHG-20261022-02 D9 (a) |
+| D10 CLI 設定目錄沿用伺服器行程的 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`,解析的檔案路徑依同一規則 | (a) 沿用環境變數 vs (b) 實機驗證直接動真實設定 | 真 CLI 可先在暫存設定目錄完整跑一輪,真實設定只在使用者同意後動一次 | 〔觀察〕CHG-20261022-02 D10 (a) |
+| D11 驗收不破壞現有設定:唯讀檢視 → 暫存設定目錄完整操作 → 經同意才對真實設定做一輪(先備份) | (a) 三段 vs (b) 只做前兩段 vs (c) 直接操作真實設定 | 現況兩邊都已註冊;真實設定的移除會讓 Codex 失去 `tool_timeout_sec` | 〔觀察〕CHG-20261022-02 D11 (a) |
+| D12 指令預覽沿用 `scrub()`:家目錄顯示 `~`、repo 顯示 `<repo>`,確認框註明執行時展開為絕對路徑 | (a) 沿用 `scrub()` vs (b) 顯示完整絕對路徑 | 不破例送本機絕對路徑;指令每個元素仍逐一列出 | 〔觀察〕CHG-20261022-02 D12 (a) |

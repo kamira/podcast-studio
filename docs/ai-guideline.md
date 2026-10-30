@@ -2,7 +2,7 @@
 
 - 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
 - 分支(Branch):main
-- 版本:v1.13(變更歷程見 §11)
+- 版本:v1.14(變更歷程見 §11)
 - 日期:2026-10-22
 - 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24;v1.5 修改 FR-21、FR-25、FR-31、FR-34 並新增 ADP-12,待 CHG-20261022-01/04 修訂 2 確認閘)
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
@@ -227,6 +227,10 @@
 - [ ] FR-36~38:連音 100% 的句子變短 ≥ 5%、句內長於 0.12 秒的低音量段不變;清晰度 0% 時子音能量低 ≥ 18 dB、包絡離散度低 ≥ 25%、RMS 差 ≤ 1 dB;語調 5 點時 pyin 誤差中位 ≤ 1.0 半音;改上述參數 synth 次數 0、shape worker 連線數 0
 - [ ] FR-39/40:合音句送模型的文字不含被合併的原字——詞庫有顯示字時為顯示字(例「是醬啊，我也不造。」、不含 `[:`),否則含注音標註;字幕為原文;詞庫匯出 → 匯入往返一致時零寫入;超過上限的檔案回 413 且提示「超過允許大小上限(<N> KB)」「超過筆數上限(<N> 筆)」;`config/studio.db` 升為 schema 3 後既有三表逐列不變
 
+> v1.14(2026-10-30,CHG-20261022-02 結構文件更新):加入 FR-22 驗收條件。條件取自 CHG-20261022-02 的 Acceptance operation / observe / pass,狀態仍以 ACC 為準;FR-22 本文不改。
+
+- [ ] FR-22:進入「設定 › MCP 註冊」(`#/settings/mcp`,`check:false`)時不啟動 MCP 伺服器——`claude mcp get` / `list` 執行 0 次、`local_models_mcp.py` 行程數 0,按「重新檢查」才啟動一次並結束;註冊 / 移除只經官方 CLI(`claude mcp add/remove -s user`、`codex mcp add/remove`),不直接寫 `.claude.json`、`config.toml`、`~/.claude/settings.json`;操作前後真實設定只有 `local-models` 段落變化(Codex 移除再註冊後的差異只有 `tool_timeout_sec` 一行),其他 MCP 伺服器與 `~/.claude/settings.json` 不變;`MCP_TOOL_TIMEOUT` 與 `tool_timeout_sec` 只提醒(Codex 附手動補的 TOML 片段)、不寫入;缺 Token、缺 `confirm`、列舉外的 `client` 分別回 403 / 400 / 422,且設定檔不變
+
 ## 8. AI 開發約定
 
 - **進場**:每個 session 先讀 `AGENTS.md` → 本文件 → `docs/structure/*.md` → `docs/knowledge/INDEX.md`。
@@ -299,3 +303,4 @@
 | v1.11 | 2026-10-30 | FR-39 與 §7 FR-39/40 驗收條件改為「詞庫有顯示字時以顯示字送模型、不加注音,否則以注音標註」(對齊 CHG-20261029-01 修訂 1 R1-4);不新增 ADP 項 | 使用者 2026-10-30 以選項選「一起改」;CHG-20261029-01 修訂 1 結構文件更新 |
 | v1.12 | 2026-10-30 | FR-31 補充「兩張卡片只顯示圖示與名稱,不放說明文字」,§7 FR-31/34/35 驗收條件同步 | 使用者 2026-10-29 原話「另外card不需要description」;CHG-20261030-01 T1 |
 | v1.13 | 2026-10-30 | §8 CI/CD 約定:程式 PR 核准一項補 DIR-5 整合分支 task PR 合入前先記錄核准原話;本機審議一項補統整席讀 repo 內截圖(`docs/changes/screens/`)與暫存副本離線執行既有測試 | 使用者 2026-10-30 對 CHG-20261029-01 修訂 1 統整報告 U-2~U-4 的決定;CHG-20261030-02;DIR-5、DIR-6 |
+| v1.14 | 2026-10-30 | §7 新增 FR-22 驗收條件(開頁不啟動 MCP 伺服器、註冊 / 移除只經官方 CLI、真實設定只有 local-models 段落變化、逾時設定只提醒、跨站與缺確認拒絕);FR-22 本文不改 | CHG-20261022-02 結構文件更新(T4) |

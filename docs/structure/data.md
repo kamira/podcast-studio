@@ -8,6 +8,8 @@
 
 > 2026-10-30 依 CHG-20261029-01 修訂 1 結構文件更新(以整合分支 `chg/CHG-20261029-01-rev1-impl` 的 T10~T14 為準):Segment 的 `fusions[].display`、`post.pitch_points` 兩個選填欄位(`schema_version` 仍為 2);後製鍵附加演算法標記。
 
+> 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增「repo 外讀寫的檔案」一節(MCP 註冊管理讀取的使用者全域設定與路徑規則)。
+
 〔觀察〕持久化資料有五類:設定資料庫 `config/studio.db`(使用者資料,不入 git)、工作流程 JSON(`workflows/`)、專案資料 `projects/`(使用者資料,不入 git;CHG-20261022-04)、`outputs/` 下的產出檔與上傳檔、程式內常數。流程執行中的文字(文案、標題、prompt)只存在伺服器記憶體中的執行事件(最近 20 次 run)與瀏覽器畫布上,另存工作流程時隨節點參數或釘住的編輯值寫入 JSON。
 
 ## 實體 / 資料表
@@ -119,6 +121,21 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,�
 
 ### 導入時已存在的產出檔(不入 git,僅記錄)〔觀察〕
 `outputs/test_tts.wav`、`outputs/anime_pinup.png`、`outputs/test_flux.png`——檔名不符上表樣式,〔推論〕為手動測試留下。
+
+## repo 外讀寫的檔案(CHG-20261022-02)〔觀察〕`mcp_registry.py`
+
+〔觀察〕本程式讀取的 repo 外檔案只有下列四項,只由 `mcp_registry` 存取;寫入一律只經官方 CLI(`~/.local/bin/claude`、`~/.local/bin/codex` 的 `mcp add` / `mcp remove`),本程式不直接寫任何一個。
+
+| 檔案 | 路徑規則 | 讀寫方式 | 讀取範圍 |
+|------|----------|----------|----------|
+| `.claude.json`(Claude Code 全域設定,含帳號資訊) | `$CLAUDE_CONFIG_DIR/.claude.json`;未設時 `~/.claude.json` | 唯讀解析;寫入只經 `claude mcp add -s user` / `claude mcp remove -s user` | 頂層 `mcpServers["local-models"]` 取內容(`type`、`command`、`args`、`env`;env 只回鍵名,值只用來遮蔽輸出);`projects[<本 repo 絕對路徑>].mcpServers["local-models"]` 只判斷有無(遮蔽偵測);其餘內容(含其他 repo 的 `projects` 項、帳號欄位)不保留、不回傳、不寫日誌。檔案不存在 → `absent`;壞掉、頂層不是物件或超過 16 MB → `unknown` |
+| `<repo>/.mcp.json`(project scope) | 固定為 repo 根目錄 | 唯讀 | 只判斷 `mcpServers["local-models"]` 有無(遮蔽偵測),不回傳內容;無法解析時 `shadowed` 為 null |
+| Codex `config.toml` | `$CODEX_HOME/config.toml`;未設時 `~/.codex/config.toml` | 本程式不開啟此檔;讀取經 `codex mcp get local-models --json`,寫入只經 `codex mcp add` / `codex mcp remove` | CLI 回傳的 `transport.command` / `args` / `env`(只回鍵名)與 `tool_timeout_sec` |
+| `settings.json`(Claude Code 使用者設定) | `$CLAUDE_CONFIG_DIR/settings.json`;未設時 `~/.claude/settings.json` | 唯讀,不寫入 | 只讀 `env.MCP_TOOL_TIMEOUT`(沒有時提醒建議值 `1800000`) |
+
+- 〔觀察〕路徑每次呼叫依伺服器行程當下的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 決定(D10),瀏覽器不能指定;CLI 子程序沿用同一組環境變數,因此解析的檔案與 CLI 寫入的檔案一致。`CODEX_HOME` 須為已存在的目錄。
+- 〔觀察〕讀檔上限 16 MB(`.claude.json`、`settings.json`、`.mcp.json`);送到瀏覽器的字串依「去除 env 值 → `scrub()` → 截斷 64 KB」處理,路徑以 `~`、`<repo>` 顯示(不在家目錄或 repo 之下的設定目錄顯示為 `$CLAUDE_CONFIG_DIR`、`$CODEX_HOME`)。
+- 〔觀察〕Codex 的 `tool_timeout_sec` 由使用者手動寫在 `config.toml` 的 `[mcp_servers.local-models]`;`codex mcp add` 無法設定,移除再註冊後會消失(D9 只提醒,恢復片段見 `PODCAST_STUDIO.md §10.3`)。
 
 ## 關聯
 
