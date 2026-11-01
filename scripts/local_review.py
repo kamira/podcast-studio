@@ -778,6 +778,10 @@ def run_panel(seats: Dict[str, dict], make_block: Callable[..., str], diff: str,
         if len(diff) > cap:
             d = clip(diff, cap)
             add_note(name, "diff 由 {} 字截短為 {} 字(Opus 席內嵌上限)".format(len(diff), cap))
+        total = fixed(chg_limit) - OPUS_PATH_MARGIN + len(d)
+        if total > OPUS_PROMPT_LIMIT:  # CHG 截到 0 仍放不下:不再擴大截短範圍,只記注意行(CHG-20261101-02 M-3)
+            add_note(name, "prompt 仍超過 Opus 席內嵌上限({} 字 > {} 字;變更檔案清單或參考資料過大),"
+                           "轉交可能被截斷".format(total, OPUS_PROMPT_LIMIT))
         return make_block(d, chg_limit=chg_limit)
 
     def block_for(name: str, cfg: dict, system: str, prefix: str) -> str:
@@ -1110,10 +1114,14 @@ def main(argv=None) -> int:
     both = sorted((default_seats("codex") if codex_seats is None else codex_seats)
                   & (default_seats("opus") if opus_seats is None else opus_seats))
     if both:
-        print("錯誤:{} 同時列在 --codex-seats 與 --opus-seats(含預設值),同一席不得同時由 Codex 與 Opus 擔任。"
-              "risk 依 DIR-1 第 13 條由 Opus 擔任,請改用預設參數(security、compliance 預設即由 Codex 擔任,"
-              "不需再帶 --codex-seats);確需讓某席改由 Codex 擔任時,須同時以 --opus-seats 把該席移出。".format(
-                  "、".join(both)), file=sys.stderr)
+        msg = "錯誤:{} 同時列在 --codex-seats 與 --opus-seats(含預設值),同一席不得同時由 Codex 與 Opus 擔任。".format(
+            "、".join(both))
+        if "risk" in both:
+            msg += ("risk 依 DIR-1 第 13 條由 Opus 擔任,請改用預設參數(security、compliance 預設即由 Codex 擔任,"
+                    "不需再帶 --codex-seats);")
+        msg += ("請以 --opus-seats 或 --codex-seats 把該席移出其中一個集合(要改由 Codex 擔任,須同時以 --opus-seats "
+                "把該席移出;要改由 Opus 擔任,須同時以 --codex-seats 把該席移出)。")
+        print(msg, file=sys.stderr)
         return 2
 
     try:

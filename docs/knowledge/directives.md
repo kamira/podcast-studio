@@ -41,7 +41,9 @@
      - Codex 擔任的席位(security、compliance)預設仍由 Codex 擔任(第 9 條)。Codex 因用量額度用盡而無法作答時,該次審議改由派發者每席各派一個全新、互不相通的 Opus(effort medium)子代理代答,交接方式同第 13 條(`--codex-seats none --opus-seats risk,consistency,security,compliance`),留言模型標記為 `claude-opus-medium(代 Codex,額度用盡)`。
      - 代答時,意見席把待審資料交給雲端 Claude 屬資料外送例外,範圍同第 13 條。
      - 本條是第 1 條「不派 Claude subagent 當意見席」與第 9 條(Codex 擔任)的條件式例外;代答的席位仍是意見席(DIR-6),統整席另派(DIR-6 第 2 條)。
-  13. **risk、consistency 常設由 Opus 擔任(2026-11-01 使用者指示,原話:「可以改用opus risk也先改用opus」「算了 這作為目前專案的設定」「算了是指本專案的 risk/consistency 完全更改為 opus 先前禁止單純是因為額度問題 現在比較寬鬆」)**:
+  13. **risk、consistency 常設由 Opus 擔任(2026-11-01 使用者指示,原話:「可以改用opus risk也先改用opus」「算了 這作為目前專案的設定」「算了是指本專案的 risk/consistency 完全更改為 opus
+      先前禁止單純是因為額度問題
+      現在比較寬鬆」)**:
      - risk、consistency 兩席不分風險分級,由派發者每席各派一個全新、互不相通的 Claude 子代理擔任,一律以 repo 內定義 `.claude/agents/review-seat-opus.md`(Opus、effort medium,工具只有 Write)派出;不得是該 PR 的施工者或統整席子代理;重派另派新的子代理。`scripts/local_review.py` 以 `--opus-seats <逗號清單>` 覆寫(預設 `risk,consistency`;`none` 表示沒有 Opus 席);同一席不得同時列在 `--codex-seats` 與 `--opus-seats`。
      - 交接:腳本跑到 Opus 席時,在 `outputs/.tmp/local_review/opus/` 寫出請求檔(完整子代理 prompt 與判決 JSON schema)並等待答案檔;派發者讀出請求檔的 prompt **原樣**交給子代理(不得增刪)。送審資料全部內嵌在 prompt,子代理沒有讀取工具,只依 prompt 內資料判斷,唯一寫出物是請求檔指定的答案檔;子代理 prompt 不得指定 `outputs/` 下任何路徑(答案檔的寫出路徑除外),也不含讀檔或執行指令的指示。腳本本身不新增任何網路呼叫。
      - 答案檔不是合格 JSON、不符判決 schema,或 15 分鐘內沒有答案檔 = 沒有回答 → 重派一次(新請求檔、新子代理),仍失敗記 `no-answer`。判決行與留言的 `<model>` 欄由腳本填 `claude-opus-medium`,不信任子代理自填。
@@ -60,7 +62,9 @@
 - 信度:使用者確認(席位分配表與第 4、6 條為 agent 依實測推得,使用者可推翻;高風險 security 席 27B、第 9 條 Codex 席位、第 13 條 Opus 席位為使用者決定;第 13 條的交接方式與子代理定義為 agent 補上的執行細節(子代理加技術限制為使用者 2026-11-01 確認閘決定),見 CHG-20261101-02 代決事項,使用者可推翻)
 - 狀態:生效
 - 歷史:
-  - 2026-11-01 依 CHG-20261101-02(使用者 2026-11-01 原話:「可以改用opus risk也先改用opus」「算了 這作為目前專案的設定」「算了是指本專案的 risk/consistency 完全更改為 opus 先前禁止單純是因為額度問題 現在比較寬鬆」;確認閘 2026-11-01 原話:代決 1~24「全部照草案核准 (Recommended)」、殘留風險 (d)「要加技術限制」;第 2 次確認閘 2026-11-01 原話:代決 7、10、13、14、19、24~27「照草案核准 (Recommended)」、殘留風險 (d1)~(d4) 與轉交截斷「接受 (Recommended)」)修訂第 1、5、9~12 條與信度,新增第 13 條(無原敘述)。原敘述:
+  - 2026-11-01 依 CHG-20261101-02(使用者 2026-11-01 原話:「可以改用opus risk也先改用opus」「算了 這作為目前專案的設定」「算了是指本專案的 risk/consistency 完全更改為 opus
+    先前禁止單純是因為額度問題
+    現在比較寬鬆」;確認閘 2026-11-01 原話:代決 1~24「全部照草案核准 (Recommended)」、殘留風險 (d)「要加技術限制」;第 2 次確認閘 2026-11-01 原話:代決 7、10、13、14、19、24~27「照草案核准 (Recommended)」、殘留風險 (d1)~(d4) 與轉交截斷「接受 (Recommended)」)修訂第 1、5、9~12 條與信度,新增第 13 條(無原敘述)。原敘述:
     - 第 1 條:審議席位由本機 Ollama 上的邏輯模型擔任(Qwen、GLM 等),**不派 Claude subagent 當意見席**;例外見第 9 條(security、compliance 由 Codex 擔任)與第 12 條(Codex 擔任的席位暫由 Opus 子代理代答);統整席由 Claude subagent 擔任(DIR-6)。派發者(主 agent)負責組派發包、呼叫模型、收意見、派統整席(DIR-6);**核准權仍在使用者**(確認閘不轉包)。
     - 第 5 條席位表 risk 列:| risk(原否決席,現為意見席;glm4 不得擔任,見第 6 條) | 中 / 低風險:`hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M`,`think:true`;**高風險:Codex(codex-cli,read-only sandbox,雲端)** | 2026-10-23 使用者指示「目前先暫不使用27B模型審議」(第 10 條);27B 暫停期間 |
     - 第 5 條席位表 consistency 列:| consistency | `glm4:latest` | glm4 不擔任 risk / security / compliance(第 6 條) |

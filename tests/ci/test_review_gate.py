@@ -1519,15 +1519,20 @@ class OpusSeatTest(unittest.TestCase):
                 self.assertNotIn("Opus 子代理", out)
 
     def test_codex_and_opus_overlap_exits_2(self):
-        for argv in (["--codex-seats", "risk,security,compliance"],
-                     ["--opus-seats", "security"],
-                     ["--codex-seats", "consistency", "--opus-seats", "risk,consistency"]):
+        for argv, risk in ((["--codex-seats", "risk,security,compliance"], True),
+                           (["--opus-seats", "security"], False),
+                           (["--codex-seats", "consistency", "--opus-seats", "risk,consistency"], False)):
             with self.subTest(argv=argv):
                 env = FakeEnv()
                 code, out, err = self.run_main(env, ["--pr", "9", "--dry-run"] + argv)
                 self.assertEqual(code, 2)
-                self.assertIn("DIR-1 第 13 條", err)
-                self.assertIn("risk 依 DIR-1 第 13 條由 Opus 擔任,請改用預設參數", err)
+                self.assertIn("同一席不得同時由 Codex 與 Opus 擔任", err)
+                self.assertIn("移出其中一個集合", err)
+                if risk:  # 第二句只在 risk 重疊時輸出
+                    self.assertIn("DIR-1 第 13 條", err)
+                    self.assertIn("risk 依 DIR-1 第 13 條由 Opus 擔任,請改用預設參數", err)
+                else:
+                    self.assertNotIn("risk 依 DIR-1 第 13 條", err)
                 self.assertEqual(env.calls, [])  # 參數錯誤:不呼叫 git / gh
                 self.assertEqual(out, "")
         code, _, err = self.run_main(FakeEnv(), ["--pr", "9", "--opus-seats", "bogus"])
@@ -1616,6 +1621,31 @@ class OpusSeatTest(unittest.TestCase):
         self.assertIn("## diff\n" + env.diff_text, prompt)
         self.assertIn("CHG 截斷:risk", out)
         self.assertNotIn("diff 截斷", out)
+
+    def test_prompt_still_over_limit_after_chg_clipped_is_noted(self):
+        """變更檔案清單極大、CHG 截到 0 仍放不下時:不再擴大截短範圍,只記注意行(M-3)。"""
+        env = self.big_diff_env(20000, chg_extra=70000)
+        orig = env.run_cmd
+        many = "".join("scripts/f{:05d}.py\n".format(i) for i in range(4000))  # 約 76000 字
+
+        def run_cmd(argv, input_text=None, timeout=None):
+            if argv[:2] == ["gh", "api"] and any(a.endswith("/files") for a in argv):
+                env.calls.append(list(argv))
+                return many
+            return orig(argv, input_text, timeout)
+        env.run_cmd = run_cmd
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        prompt = env.opus_prompts[0]
+        self.assertGreater(len(prompt), local_review.OPUS_PROMPT_LIMIT)
+        self.assertNotIn("長長長", prompt)  # CHG 已截到 0
+        self.assertIn("## diff\n\n<<<待審資料結束>>>", prompt)  # diff 為 0
+        self.assertRegex(out, r"prompt 仍超過 Opus 席內嵌上限\(\d+ 字 > 60000 字;變更檔案清單或參考資料過大\),"
+                              r"轉交可能被截斷")
+        self.assertRegex(out, r"CHG 由 \d+ 字截短為 0 字\(Opus 席內嵌上限\)")
+        path = self.answer_path(prompt)  # 答案檔路徑仍只在最末段
+        self.assertEqual(prompt.count(path), 1)
+        self.assertGreater(prompt.index(path), prompt.rindex("# 答案檔(最末段)"))
 
     def test_prompt_limit_holds_for_various_sizes(self):
         for diff_chars, chg_extra in ((29000, 0), (29000, 25000), (5000, 55000), (100000, 100000)):
