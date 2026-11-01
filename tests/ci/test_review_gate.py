@@ -27,6 +27,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import review_gate  # noqa: E402
 import local_review  # noqa: E402
 
+_RMTREE = shutil.rmtree  # 暫存目錄清理用;部分測試會暫時替換 shutil.rmtree 以驗證不遞迴刪除
+
 HEAD = "a" * 40
 OLD = "b" * 40
 CHG = "docs/changes/CHG-20261022-03.md"
@@ -617,7 +619,7 @@ class LocalReviewTest(unittest.TestCase):
         只在答案檔路徑出現 outputs/),時鐘與 sleep 換成 env 的替身。"""
         if env.opus_root is None:
             d = tempfile.mkdtemp(prefix="local_review_test_")
-            self.addCleanup(shutil.rmtree, d, True)
+            self.addCleanup(_RMTREE, d, True)
             env.opus_root = Path(d) / "outputs" / ".tmp" / "local_review" / "opus"
         real_outputs = (local_review.REPO_ROOT / "outputs").resolve()
         assert real_outputs not in env.opus_root.resolve().parents, env.opus_root
@@ -1494,7 +1496,7 @@ class OpusSeatTest(unittest.TestCase):
     def test_remove_keeps_unrelated_files(self):
         env = FakeEnv()
         d = tempfile.mkdtemp(prefix="local_review_test_")
-        self.addCleanup(shutil.rmtree, d, True)
+        self.addCleanup(_RMTREE, d, True)
         env.opus_root = Path(d) / "outputs" / ".tmp" / "local_review" / "opus"
         env.opus_root.mkdir(parents=True)
         keep = env.opus_root / "使用者的檔.txt"
@@ -1665,7 +1667,7 @@ class OpusSeatTest(unittest.TestCase):
     def test_does_not_touch_home(self):
         import os
         fake_home = tempfile.mkdtemp(prefix="local_review_home_")
-        self.addCleanup(shutil.rmtree, fake_home, True)
+        self.addCleanup(_RMTREE, fake_home, True)
         old = os.environ.get("HOME")
         os.environ["HOME"] = fake_home
         try:
