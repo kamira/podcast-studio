@@ -2,6 +2,8 @@
 
 review_gate 只測純函式 `evaluate()`,不碰網路;local_review 以替身取代 `run_cmd()`(記錄子程序呼叫清單,
 並假扮 `codex exec`,不呼叫雲端)與 `call_ollama()`(不呼叫本機模型),也不貼任何留言。
+Opus 席(CHG-20261101-02)以替身取代 `now()`、`sleep()`:`OPUS_TMP` 改指 tempfile 暫存目錄,替身 sleep
+推進假時鐘並假扮子代理寫答案檔;不開執行緒、不碰真實 `~/.claude.json`、`~/.codex/config.toml`、`outputs/`。
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import math
 import shutil
 import socket
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -23,6 +26,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import review_gate  # noqa: E402
 import local_review  # noqa: E402
+
+_RMTREE = shutil.rmtree  # 暫存目錄清理用;部分測試會暫時替換 shutil.rmtree 以驗證不遞迴刪除
 
 HEAD = "a" * 40
 OLD = "b" * 40
@@ -471,6 +476,39 @@ class FakeEnv:
         self.registered = []       # git worktree list --porcelain 登記的路徑
         self.codex_dir_exists = []  # 每次 codex exec 當下 -C 目錄是否存在(CHG-20261028-01)
         self.codex_dir_listing = []  # 每次 codex exec 當下 -C 目錄的內容
+        # Opus 席(CHG-20261101-02):替身 sleep 推進假時鐘並假扮子代理寫答案檔
+        self.opus_mode = "ok"      # ok / none(不寫答案)/ callable(env, stem, root) → 答案內容或 None
+        self.opus_root = None      # 測試中的 OPUS_TMP(由 run_main 設定)
+        self.clock = [1800000000.0]
+        self.sleeps = []
+        self.opus_seen = []        # 看過的 stem(依出現順序)
+        self.opus_prompts = []     # 各 stem 的 prompt 全文
+        self.opus_requests = []    # 各 stem 的 request.json
+        self.max_requests = 0      # 同一時間 OPUS_TMP 內最多幾份請求檔
+
+    def opus_answer(self, stem):
+        if callable(self.opus_mode):
+            return self.opus_mode(self, stem, self.opus_root)
+        if self.opus_mode == "none":
+            return None
+        return json.dumps(OPUS_OK, ensure_ascii=False)
+
+    def opus_sleep(self, secs):
+        self.sleeps.append(secs)
+        self.clock[0] += secs
+        root = self.opus_root
+        reqs = sorted(root.glob("*.request.json")) if root is not None and root.is_dir() else []
+        self.max_requests = max(self.max_requests, len(reqs))
+        for req in reqs:
+            stem = req.name[:-len(".request.json")]
+            if stem not in self.opus_seen:
+                self.opus_seen.append(stem)
+                self.opus_requests.append(json.loads(req.read_text(encoding="utf-8")))
+                self.opus_prompts.append((root / (stem + ".prompt.md")).read_text(encoding="utf-8"))
+            answer = root / (stem + ".answer.json")
+            content = self.opus_answer(stem)
+            if content is not None and not answer.exists():
+                answer.write_text(content, encoding="utf-8")
 
     def git(self, argv):
         """假的 git:分支查詢、以 sha fetch、rev-parse 驗證、worktree add / list / remove / prune、diff --stat。
@@ -570,19 +608,36 @@ class FakeEnv:
         return {"message": {"role": "assistant", "content": content}, "done_reason": "stop"}
 
 
+OPUS_OK = {"verdict": "pass", "evidence": "## 安全影響", "reason": "opus 判決",
+           "findings": [{"item": "i", "evidence": "e", "impact": "低", "certainty": "中"}]}
+
+
 class LocalReviewTest(unittest.TestCase):
 
     def run_main(self, env, argv):
-        orig = (local_review.run_cmd, local_review.call_ollama, local_review.log)
+        """以替身執行 main();Opus 席的 OPUS_TMP 指向 tempfile 暫存目錄(路徑含 outputs/ 一段以驗證 prompt
+        只在答案檔路徑出現 outputs/),時鐘與 sleep 換成 env 的替身。"""
+        if env.opus_root is None:
+            d = tempfile.mkdtemp(prefix="local_review_test_")
+            self.addCleanup(_RMTREE, d, True)
+            env.opus_root = Path(d) / "outputs" / ".tmp" / "local_review" / "opus"
+        real_outputs = (local_review.REPO_ROOT / "outputs").resolve()
+        assert real_outputs not in env.opus_root.resolve().parents, env.opus_root
+        orig = (local_review.run_cmd, local_review.call_ollama, local_review.log,
+                local_review.OPUS_TMP, local_review.now, local_review.sleep)
         local_review.run_cmd = env.run_cmd
         local_review.call_ollama = env.call_ollama
         local_review.log = lambda msg: None
+        local_review.OPUS_TMP = env.opus_root
+        local_review.now = lambda: env.clock[0]
+        local_review.sleep = env.opus_sleep
         out, err = io.StringIO(), io.StringIO()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = local_review.main(argv)
         finally:
-            local_review.run_cmd, local_review.call_ollama, local_review.log = orig
+            (local_review.run_cmd, local_review.call_ollama, local_review.log,
+             local_review.OPUS_TMP, local_review.now, local_review.sleep) = orig
         return code, out.getvalue(), err.getvalue()
 
     def test_fork_pr_exits_1(self):
@@ -640,7 +695,7 @@ class LocalReviewTest(unittest.TestCase):
 
     def test_ollama_bodies_follow_dir1(self):
         env = FakeEnv()
-        self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none"])
+        self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none", "--opus-seats", "none"])
         self.assertEqual(len(env.ollama_calls), 6)  # 六席各一次,序列(M-1:無互讀)
         for body, timeout in env.ollama_calls:
             self.assertEqual(body["keep_alive"], 0)
@@ -680,7 +735,7 @@ class LocalReviewTest(unittest.TestCase):
             return {"message": {"role": "assistant", "content": "", "thinking": "想很久……"},
                     "done_reason": "length"}
         env.call_ollama = truncated
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 2)  # 沒有回答 → 重派一次
         parsed = review_gate.parse_local_review(out)
@@ -751,7 +806,7 @@ class LocalReviewTest(unittest.TestCase):
     def check_chg_too_big(self, chg_chars):
         env = FakeEnv(chg_text=CHG_TEXT + "長" * chg_chars)
         code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,security",
-                                           "--codex-seats", "none"])
+                                           "--codex-seats", "none", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         think = [b for b, _ in env.ollama_calls if b.get("think")]
         self.assertTrue(think)
@@ -783,7 +838,8 @@ class LocalReviewTest(unittest.TestCase):
         code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
         self.assertEqual(len(env.codex_calls), 2)  # 兩席各一次
-        self.assertEqual(len(env.ollama_calls), 4)  # 其餘四席各一次
+        self.assertEqual(len(env.ollama_calls), 2)  # impact、drift 各一次(risk、consistency 由 Opus,DIR-1 第 13 條)
+        self.assertEqual(len(env.opus_requests), 2)
         codex_seats = {s for _, stdin, _, _ in env.codex_calls for s in ("security", "compliance")
                        if "審議會的 {} 席".format(s) in stdin}
         self.assertEqual(codex_seats, {"security", "compliance"})
@@ -801,15 +857,23 @@ class LocalReviewTest(unittest.TestCase):
 
     def test_codex_seats_none_uses_ollama_only(self):
         env = FakeEnv()
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none"])
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         self.assertFalse(any(a[0].endswith("codex") for a in env.calls))
         self.assertEqual(len(env.ollama_calls), 6)
+        self.assertEqual(env.opus_requests, [])
         self.assertNotIn("codex-cli", out)
+        # 只帶 --codex-seats none:Opus 席不受影響(DIR-1 第 9 條第 1 點)
+        env = FakeEnv()
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none"])
+        self.assertEqual(code, 0)
+        self.assertFalse(any(a[0].endswith("codex") for a in env.calls))
+        self.assertEqual(len(env.ollama_calls), 4)
+        self.assertEqual(len(env.opus_requests), 2)
 
     def test_codex_seats_override(self):
         env = FakeEnv()
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "risk"])
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "risk", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         parsed = review_gate.parse_local_review(out)
         self.assertEqual({s for s, v in parsed["seats"].items() if v["model"].startswith("codex-cli")}, {"risk"})
@@ -867,7 +931,7 @@ class LocalReviewTest(unittest.TestCase):
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
         prompts = ["\n".join(m["content"] for m in b["messages"]) for b, _ in env.ollama_calls]
-        prompts += [stdin for _, stdin, _, _ in env.codex_calls]
+        prompts += [stdin for _, stdin, _, _ in env.codex_calls] + env.opus_prompts
         self.assertEqual(len(prompts), 6)
         for p in prompts:
             self.assertNotIn("XYZZY", p)
@@ -883,7 +947,7 @@ class LocalReviewTest(unittest.TestCase):
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
         prompts = ["\n".join(m["content"] for m in b["messages"]) for b, _ in env.ollama_calls]
-        prompts += [stdin for _, stdin, _, _ in env.codex_calls]
+        prompts += [stdin for _, stdin, _, _ in env.codex_calls] + env.opus_prompts
         self.assertEqual(len(prompts), 6)
         for p in prompts:
             self.assertNotIn("PLUGH", p)
@@ -898,7 +962,7 @@ class LocalReviewTest(unittest.TestCase):
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
         prompts = ["\n".join(m["content"] for m in b["messages"]) for b, _ in env.ollama_calls]
-        prompts += [stdin for _, stdin, _, _ in env.codex_calls]
+        prompts += [stdin for _, stdin, _, _ in env.codex_calls] + env.opus_prompts
         self.assertEqual(len(prompts), 6)
         return prompts
 
@@ -945,6 +1009,7 @@ class LocalReviewTest(unittest.TestCase):
     def system_prompts(env):
         prompts = [b["messages"][0]["content"] for b, _ in env.ollama_calls]
         prompts += [stdin.split("\n\n# 本席參考資料", 1)[0] for _, stdin, _, _ in env.codex_calls]
+        prompts += [p.split("\n\n# 本席參考資料", 1)[0] for p in env.opus_prompts]
         return prompts
 
     def test_system_prompts_are_advisory(self):
@@ -984,7 +1049,7 @@ class LocalReviewTest(unittest.TestCase):
     def test_big_chg_clipped_only_for_non_think_ollama_seats(self):
         big = "長" * 90000
         env = FakeEnv(chg_text=CHG_TEXT + big)
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         plain = [b for b, _ in env.ollama_calls if not b.get("think")]
         think = [b for b, _ in env.ollama_calls if b.get("think")]
@@ -1107,7 +1172,7 @@ class LocalReviewTest(unittest.TestCase):
 
     def test_heavy_seat_timeout_is_1800(self):
         env = FakeEnv(chg_text=CHG_HIGH)
-        code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none"])
+        code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         heavy = [t for b, t in env.ollama_calls if b["model"] == local_review.HEAVY]
         self.assertEqual(len(heavy), 2)  # risk、security 各一次
@@ -1117,7 +1182,7 @@ class LocalReviewTest(unittest.TestCase):
 
     def test_heavy_timeout_falls_back_to_codex(self):
         env = self.heavy_timeout_env()
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,drift"])
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,drift", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         heavy = [b for b, _ in env.ollama_calls if b["model"] == local_review.HEAVY]
         self.assertEqual(len(heavy), 1)  # 27B 只試一次,不重派
@@ -1134,7 +1199,7 @@ class LocalReviewTest(unittest.TestCase):
     def test_heavy_fallback_codex_fails_twice_is_no_answer(self):
         env = self.heavy_timeout_env()
         env.codex_mode = "fail"
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         self.assertEqual(len(env.ollama_calls), 1)
         self.assertEqual(len(env.codex_calls), 2)  # Codex 失敗 → 重派 Codex 一次
@@ -1154,7 +1219,7 @@ class LocalReviewTest(unittest.TestCase):
         orig_time = local_review.time
         local_review.time = types.SimpleNamespace(time=lambda: clock[0], strftime=orig_time.strftime)
         try:
-            code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+            code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk", "--opus-seats", "none"])
         finally:
             local_review.time = orig_time
         self.assertEqual(code, 0)
@@ -1194,7 +1259,7 @@ class LocalReviewTest(unittest.TestCase):
     def test_heavy_fallback_without_codex_version_is_no_answer(self):
         env = self.heavy_timeout_env()
         env.codex_version_ok = False
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk", "--opus-seats", "none"])
         self.assertEqual(code, 0)
         self.assertEqual(len(env.ollama_calls), 1)  # 27B 不重派
         self.assertEqual(env.codex_calls, [])       # 也不呼叫 codex exec
@@ -1203,6 +1268,450 @@ class LocalReviewTest(unittest.TestCase):
         self.assertNotIn("codex-cli", seat["model"])
         self.assertIn("27B 逾時 30 分鐘改派", seat["model"])
         self.assertIn("讀不到 Codex 版本,DIR-1 第 9 條要求記錄實際版本", out)
+
+
+class OpusSeatTest(unittest.TestCase):
+    """CHG-20261101-02:risk、consistency 席由 Opus 子代理擔任(請求檔 / 答案檔交接,DIR-1 第 13 條)。"""
+
+    run_main = LocalReviewTest.run_main
+    FORBIDDEN = ("git show", "git diff", "git ls-tree", "請讀", "讀取下列檔案")
+
+    @staticmethod
+    def answer_path(prompt):
+        return prompt.rsplit("\n", 1)[1]
+
+    def assert_prompt_shape(self, prompt):
+        """整份 ≤ 60000 字;答案檔路徑只出現一次,且在最末段。"""
+        self.assertLessEqual(len(prompt), local_review.OPUS_PROMPT_LIMIT)
+        path = self.answer_path(prompt)
+        self.assertTrue(path.endswith(".answer.json"), path)
+        self.assertEqual(prompt.count(path), 1)
+        self.assertGreater(prompt.index(path), prompt.rindex("# 答案檔(最末段)"))
+        stem = Path(path).name[:-len(".answer.json")]
+        self.assertEqual(prompt.count(stem), 1)
+
+    # (1) 預設參數
+    def test_default_risk_consistency_use_opus(self):
+        env = FakeEnv()
+        code, out, err = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertEqual([r["seat"] for r in env.opus_requests], ["risk", "consistency"])
+        self.assertEqual(len(env.ollama_calls), 2)
+        self.assertEqual({b["model"] for b, _ in env.ollama_calls}, {"glm4:latest", "qwen3:8b"})
+        self.assertEqual(len(env.codex_calls), 2)
+        parsed = review_gate.parse_local_review(out)
+        for s in ("risk", "consistency"):
+            self.assertEqual(parsed["seats"][s], {"model": "claude-opus-medium", "verdict": "pass"})
+            self.assertIn("[verdict] {} | claude-opus-medium | pass".format(s), out)
+        self.assertEqual(parsed["seats"]["impact"]["model"], "glm4:latest")
+        self.assertEqual(parsed["seats"]["drift"]["model"], "qwen3:8b")
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
+        self.assertTrue(ok, msgs)
+        self.assertIn("risk / consistency 由 Opus 子代理(雲端 Claude,effort medium,派發者每席各派全新子代理)擔任,"
+                      "使用者 2026-11-01 指示(DIR-1 第 13 條)", out)
+        self.assertNotIn("代 Codex", out)
+        for req in env.opus_requests:
+            self.assertIn("opus 席 {} 第 1 次:請求檔 {}".format(req["seat"], req["prompt_path"]), err)
+            self.assertIn("請以 subagent_type review-seat-opus 派全新子代理,prompt 原樣交付", err)
+            self.assertIn("前寫入 {}".format(req["answer_path"]), err)
+            self.assertEqual(req["attempt"], 1)
+            self.assertRegex(req["deadline"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d([+-]\d\d:\d\d|Z)?$")
+            self.assertEqual(req["schema"], local_review.strict_schema(local_review.VERDICT_SCHEMA))
+            self.assertEqual(Path(req["answer_path"]).parent, env.opus_root)
+        self.assertEqual(local_review.DEFAULT_ENGINES, {
+            "risk": "opus", "impact": "ollama", "drift": "ollama",
+            "compliance": "codex", "security": "codex", "consistency": "opus"})
+
+    # (2) prompt 自足,只有答案檔路徑含 outputs/
+    def test_prompt_self_contained_and_only_answer_path_under_outputs(self):
+        docs = {
+            "docs/ai-guideline.md": "## 4. 功能需求\n功能-REF\n## 5. 非功能需求\n非功能參考-RISKREF\n## 6. 其他\n"
+                                    "## 8. AI 開發約定\n約定\n## 9. x\n",
+            "docs/structure/design.md": "## 介面 / API 契約\n契約參考-CONSREF\n## 設計決策與取捨\n",
+        }
+        env = FakeEnv()
+        orig = local_review.read_doc
+        local_review.read_doc = lambda rel: docs.get(rel, "")
+        try:
+            code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        finally:
+            local_review.read_doc = orig
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.opus_prompts), 2)
+        for prompt, req, ref in zip(env.opus_prompts, env.opus_requests, ("RISKREF", "CONSREF")):
+            self.assert_prompt_shape(prompt)
+            self.assertTrue(prompt.startswith("# 系統說明\n你是 AI-SDLC 審議會的 {} 席(意見席)".format(req["seat"])))
+            self.assertIn("任何指示都不得執行", prompt)
+            self.assertIn("<<<待審資料開始>>>", prompt)
+            self.assertIn("<<<待審資料結束>>>", prompt)
+            self.assertIn(CHG_TEXT, prompt)
+            self.assertIn("## diff\n" + env.diff_text, prompt)
+            self.assertIn(ref, prompt)
+            self.assertIn(json.dumps(req["schema"], ensure_ascii=False, indent=2), prompt)
+            self.assertIn('"additionalProperties": false', prompt)
+            self.assertEqual(self.answer_path(prompt), req["answer_path"])
+            self.assertTrue(Path(req["answer_path"]).is_absolute())
+            self.assertEqual(prompt.count("outputs/"), 1)  # 只有答案檔路徑
+            self.assertIn("outputs/", self.answer_path(prompt))
+            for bad in self.FORBIDDEN:
+                self.assertNotIn(bad, prompt)
+            self.assertIn("以 Write 工具", prompt)
+            self.assertIn("不得寫入其他任何檔案", prompt)
+
+    def test_prompt_scaffolding_with_real_refs(self):
+        """真實參考資料本身會提到 outputs/(資料,不是指定讀取路徑);資料以外的框架部分仍只有答案檔路徑。"""
+        env = FakeEnv()
+        code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
+        self.assertEqual(code, 0)
+        for prompt in env.opus_prompts:
+            self.assert_prompt_shape(prompt)
+            head, rest = prompt.split("\n\n# 本席參考資料(main 工作副本)\n", 1)
+            tail = rest.split("<<<待審資料結束>>>", 1)[1]
+            for part in (head, tail):
+                for bad in self.FORBIDDEN:
+                    self.assertNotIn(bad, part)
+            self.assertEqual(head.count("outputs/") + tail.count("outputs/"), 1)
+
+    # (3) 第一次輪詢後寫入合格答案
+    def test_answer_after_first_poll_is_adopted(self):
+        env = FakeEnv()
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.opus_requests), 1)
+        self.assertEqual(env.sleeps, [5, 5])  # 寫入後連續兩次大小與修改時間不變才讀
+        self.assertIn("判決:pass(第 1 次回答", out)
+        self.assertIn("理由:opus 判決", out)
+        self.assertEqual(review_gate.parse_local_review(out)["seats"]["risk"]["verdict"], "pass")
+
+    def test_answer_still_growing_is_not_read_yet(self):
+        writes = {}
+
+        def mode(env, stem, root):
+            n = writes[stem] = writes.get(stem, 0) + 1
+            path = root / (stem + ".answer.json")
+            if n == 1:
+                path.write_text('{"verdict": "pa', encoding="utf-8")  # 寫到一半
+            elif n == 2:
+                path.write_text(json.dumps(OPUS_OK), encoding="utf-8")
+            return None
+        env = FakeEnv()
+        env.opus_mode = mode
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "consistency"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.opus_requests), 1)
+        self.assertIn("判決:pass(第 1 次回答", out)
+
+    # (4) 格式不合格
+    BAD_ANSWERS = {
+        "not_json": "不是 JSON",
+        "extra_field": json.dumps(dict(OPUS_OK, model="自填模型")),
+        "bad_enum": json.dumps(dict(OPUS_OK, verdict="approve")),
+        "too_many_findings": json.dumps(dict(OPUS_OK, findings=[OPUS_OK["findings"][0]] * 21)),
+        "too_big": json.dumps(dict(OPUS_OK, reason="x" * 262144)),
+        "not_object": json.dumps([OPUS_OK]),
+        "bad_finding": json.dumps(dict(OPUS_OK, findings=[{"item": "i"}])),
+    }
+
+    def test_bad_answers_retry_with_new_stem_then_no_answer(self):
+        for kind, content in self.BAD_ANSWERS.items():
+            with self.subTest(kind=kind):
+                env = FakeEnv()
+                env.opus_mode = lambda e, stem, root, c=content: c
+                code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+                self.assertEqual(code, 0)
+                self.assertEqual([r["attempt"] for r in env.opus_requests], [1, 2])
+                self.assertEqual(len(set(env.opus_seen)), 2)  # 第 2 次用新 stem
+                self.assertNotEqual(env.opus_requests[0]["answer_path"], env.opus_requests[1]["answer_path"])
+                seat = review_gate.parse_local_review(out)["seats"]["risk"]
+                self.assertEqual(seat, {"model": "claude-opus-medium", "verdict": "no-answer"})
+                self.assertIn("格式不合格", out)
+                self.assertFalse(env.opus_root.exists())
+
+    def test_bad_then_good_answer_uses_second_attempt(self):
+        env = FakeEnv()
+        env.opus_mode = lambda e, stem, root: "不是 JSON" if stem.endswith("-1") else json.dumps(OPUS_OK)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.opus_requests), 2)
+        self.assertIn("判決:pass(第 2 次回答", out)
+
+    def test_schema_ok(self):
+        schema = local_review.strict_schema(local_review.VERDICT_SCHEMA)
+        self.assertTrue(local_review.schema_ok(schema, OPUS_OK))
+        self.assertTrue(local_review.schema_ok(schema, dict(OPUS_OK, findings=[])))
+        for kind, content in self.BAD_ANSWERS.items():
+            if kind in ("not_json", "too_big"):
+                continue
+            with self.subTest(kind=kind):
+                self.assertFalse(local_review.schema_ok(schema, json.loads(content)))
+        self.assertFalse(local_review.schema_ok(schema, {k: v for k, v in OPUS_OK.items() if k != "reason"}))
+        self.assertFalse(local_review.schema_ok(schema, dict(OPUS_OK, reason=1)))
+        self.assertFalse(local_review.schema_ok({"type": "number"}, 1))  # 不認得的 type 一律不合格
+
+    # (5) 逾時
+    def test_timeout_retries_once_then_no_answer(self):
+        env = FakeEnv()
+        env.opus_mode = "none"
+        start = env.clock[0]
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "consistency"])
+        self.assertEqual(code, 0)
+        self.assertEqual([r["attempt"] for r in env.opus_requests], [1, 2])
+        self.assertGreaterEqual(env.clock[0] - start, 900)
+        self.assertLessEqual(env.clock[0] - start, 1800)
+        self.assertEqual(set(env.sleeps), {5})
+        self.assertEqual(review_gate.parse_local_review(out)["seats"]["consistency"],
+                         {"model": "claude-opus-medium", "verdict": "no-answer"})
+        self.assertIn("逾時", out)
+        self.assertFalse(env.opus_root.exists())
+
+    # (6) 遲到答案
+    def test_late_answer_for_old_stem_is_not_adopted(self):
+        def mode(env, stem, root):
+            if stem.endswith("-2"):  # 第 2 次期間,第 1 次的子代理才寫答案
+                (root / (env.opus_seen[0] + ".answer.json")).write_text(json.dumps(OPUS_OK), encoding="utf-8")
+            return None
+        env = FakeEnv()
+        env.opus_mode = mode
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.opus_requests), 2)
+        self.assertEqual(review_gate.parse_local_review(out)["seats"]["risk"]["verdict"], "no-answer")
+        # 遲到答案留在暫存目錄(不採用,也不清理其他 stem 的檔)
+        self.assertEqual(sorted(p.name for p in env.opus_root.iterdir()), [env.opus_seen[0] + ".answer.json"])
+
+    # (7) 清理
+    def test_request_and_answer_files_removed_and_one_request_at_a_time(self):
+        env = FakeEnv()
+        code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertEqual(env.max_requests, 1)  # 序列:同一時間只有一組請求檔
+        for req in env.opus_requests:
+            for p in (req["prompt_path"], req["answer_path"],
+                      req["prompt_path"].replace(".prompt.md", ".request.json")):
+                self.assertFalse(Path(p).exists(), p)
+        self.assertFalse(env.opus_root.exists())
+        self.assertFalse(env.opus_root.parent.exists())  # 上一層空了也移除
+        self.assertTrue(env.opus_root.parent.parent.is_dir())  # 再上層不動
+
+    def test_remove_keeps_unrelated_files(self):
+        env = FakeEnv()
+        d = tempfile.mkdtemp(prefix="local_review_test_")
+        self.addCleanup(_RMTREE, d, True)
+        env.opus_root = Path(d) / "outputs" / ".tmp" / "local_review" / "opus"
+        env.opus_root.mkdir(parents=True)
+        keep = env.opus_root / "使用者的檔.txt"
+        keep.write_text("保留", encoding="utf-8")
+        code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(p.name for p in env.opus_root.iterdir()), ["使用者的檔.txt"])
+
+    # (8) 參數
+    def test_opus_seats_none_returns_to_ollama(self):
+        for chg, risk_model in ((CHG_TEXT, local_review.RISK_9B), (CHG_HIGH, local_review.HEAVY)):
+            with self.subTest(risk_model=risk_model):
+                env = FakeEnv(chg_text=chg)
+                code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--opus-seats", "none"])
+                self.assertEqual(code, 0)
+                self.assertEqual(env.opus_requests, [])
+                parsed = review_gate.parse_local_review(out)
+                self.assertEqual(parsed["seats"]["consistency"]["model"], "glm4:latest")
+                self.assertEqual(parsed["seats"]["risk"]["model"], risk_model)
+                self.assertNotIn("Opus 子代理", out)
+
+    def test_codex_and_opus_overlap_exits_2(self):
+        for argv, risk in ((["--codex-seats", "risk,security,compliance"], True),
+                           (["--opus-seats", "security"], False),
+                           (["--codex-seats", "consistency", "--opus-seats", "risk,consistency"], False)):
+            with self.subTest(argv=argv):
+                env = FakeEnv()
+                code, out, err = self.run_main(env, ["--pr", "9", "--dry-run"] + argv)
+                self.assertEqual(code, 2)
+                self.assertIn("同一席不得同時由 Codex 與 Opus 擔任", err)
+                self.assertIn("移出其中一個集合", err)
+                if risk:  # 第二句只在 risk 重疊時輸出
+                    self.assertIn("DIR-1 第 13 條", err)
+                    self.assertIn("risk 依 DIR-1 第 13 條由 Opus 擔任,請改用預設參數", err)
+                else:
+                    self.assertNotIn("risk 依 DIR-1 第 13 條", err)
+                self.assertEqual(env.calls, [])  # 參數錯誤:不呼叫 git / gh
+                self.assertEqual(out, "")
+        code, _, err = self.run_main(FakeEnv(), ["--pr", "9", "--opus-seats", "bogus"])
+        self.assertEqual(code, 2)
+        self.assertIn("--opus-seats 未知席位 bogus", err)
+        with self.assertRaises(ValueError):
+            local_review.seat_config("中", {"risk"}, opus_seats={"risk"})
+        with self.assertRaises(ValueError):
+            local_review.seat_config("中", {"risk"})  # 預設 Opus 集合含 risk
+
+    def test_codex_quota_standin_four_opus_seats(self):
+        env = FakeEnv()
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--codex-seats", "none",
+                                           "--opus-seats", "risk,consistency,security,compliance"])
+        self.assertEqual(code, 0)
+        self.assertEqual(env.codex_calls, [])
+        self.assertFalse(any(a[0].endswith("codex") for a in env.calls))
+        self.assertEqual(len(env.ollama_calls), 2)
+        self.assertEqual(sorted(r["seat"] for r in env.opus_requests),
+                         ["compliance", "consistency", "risk", "security"])
+        seats = review_gate.parse_local_review(out)["seats"]
+        for s in ("security", "compliance"):
+            self.assertEqual(seats[s]["model"], "claude-opus-medium(代 Codex,額度用盡)")
+        for s in ("risk", "consistency"):
+            self.assertEqual(seats[s]["model"], "claude-opus-medium")
+        self.assertIn("其中 security / compliance 為代 Codex(額度用盡,DIR-1 第 12 條)", out)
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
+        self.assertTrue(ok, msgs)
+        cfg = local_review.seat_config("高", set(), opus_seats={"risk", "consistency", "security", "compliance"})
+        self.assertEqual(cfg["compliance"]["ref_limit"], local_review.COMPLIANCE_REF_LIMIT)
+        self.assertEqual({n for n, c in cfg.items() if c["engine"] == "opus"},
+                         {"risk", "consistency", "security", "compliance"})
+        self.assertFalse(any(c["think"] for c in cfg.values() if c["engine"] == "opus"))
+
+    # (9) 內嵌上限
+    def big_diff_env(self, diff_chars, chg_extra=0):
+        env = FakeEnv(chg_text=CHG_TEXT + "長" * chg_extra)
+        env.diff_text = "diff --git a/scripts/x.py b/scripts/x.py\n+" + "y" * diff_chars + "\n"
+        return env
+
+    def test_small_diff_inline_without_fetch_or_view(self):
+        env = FakeEnv()
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
+        self.assertEqual(code, 0)
+        for prompt in env.opus_prompts:
+            self.assertIn("## diff\n" + env.diff_text, prompt)
+            # 參考資料沿用既有 REF_CHAR_LIMIT 截斷(consistency 席的 design.md 節錄超過 12000 字);待審資料不截
+            self.assertNotIn("截斷於", prompt.split("<<<待審資料開始>>>", 1)[1])
+            self.assert_prompt_shape(prompt)
+        self.assertFalse(any(a[0] == "git" and ("fetch" in a or "worktree" in a) for a in env.calls))
+        self.assertNotIn("diff 截斷", out)
+
+    def test_big_diff_clipped_with_note_without_fetch_or_view(self):
+        env = self.big_diff_env(60000)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
+        self.assertEqual(code, 0)
+        self.assertFalse(any(a[0] == "git" and ("fetch" in a or "worktree" in a) for a in env.calls))
+        self.assertEqual(len(env.opus_prompts), 2)
+        for prompt in env.opus_prompts:
+            self.assert_prompt_shape(prompt)
+            diff_part = prompt.split("## diff\n", 1)[1].split("\n<<<待審資料結束>>>", 1)[0]
+            self.assertEqual(len(diff_part), local_review.OPUS_DIFF_LIMIT)
+            self.assertIn("截斷於 30000 字", diff_part)
+        self.assertRegex(out, r"diff 由 \d+ 字截短為 30000 字\(Opus 席內嵌上限\)")
+        self.assertIn("diff 截斷:risk、consistency", out)
+        self.assertNotIn("CHG 截斷", out)
+
+    def test_big_chg_clipped_so_diff_keeps_minimum(self):
+        env = self.big_diff_env(20000, chg_extra=70000)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
+        self.assertEqual(code, 0)
+        for prompt in env.opus_prompts:
+            self.assert_prompt_shape(prompt)
+            self.assertNotIn("長" * 70000, prompt)
+            diff_part = prompt.split("## diff\n", 1)[1].split("\n<<<待審資料結束>>>", 1)[0]
+            self.assertGreaterEqual(len(diff_part), local_review.OPUS_DIFF_MIN)
+        self.assertRegex(out, r"CHG 由 \d+ 字截短為 \d+ 字\(Opus 席內嵌上限\)")
+        self.assertIn("CHG 截斷:risk、consistency", out)
+
+    def test_big_chg_with_short_diff_keeps_whole_diff(self):
+        env = FakeEnv(chg_text=CHG_TEXT + "長" * 70000)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        prompt = env.opus_prompts[0]
+        self.assert_prompt_shape(prompt)
+        self.assertIn("## diff\n" + env.diff_text, prompt)
+        self.assertIn("CHG 截斷:risk", out)
+        self.assertNotIn("diff 截斷", out)
+
+    def test_prompt_still_over_limit_after_chg_clipped_is_noted(self):
+        """變更檔案清單極大、CHG 截到 0 仍放不下時:不再擴大截短範圍,只記注意行(M-3)。"""
+        env = self.big_diff_env(20000, chg_extra=70000)
+        orig = env.run_cmd
+        many = "".join("scripts/f{:05d}.py\n".format(i) for i in range(4000))  # 約 76000 字
+
+        def run_cmd(argv, input_text=None, timeout=None):
+            if argv[:2] == ["gh", "api"] and any(a.endswith("/files") for a in argv):
+                env.calls.append(list(argv))
+                return many
+            return orig(argv, input_text, timeout)
+        env.run_cmd = run_cmd
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        prompt = env.opus_prompts[0]
+        self.assertGreater(len(prompt), local_review.OPUS_PROMPT_LIMIT)
+        self.assertNotIn("長長長", prompt)  # CHG 已截到 0
+        self.assertIn("## diff\n\n<<<待審資料結束>>>", prompt)  # diff 為 0
+        self.assertRegex(out, r"prompt 仍超過 Opus 席內嵌上限\(\d+ 字 > 60000 字;變更檔案清單或參考資料過大\),"
+                              r"轉交可能被截斷")
+        self.assertRegex(out, r"CHG 由 \d+ 字截短為 0 字\(Opus 席內嵌上限\)")
+        path = self.answer_path(prompt)  # 答案檔路徑仍只在最末段
+        self.assertEqual(prompt.count(path), 1)
+        self.assertGreater(prompt.index(path), prompt.rindex("# 答案檔(最末段)"))
+
+    def test_prompt_limit_holds_for_various_sizes(self):
+        for diff_chars, chg_extra in ((29000, 0), (29000, 25000), (5000, 55000), (100000, 100000)):
+            with self.subTest(diff=diff_chars, chg=chg_extra):
+                env = self.big_diff_env(diff_chars, chg_extra)
+                code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
+                self.assertEqual(code, 0)
+                for prompt in env.opus_prompts:
+                    self.assert_prompt_shape(prompt)
+
+    # (9b) 子代理定義
+    def test_review_seat_agent_definition(self):
+        text = (ROOT / ".claude" / "agents" / "review-seat-opus.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))
+        front, body = text[4:].split("\n---\n", 1)
+        meta = {}
+        for line in front.splitlines():
+            key, _, value = line.partition(":")
+            meta[key.strip()] = value.strip()
+        self.assertEqual(meta["name"], local_review.OPUS_AGENT)
+        self.assertEqual(meta["model"], "opus")
+        self.assertEqual(meta["effort"], "medium")
+        self.assertEqual(meta["tools"], "Write")
+        self.assertEqual(set(meta), {"name", "description", "model", "effort", "tools"})
+        for word in ("Read", "Bash", "Grep", "Glob", "Edit", "WebFetch", "outputs/"):
+            self.assertNotIn(word, body)
+        self.assertIn("Write", body)
+
+    # (11) 不新增網路模組;ask_opus 只經檔案系統
+    def test_imports_unchanged_and_ask_opus_uses_files_only(self):
+        import ast
+        import inspect
+        tree = ast.parse((ROOT / "scripts" / "local_review.py").read_text(encoding="utf-8"))
+        mods = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                mods |= {a.name for a in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                mods.add(node.module)
+        self.assertEqual(mods, {"__future__", "argparse", "base64", "json", "math", "os", "re", "shutil", "socket",
+                                "subprocess", "sys", "time", "urllib.request", "pathlib", "typing", "review_gate"})
+        src = "".join(inspect.getsource(f) for f in (
+            local_review.ask_opus, local_review.read_opus_answer, local_review.remove_opus_files,
+            local_review.opus_prompt, local_review.opus_stem, local_review.schema_ok, local_review.iso_time))
+        for bad in ("run_cmd", "call_ollama", "urllib", "socket", "subprocess", "gh(", "repo_git", "shutil"):
+            self.assertNotIn(bad, src)
+
+    # (12) 不讀寫 HOME
+    def test_does_not_touch_home(self):
+        import os
+        fake_home = tempfile.mkdtemp(prefix="local_review_home_")
+        self.addCleanup(_RMTREE, fake_home, True)
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = fake_home
+        try:
+            env = FakeEnv()
+            code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
+        finally:
+            if old is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old
+        self.assertEqual(code, 0)
+        self.assertEqual(os.listdir(fake_home), [])
+        home = Path.home().resolve()
+        self.assertNotIn(home, env.opus_root.resolve().parents)
 
 
 class CodexViewTest(unittest.TestCase):
@@ -1260,7 +1769,7 @@ class CodexViewTest(unittest.TestCase):
         env = self.big_env()
         code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(env.ollama_calls), 4)
+        self.assertEqual(len(env.ollama_calls), 2)  # impact、drift(risk、consistency 由 Opus)
         for body, _ in env.ollama_calls:
             user = body["messages"][1]["content"]
             self.assertIn("截斷於", user)
