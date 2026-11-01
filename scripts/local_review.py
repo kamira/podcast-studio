@@ -28,7 +28,7 @@ local_review.py — 本機模型審議會(DIR-1)/ local review panel
 交叉審議階段已移除(CHG-20261028-02 DIR-5 修正 M-1;使用者 2026-10-28 原話:「目前不需要交叉審議 因為有統一的最後審議席
 所以只要最後進行統整裁決即可」)。
 compliance 席的參考資料去除 directive 的「歷史」區塊,上限 COMPLIANCE_REF_LIMIT 字,確保 DIR-6 與 Guideline §8
-完整送達(CHG-20261028-02 DIR-5 修正 M-2);其他席位維持 REF_CHAR_LIMIT。
+完整送達(CHG-20261028-02 DIR-5 修正 M-2;CHG-20261101-02 修訂 1 提高為 24000 字);其他席位維持 REF_CHAR_LIMIT。
 
 DIR-1:席位一次只跑一席(序列)、`keep_alive: 0`、格式不合格 = 沒有回答 → 重派一次;
 逾時 27B 30 分鐘、其餘 15 分鐘;27B 超過 30 分鐘沒有回答時該席改派 Codex
@@ -44,11 +44,22 @@ Opus 席交接(CHG-20261101-02):本腳本不呼叫任何雲端 API,也不新增�
 (`outputs/.tmp/local_review/opus/`)寫出 `<stem>.prompt.md`(完整子代理 prompt)與 `<stem>.request.json`,
 在 stderr 提示派發者以 subagent_type `review-seat-opus`(`.claude/agents/review-seat-opus.md`,只有 Write 工具)
 派全新子代理、prompt 原樣交付,之後每 OPUS_POLL_SECS 秒輪詢 `<stem>.answer.json`。prompt 自足:送審資料全部
-內嵌(diff 與 CHG 依 OPUS_PROMPT_LIMIT / OPUS_DIFF_LIMIT / OPUS_DIFF_MIN 截短並記注意行),不含要子代理讀檔
-或執行指令的指示;含 stem 的答案檔路徑只放在 prompt 最末段。答案檔當不可信輸入:連續兩次輪詢大小與修改時間
-不變才讀、超過 OPUS_ANSWER_MAX_BYTES 或不通過本機嚴格 schema 檢查 = 格式不合格;每次嘗試 TIMEOUT_OPUS 秒,
-沒有合格答案就用新 stem 重派一次,仍沒有記 no-answer;舊 stem 的遲到答案不採用。模型標記由本腳本填
-OPUS_MODEL(代 Codex 時 OPUS_STANDIN_MODEL),不信任子代理自填。`--dry-run` 對 Opus 席仍寫請求檔並等待。
+內嵌,不含要子代理讀檔或執行指令的指示;含 stem 的答案檔路徑只放在 prompt 最末段。答案檔當不可信輸入:連續兩次
+輪詢大小與修改時間不變才讀、超過 OPUS_ANSWER_MAX_BYTES 或不通過本機嚴格 schema 檢查 = 格式不合格;每份請求
+TIMEOUT_OPUS 秒,沒有合格答案就用新 stem 重派一次,仍沒有記為該組沒有回答;舊 stem 的遲到答案不採用。模型標記
+由本腳本填 OPUS_MODEL(代 Codex 時 OPUS_STANDIN_MODEL),不信任子代理自填。`--dry-run` 對 Opus 席仍寫請求檔並等待。
+
+Opus 席分組繳交(CHG-20261101-02 修訂 1):每份請求的整份 prompt 以 OPUS_PROMPT_LIMIT(20000 字)為上限。
+每組都附固定部分(席位 system、判決 schema 與作答方式、opus_ref() 的參考資料、PR 標題、PR 內文前
+OPUS_BODY_LIMIT 字、變更檔案清單前 OPUS_FILES_LIMIT 字、CHG 表頭前 OPUS_CHG_HEAD_LIMIT 字、本組說明),
+其餘可放內容 = 上限 − 固定部分。CHG 本文與 diff 一份放得下時只有一組;否則 group_chg() 把 CHG 依 `## ` 章節
+(優先序:最新的 `## 修訂 n`、`## 安全影響`、`## 修改指引`、`## 決策與取捨`、`## 動機`、其餘依原順序)裝箱,
+group_diff() 把 diff 依程式結構(直系呼叫、引用參數、共用參數的函式為一組)裝箱,每席 CHG、diff 各至多
+OPUS_MAX_CHG_GROUPS / OPUS_MAX_DIFF_GROUPS 組,超出的單位不送審並記「未送審」。每組一份請求檔、序列交接;
+每席累計 OPUS_SEAT_BUDGET 秒,用完後剩下的組不再發請求。固定部分超過上限時依序把參考資料(須完整送達者除外)、
+變更檔案清單、CHG 表頭截半並記注意行,仍超過時該組不派發(不寫請求檔)。合成:全部組都沒有回答(含全部不派發)
+→ no-answer;否則取已回答各組最嚴者,部分組沒有回答或有未送審內容(超出組數上限的單位,以及 CHG 章節截短、
+固定部分截半時捨棄的內容)時至少 concern。
 
 送給各席的 CHG 會去除「## 審議」節(前輪判決),維持獨立階段不看他人判決的原則;
 送審 diff 中兩側皆為 `docs/changes/CHG-*.md` 的區塊以一行說明取代(CHG-20261022-03 T12;
@@ -65,8 +76,7 @@ Codex 席不套 Ollama 的 `num_ctx` 截短(CHG-20261028-01):filtered diff ≤ C
 prompt;超過時 prompt 的「## diff」改放 base / head sha、diffstat 與讀取方式,由席位在檢視內自行讀。
 Ollama 席維持 `fit_diff()` 截短。非 think 的 Ollama 席(現為 impact、consistency)在 diff 截到 0 仍超過
 `num_ctx − NUM_PREDICT` 時,改以 `clip()` 截短 CHG 並記注意行(CHG-20261028-02);think 席與 Codex 席不截 CHG。
-Opus 席不經 `fit_diff()`:diff 上限 = min(OPUS_DIFF_LIMIT, OPUS_PROMPT_LIMIT − 不含 diff 的 prompt 字數),
-該值小於 OPUS_DIFF_MIN 時先截 CHG(CHG-20261101-02 代決 27)。
+Opus 席不經 `fit_diff()`,改走上述分組(opus_groups())。
 
 用法 / usage:
   python3 scripts/local_review.py --pr <編號> [--chg CHG-YYYYMMDD-NN] [--seats risk,security]
@@ -113,7 +123,7 @@ DIFF_CHAR_LIMIT = 30000
 CODEX_INLINE_LIMIT = DIFF_CHAR_LIMIT  # Codex 席:filtered diff 超過此字數改用 PR head 唯讀檢視(CHG-20261028-01)
 DIFFSTAT_CHAR_LIMIT = 20000
 REF_CHAR_LIMIT = 12000
-COMPLIANCE_REF_LIMIT = 20000  # compliance 席:directive 現行條文 + Guideline §8 須完整送達(M-2)
+COMPLIANCE_REF_LIMIT = 24000  # compliance 席:directive 現行條文 + Guideline §8 須完整送達(M-2;修訂 1 由 20000 提高)
 PR_BODY_LIMIT = 4000
 
 HEAVY = "hf.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:IQ3_M"
@@ -149,10 +159,21 @@ OPUS_AGENT = "review-seat-opus"   # .claude/agents/review-seat-opus.md(只有 Wr
 TIMEOUT_OPUS = 900          # 每次嘗試 15 分鐘
 OPUS_POLL_SECS = 5          # 輪詢間隔;連續兩次大小與修改時間不變才讀
 OPUS_ANSWER_MAX_BYTES = 262144  # 答案檔上限 256 KB,超過視為格式不合格
-OPUS_PROMPT_LIMIT = 60000   # 整份子代理 prompt 上限(派發者要原樣轉交,代決 27)
-OPUS_DIFF_LIMIT = 30000     # 經 filter_diff() 後的 diff 上限(與 CODEX_INLINE_LIMIT 相同)
-OPUS_DIFF_MIN = 10000       # diff 至少保留的字數;不足時先截 CHG(diff 本身較短時以實際長度為準)
+OPUS_PROMPT_LIMIT = 20000   # 每份請求的整份子代理 prompt 上限(派發者要原樣轉交;修訂 1 R1-代決 2)
+OPUS_REF_LIMIT = 3000       # 每組附的席位參考資料上限(須完整送達的 compliance 除外,R1-代決 18、20)
+OPUS_BODY_LIMIT = 1000      # 每組附的 PR 內文上限(R1-代決 3)
+OPUS_FILES_LIMIT = 1500     # 每組附的變更檔案清單上限
+OPUS_CHG_HEAD_LIMIT = 2000  # 每組附的 CHG 表頭(第一個 `## ` 之前)上限
+OPUS_MAX_CHG_GROUPS = 2     # 每席 CHG 至多幾組(漸進做法,R1-代決 1、6)
+OPUS_MAX_DIFF_GROUPS = 2    # 每席 diff 至多幾組
+OPUS_SEAT_BUDGET = 3600     # 每席累計秒數;用完後剩下的組不再發請求(R1-代決 7)
+OPUS_LABEL_LIMIT = 300      # 本組內容摘要(label)上限
 OPUS_PATH_MARGIN = 64       # 估算 prompt 字數時替答案檔路徑長度變動保留的字數
+# group_diff() 判斷「共用參數」時忽略的常見參數名(R1-代決 5)
+GROUP_PARAM_STOPWORDS = frozenset({
+    "self", "cls", "args", "kwargs", "name", "path", "text", "cfg", "value", "data", "line", "lines",
+    "argv", "timeout", "out", "result", "s", "x", "i", "n", "k", "v", "e", "p", "f", "t",
+})
 
 TW = "一律用繁體中文、台灣用語。"
 ADVISORY = "你的 verdict(pass / concern / fail)是建議等級,供統整席參考,不具否決效力;是否合併由統整席判定(DIR-6)。"
@@ -574,9 +595,419 @@ def opus_prompt(system: str, user: str, schema: dict, answer_path) -> str:
     ])
 
 
-def opus_stem(seat: str, attempt: int, t: Optional[float] = None) -> str:
-    """`<pid>-<毫秒>-<席位>-<第幾次>`。"""
-    return "{}-{}-{}-{}".format(os.getpid(), int((now() if t is None else t) * 1000), seat, attempt)
+def opus_stem(seat: str, attempt: int, t: Optional[float] = None, group: int = 1) -> str:
+    """`<pid>-<毫秒>-<席位>-g<組>-<第幾次>`(修訂 1 R1-代決 11)。"""
+    return "{}-{}-{}-g{}-{}".format(os.getpid(), int((now() if t is None else t) * 1000), seat, group, attempt)
+
+
+# ---------------------------------------------------------------- Opus 席分組繳交(CHG-20261101-02 修訂 1)
+
+def _clip_loss(text: str, limit: int) -> Tuple[str, int]:
+    """clip() 並回傳 (截短後文字, 捨棄的原文字數)。"""
+    out = clip(text, limit)
+    if out == text:
+        return text, 0
+    note = "\n…(截斷於 {} 字)".format(limit)
+    kept = len(out) - len(note) if out.endswith(note) else len(out)
+    return out, len(text) - kept
+
+
+def _join_len(texts: List[str]) -> int:
+    return len("\n".join(texts))
+
+
+def split_chg(chg_text: str) -> Tuple[str, List[dict]]:
+    """把 CHG 切成表頭(第一個 `## ` 之前)與 `## ` 章節單位 [{"title", "text", "index"}]。"""
+    parts = re.split(r"(?m)^(?=## )", chg_text)
+    head = parts[0] if parts and not parts[0].startswith("## ") else ""
+    sections = [x for x in parts if x.startswith("## ")]
+    return head, [{"title": x.split("\n", 1)[0].strip(), "text": x, "index": i} for i, x in enumerate(sections)]
+
+
+def chg_priority(sections: List[dict]) -> List[dict]:
+    """R1-代決 4 的優先序:最新的 `## 修訂 n`、`## 安全影響`、`## 修改指引`、`## 決策與取捨`、`## 動機`、其餘依原順序。"""
+    revs = [s for s in sections if re.match(r"## 修訂 ?\d+", s["title"])]
+    first = []
+    if revs:
+        first.append(revs[-1])
+    for key in ("## 安全影響", "## 修改指引", "## 決策與取捨", "## 動機"):
+        first += [s for s in sections if s["title"].startswith(key) and s not in first]
+    return first + [s for s in sections if s not in first]
+
+
+def group_chg(chg_text: str, budget: int) -> Tuple[List[dict], List[str]]:
+    """純函式:CHG 本文(表頭另附,不在此)依 `## ` 章節切成單位,依優先序 first-fit 裝進每組 ≤ budget 字的組。
+    單一章節超過 budget 時再依 `### ` 切,仍超過則 clip() 並把捨棄的內容列入未送審(R1-代決 4、21)。
+    回傳 (組清單 [{"kind": "chg", "label", "text", "notes", "units"}], 未送審清單)。不截組數(由 opus_groups() 處理)。"""
+    head, sections = split_chg(chg_text)
+    if head.strip():  # 呼叫端若傳入含表頭的全文,表頭也當一個單位
+        sections.insert(0, {"title": "CHG 表頭", "text": head, "index": -1})
+    budget = max(1, budget)
+    units, unsent = [], []
+    for sec in chg_priority(sections):
+        if len(sec["text"]) <= budget:
+            units.append(dict(sec, sub=0))
+            continue
+        pieces = re.split(r"(?m)^(?=### )", sec["text"])
+        for j, piece in enumerate(x for x in pieces if x):
+            title = sec["title"] if j == 0 else "{} › {}".format(sec["title"], piece.split("\n", 1)[0].strip())
+            if len(piece) > budget:
+                piece, lost = _clip_loss(piece, budget)
+                unsent.append("{} 截短捨棄 {} 字".format(title, lost))
+            units.append({"title": title, "text": piece, "index": sec["index"], "sub": j})
+    bins: List[List[dict]] = []
+    for u in units:  # 依優先序 first-fit
+        for b in bins:
+            if _join_len([x["text"] for x in b] + [u["text"]]) <= budget:
+                b.append(u)
+                break
+        else:
+            bins.append([u])
+    groups = []
+    for b in bins:
+        b.sort(key=lambda x: (x["index"], x["sub"]))
+        titles = []
+        for x in b:
+            t = x["title"].split(" › ", 1)[1] if x["sub"] else x["title"]
+            if t not in titles:
+                titles.append(t)
+        groups.append({"kind": "chg", "label": clip("CHG:" + "、".join(titles), OPUS_LABEL_LIMIT),
+                       "text": "\n".join(x["text"] for x in b), "notes": [],
+                       "units": [{"desc": "章節 " + x["title"], "chars": len(x["text"])} for x in b]})
+    return groups, unsent
+
+
+_HUNK_RE = re.compile(r"^@@ [^@]*@@ ?(.*)$")
+_DEF_RE = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)")
+_ASSIGN_RE = re.compile(r"^([A-Za-z_]\w*)\s*(?::[^=]*)?=(?!=)")
+_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _def_params(line: str) -> set:
+    m = re.match(r"\s*(?:async\s+)?def\s+\w+\s*\((.*)", line)
+    if not m:
+        return set()
+    out = set()
+    for p in m.group(1).split(")")[0].split(","):
+        p = p.strip().lstrip("*").split(":")[0].split("=")[0].strip()
+        if _IDENT_RE.fullmatch(p) and p not in GROUP_PARAM_STOPWORDS:
+            out.add(p)
+    return out
+
+
+def _split_text(text: str, size: int) -> List[str]:
+    """依行切成每段 ≤ size 字;單行過長時再依字數切(不捨棄內容)。"""
+    size = max(1, size)
+    out, cur = [], ""
+    for line in text.splitlines(True):
+        while len(line) > size:
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(line[:size])
+            line = line[size:]
+        if len(cur) + len(line) > size:
+            out.append(cur)
+            cur = ""
+        cur += line
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _assemble(pieces: List[dict]) -> str:
+    """把 diff 片段依檔案組回文字:同一檔只放一次檔頭,片段依原順序。"""
+    order, by_file = [], {}
+    for pc in pieces:
+        if pc["file"] not in by_file:
+            order.append(pc["file"])
+            by_file[pc["file"]] = []
+        by_file[pc["file"]].append(pc)
+    out = []
+    for f in sorted(order, key=lambda x: min(pc["pos"] for pc in by_file[x])):
+        items = sorted(by_file[f], key=lambda pc: pc["pos"])
+        out.append(items[0]["header"] + "".join(pc["text"] for pc in items))
+    return "".join(out)
+
+
+def diff_units(fdiff: str) -> Tuple[str, List[dict]]:
+    """把 filter_diff() 後的 diff 切成 (雜項文字, 單位清單)。雜項 = 已省略的 CHG 區塊、vendored 說明行與首段文字。
+    Python 檔以 hunk 所屬的函式(或模組層級敘述)為單位,其餘檔案以整個檔案為單位。"""
+    misc = []
+    m = re.search(r"\n\(vendored 檔案 \d+ 個,不送內容\)\n\Z", fdiff)
+    if m:
+        misc.append(fdiff[m.start() + 1:])
+        fdiff = fdiff[:m.start() + 1]
+    blocks = re.split(r"(?m)^(?=diff --git )", fdiff)
+    fixed = []
+    for b in blocks:  # CHG 與非 CHG 之間重新命名的注意行要跟著下一個區塊
+        if fixed and fixed[-1].endswith(CHG_DIFF_MIXED + "\n"):
+            fixed[-1] = fixed[-1][:-len(CHG_DIFF_MIXED) - 1]
+            b = CHG_DIFF_MIXED + "\n" + b
+        fixed.append(b)
+    units, pos = [], 0
+    for b in fixed:
+        if not b:
+            continue
+        body = b[len(CHG_DIFF_MIXED) + 1:] if b.startswith(CHG_DIFF_MIXED + "\n") else b
+        hm = re.match(r"diff --git a/(\S+) b/(\S+)", body)
+        if not hm or CHG_DIFF_OMITTED in b.split("\n", 2)[1:2]:
+            misc.append(b)
+            continue
+        path = hm.group(2)
+        lines = b.splitlines(True)
+        idx = next((i for i, x in enumerate(lines) if x.startswith("@@")), len(lines))
+        header, hunks = "".join(lines[:idx]), []
+        for x in lines[idx:]:
+            if x.startswith("@@") or not hunks:
+                hunks.append([x])
+            else:
+                hunks[-1].append(x)
+        if not path.endswith(".py") or not hunks:
+            pos += 1
+            units.append({"file": path, "owner": None, "header": header, "defs": set(), "params": set(),
+                          "refs": set(), "pieces": [{"file": path, "header": header, "pos": pos,
+                                                     "text": "".join(sum(hunks, []))}]})
+            continue
+        by_owner: Dict[str, dict] = {}
+        for h in hunks:
+            pos += 1
+            hdr = _HUNK_RE.match(h[0])
+            ctx = _DEF_RE.match(hdr.group(1)) if hdr else None
+            owner = None
+            for x in h[1:]:
+                if x[:1] in "+-":
+                    break
+                dm = _DEF_RE.match(x[1:])
+                if dm:
+                    owner = dm.group(1)
+            if owner is None and ctx:
+                owner = ctx.group(1)
+            if owner is None:
+                first = next((_DEF_RE.match(x[1:]) for x in h[1:] if _DEF_RE.match(x[1:])), None)
+                owner = first.group(1) if first else "(模組層級)"
+            u = by_owner.setdefault(owner, {"file": path, "owner": owner, "header": header,
+                                            "defs": {owner} if owner != "(模組層級)" else set(),
+                                            "params": set(), "refs": set(), "pieces": []})
+            u["pieces"].append({"file": path, "header": header, "pos": pos, "text": "".join(h)})
+            for x in h[1:]:
+                code = x[1:]
+                dm = _DEF_RE.match(code)
+                if dm:
+                    u["defs"].add(dm.group(1))
+                    u["params"] |= _def_params(code)
+                am = _ASSIGN_RE.match(code)
+                if am:
+                    u["defs"].add(am.group(1))
+                if x[:1] in "+-":
+                    u["refs"] |= set(_IDENT_RE.findall(code))
+        units += list(by_owner.values())
+    return "".join(misc), units
+
+
+def group_diff(fdiff: str, budget: int) -> Tuple[List[dict], List[str]]:
+    """純函式:diff 依程式結構分組(R1-代決 5)。單位之間有直系(一方的變更行引用另一方定義的函式或類別名)、
+    引用參數(引用另一方定義或修改的模組層級常數、變數)、共用參數(函式簽名有相同參數名,GROUP_PARAM_STOPWORDS
+    除外)任一關係就連在一起,連通的單位為一組;一個連通單位大於 budget 時依 hunk 順序拆開並記注意行;再以
+    first-fit decreasing 裝箱。已省略的 CHG 區塊與 vendored 說明行歸入第一組。只用 diff 文字,不讀其他來源。
+    回傳 (組清單 [{"kind": "diff", "label", "text", "notes", "units", "splits"}], 未送審清單)。不截組數。"""
+    budget = max(1, budget)
+    misc, units = diff_units(fdiff)
+    if not units and not misc.strip():
+        return [], []
+    parent = list(range(len(units)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, a in enumerate(units):
+        for j in range(i + 1, len(units)):
+            b = units[j]
+            if (a["refs"] & b["defs"]) or (b["refs"] & a["defs"]) or (a["params"] & b["params"]):
+                parent[find(i)] = find(j)
+    comps: Dict[int, List[dict]] = {}
+    for i, u in enumerate(units):
+        comps.setdefault(find(i), []).append(u)
+    items = []
+    for cid, members in enumerate(comps.values()):
+        pieces = sorted((dict(pc, desc="{}:{}".format(u["file"], u["owner"]) if u["owner"] else u["file"])
+                         for u in members for pc in u["pieces"]), key=lambda pc: pc["pos"])
+        if len(_assemble(pieces)) <= budget:
+            items.append({"pieces": pieces, "split": None})
+            continue
+        small = []
+        for pc in pieces:  # 單一 hunk 也放不下時依行再切,不捨棄內容
+            room = budget - len(pc["header"])
+            if len(pc["header"]) + len(pc["text"]) <= budget or room <= 0:
+                small.append(pc)
+            else:
+                small += [dict(pc, text=t, pos=pc["pos"] + k / 10000.0)
+                          for k, t in enumerate(_split_text(pc["text"], room))]
+        chunk: List[dict] = []
+        for pc in small:
+            if chunk and len(_assemble(chunk + [pc])) > budget:
+                items.append({"pieces": chunk, "split": cid})
+                chunk = []
+            chunk.append(pc)
+        if chunk:
+            items.append({"pieces": chunk, "split": cid})
+    bins: List[dict] = []
+    if misc.strip():
+        bins.append({"pieces": [{"file": "", "header": "", "pos": -1, "text": misc, "desc": "其他(已省略的 CHG 區塊等)"}],
+                     "splits": set()})
+    for it in sorted(items, key=lambda x: -len(_assemble(x["pieces"]))):
+        for b in bins:
+            if len(_assemble(b["pieces"] + it["pieces"])) <= budget:
+                b["pieces"] += it["pieces"]
+                if it["split"] is not None:
+                    b["splits"].add(it["split"])
+                break
+        else:
+            bins.append({"pieces": list(it["pieces"]), "splits": {it["split"]} - {None}})
+    groups = []
+    for b in bins:
+        descs: Dict[str, int] = {}
+        files: Dict[str, List[str]] = {}
+        for pc in b["pieces"]:
+            descs[pc["desc"]] = descs.get(pc["desc"], 0) + len(pc["text"])
+            if pc["file"]:
+                owner = pc["desc"].split(":", 1)[1] if ":" in pc["desc"] else ""
+                lst = files.setdefault(pc["file"], [])
+                if owner and owner not in lst:
+                    lst.append(owner)
+        label = "diff:" + "、".join("{}({})".format(f, "、".join(o)) if o else f for f, o in files.items())
+        groups.append({"kind": "diff", "label": clip(label, OPUS_LABEL_LIMIT), "text": _assemble(b["pieces"]),
+                       "notes": [], "units": [{"desc": "檔案 / 函式 " + d, "chars": c} for d, c in descs.items()],
+                       "splits": b["splits"]})
+    for g in groups:
+        g["notes"] = split_notes(groups, 0, len(groups), g["splits"])
+    return groups, []
+
+
+def split_notes(groups: List[dict], offset: int, keep: int, cids=None) -> List[str]:
+    """依各組的 splits(連通單位編號)寫「第 k、m 組原屬同一關聯單位,因過大拆開」;只列前 keep 組,
+    組號加 offset;有部分落在未送審的組時註明。cids 給定時只寫這些連通單位。"""
+    out = []
+    for cid in sorted({c for g in groups for c in g.get("splits") or ()} if cids is None else cids):
+        ks = [k for k, g in enumerate(groups, 1) if cid in (g.get("splits") or ())]
+        if len(ks) < 2:
+            continue
+        kept = [k + offset for k in ks if k <= keep]
+        if kept:
+            out.append("第 {} 組原屬同一關聯單位,因過大拆開{}".format(
+                "、".join(str(k) for k in kept), "(其餘部分未送審)" if len(kept) < len(ks) else ""))
+    return out
+
+
+def opus_ref(name: str, cfg: dict) -> str:
+    """Opus 席的參考資料(R1-代決 18、20):consistency 只附「## 介面 / API 契約」的「### MCP 工具」「### 外部引擎契約」
+    兩小節全文與其餘小節標題;帶 ref_limit 的席位(compliance)不以 OPUS_REF_LIMIT 截短(M-2 須完整送達);
+    其餘以 OPUS_REF_LIMIT 截短。Ollama / Codex 席的參考資料不受影響。"""
+    ref = cfg.get("ref") or ""
+    if cfg.get("ref_limit"):
+        return clip(ref, cfg["ref_limit"])
+    if name == "consistency":
+        subs = re.split(r"(?m)^(?=### )", ref)
+        keep = [x for x in subs if x.startswith("### MCP 工具") or x.startswith("### 外部引擎契約")]
+        if keep:
+            others = [x.split("\n", 1)[0] for x in subs if x.startswith("### ") and x not in keep]
+            ref = "\n".join([
+                "(Opus 席節錄:「## 介面 / API 契約」只附「### MCP 工具」「### 外部引擎契約」全文,其餘小節只列標題)",
+                "".join(keep).rstrip("\n"),
+                "其餘小節(只列標題):",
+                "\n".join("- " + t for t in others)])
+    return clip(ref, OPUS_REF_LIMIT)
+
+
+def opus_user(ref: str, parts: dict, k, n, label: str, chg_part: str, diff_part: str) -> str:
+    """一組的 user 部分:本席參考資料 + 待審資料區塊(本組說明、PR 標題、內文、變更檔案、CHG 表頭與本組章節、本組 diff)。"""
+    head = parts["head"]
+    if head and not head.endswith("\n"):
+        head += "\n"
+    return "# 本席參考資料(main 工作副本)\n{}\n\n".format(ref) + "\n".join([
+        "# 待審資料", DATA_WARNING, "<<<待審資料開始>>>",
+        "## 本組說明",
+        "分組送審第 {} / {} 組;本組內容:{}。其他組由別的子代理審,本席意見由各組答案合成;"
+        "只就本組內容與共同資料判斷,本組未附的章節或檔案不算缺漏。".format(k, n, label),
+        "## PR 標題", parts["title"],
+        "## PR 內文", parts["body"],
+        "## 變更檔案", parts["files"],
+        "## {}(風險分級:{})".format(parts["chg_id"], parts["risk"] or "讀不到"),
+        head + (chg_part if chg_part else "(本組只附 CHG 表頭;其餘章節由其他組審)"),
+        "## diff", diff_part if diff_part else "(本組不含 diff)",
+        "<<<待審資料結束>>>", DATA_WARNING,
+    ])
+
+
+def opus_groups(name: str, system: str, cfg: dict, data: dict, fdiff: str, schema: dict = VERDICT_SCHEMA) -> dict:
+    """組出 Opus 席各組的待審資料(R1-代決 3~6、14)。data:title、body、files(清單)、chg_id、risk、chg_text。
+    回傳 {"groups": [{"label", "block"(user 部分), "chars", "skip"(不派發原因或 None)}], "unsent": [...],
+    "notes": [...], "fixed": 固定部分字數, "budget": 每組可放內容字數}。"""
+    notes: List[str] = []
+    unsent: List[str] = []
+    head, _ = split_chg(data["chg_text"])
+    body_text = data["chg_text"][len(head):]
+    parts = {"title": clip(str(data.get("title") or ""), 300),
+             "body": clip(str(data.get("body") or ""), OPUS_BODY_LIMIT),
+             "files": clip("\n".join(data.get("files") or []), OPUS_FILES_LIMIT),
+             "head": clip(head, OPUS_CHG_HEAD_LIMIT),
+             "chg_id": data["chg_id"], "risk": data.get("risk")}
+    ref = opus_ref(name, cfg)
+    sample = OPUS_TMP / "{}.answer.json".format(opus_stem(name, 2, group=99))
+
+    def fixed() -> int:  # 固定部分(含本組說明的最長摘要與答案檔路徑變動的餘裕)
+        return len(opus_prompt(system, opus_user(ref, parts, 99, 99, "x" * OPUS_LABEL_LIMIT, "", ""),
+                               schema, sample)) + OPUS_PATH_MARGIN
+    for key, label in (("ref", "參考資料"), ("files", "變更檔案清單"), ("head", "CHG 表頭")):
+        if fixed() <= OPUS_PROMPT_LIMIT:
+            break
+        if key == "ref" and cfg.get("ref_limit"):
+            continue  # 須完整送達(R1-代決 20)
+        old = ref if key == "ref" else parts[key]
+        new, lost = _clip_loss(old, len(old) // 2)
+        if key == "ref":
+            ref = new
+        else:
+            parts[key] = new
+        notes.append("{}由 {} 字截半為 {} 字(固定部分超過 Opus 席單份上限)".format(label, len(old), len(new)))
+        if lost:
+            unsent.append("{}截半捨棄 {} 字".format(label, lost))
+    f = fixed()
+    if f > OPUS_PROMPT_LIMIT:
+        reason = ("compliance 參考資料須完整送達(M-2),超過 Opus 席單份上限,未派發" if cfg.get("ref_limit")
+                  else "固定部分超過 Opus 席單份上限,未派發")
+        return {"groups": [{"label": "全部內容", "block": None, "chars": 0, "skip": reason}],
+                "unsent": unsent, "notes": notes, "fixed": f, "budget": 0}
+    budget = OPUS_PROMPT_LIMIT - f
+    if len(body_text) + len(fdiff) <= budget:  # 一份放得下:只有一組(R1-代決 10)
+        plan = [{"label": "CHG 全文與完整 diff", "chg": body_text, "diff": fdiff, "notes": []}]
+    else:
+        cg, cu = group_chg(body_text, budget)
+        dg, du = group_diff(fdiff, budget) if fdiff.strip() else ([], [])
+        unsent += cu + du
+        dg_all = dg
+        dropped = cg[OPUS_MAX_CHG_GROUPS:] + dg[OPUS_MAX_DIFF_GROUPS:]
+        cg, dg = cg[:OPUS_MAX_CHG_GROUPS], dg[:OPUS_MAX_DIFF_GROUPS]
+        for g in dropped:
+            unsent += ["{}({} 字)".format(u["desc"], u["chars"]) for u in g["units"]]
+        plan = [{"label": g["label"], "chg": g["text"], "diff": "", "notes": []} for g in cg]
+        plan += [{"label": g["label"], "chg": "", "diff": g["text"], "notes": []} for g in dg]
+        notes += split_notes(dg_all, len(cg), OPUS_MAX_DIFF_GROUPS)
+    n = len(plan)
+    if n > 1:
+        notes.insert(0, "分 {} 組送審(每份 prompt 上限 {} 字)".format(n, OPUS_PROMPT_LIMIT))
+    groups = []
+    for k, g in enumerate(plan, 1):
+        for x in g["notes"]:
+            if x not in notes:
+                notes.append(x)
+        groups.append({"label": g["label"], "chars": len(g["chg"]) + len(g["diff"]), "skip": None,
+                       "block": opus_user(ref, parts, k, n, g["label"], g["chg"], g["diff"])})
+    if unsent:
+        notes.append("未送審:" + ";".join(unsent))
+    return {"groups": groups, "unsent": unsent, "notes": notes, "fixed": f, "budget": budget}
 
 
 def read_opus_answer(path: Path, schema: dict, check) -> Tuple[Optional[dict], str]:
@@ -611,29 +1042,34 @@ def remove_opus_files(paths) -> None:
             break
 
 
-def ask_opus(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
-    """Opus 席(DIR-1 第 13 條):寫請求檔、在 stderr 提示派發者派子代理、輪詢答案檔。
-    格式不合格或 TIMEOUT_OPUS 秒內沒有答案 = 沒有回答 → 新 stem 重派一次;兩次都失敗回傳 ok=False。
-    回傳格式同 ask_codex()。只讀寫 OPUS_TMP 下的檔案,不呼叫任何網路或子程序。"""
+def ask_opus_group(cfg: dict, system: str, user: str, schema: dict, check, group: int = 1, groups: int = 1) -> dict:
+    """一組請求:寫請求檔、在 stderr 提示派發者派子代理、輪詢答案檔。格式不合格或 TIMEOUT_OPUS 秒內沒有答案
+    = 沒有回答 → 新 stem 重派一次;兩次都失敗回傳 ok=False。整份 prompt 超過 OPUS_PROMPT_LIMIT 時不寫請求檔
+    (防禦,回傳 skipped)。只讀寫 OPUS_TMP 下的檔案,不呼叫任何網路或子程序。"""
     seat = cfg.get("seat") or "seat"
     err = ""
     for attempt in (1, 2):
         t = now()
-        stem = opus_stem(seat, attempt, t)
+        stem = opus_stem(seat, attempt, t, group)
         prompt_path = OPUS_TMP / "{}.prompt.md".format(stem)
         request_path = OPUS_TMP / "{}.request.json".format(stem)
         answer_path = OPUS_TMP / "{}.answer.json".format(stem)
         deadline = t + TIMEOUT_OPUS
+        prompt = opus_prompt(system, user, schema, answer_path)
+        if len(prompt) > OPUS_PROMPT_LIMIT:
+            return {"ok": False, "skipped": True, "error": "prompt {} 字超過 Opus 席單份上限 {} 字,未派發".format(
+                len(prompt), OPUS_PROMPT_LIMIT)}
         try:
             OPUS_TMP.mkdir(parents=True, exist_ok=True)
-            prompt_path.write_text(opus_prompt(system, user, schema, answer_path), encoding="utf-8")
+            prompt_path.write_text(prompt, encoding="utf-8")
             request_path.write_text(json.dumps({
-                "seat": seat, "attempt": attempt, "prompt_path": str(prompt_path),
+                "seat": seat, "group": group, "groups": groups, "attempt": attempt, "prompt_path": str(prompt_path),
                 "answer_path": str(answer_path), "deadline": iso_time(deadline),
                 "schema": strict_schema(schema)}, ensure_ascii=False, indent=2), encoding="utf-8")
             print(time.strftime("%H:%M:%S"),
-                  "opus 席 {} 第 {} 次:請求檔 {};請以 subagent_type {} 派全新子代理,prompt 原樣交付,"
-                  "於 {} 前寫入 {}".format(seat, attempt, prompt_path, OPUS_AGENT, iso_time(deadline), answer_path),
+                  "opus 席 {} 第 {} / {} 組 第 {} 次:請求檔 {};請以 subagent_type {} 派全新子代理,prompt 原樣交付,"
+                  "於 {} 前寫入 {}".format(seat, group, groups, attempt, prompt_path, OPUS_AGENT, iso_time(deadline),
+                                         answer_path),
                   file=sys.stderr, flush=True)
             last, out, err = None, None, "逾時({} 秒內沒有答案檔)".format(TIMEOUT_OPUS)
             while True:
@@ -655,8 +1091,80 @@ def ask_opus(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
             err = "{}: {}".format(type(e).__name__, str(e)[:200])
         finally:
             remove_opus_files((prompt_path, request_path, answer_path))
-        log("第 {} 次沒有回答:{}".format(attempt, err))
+        log("第 {} / {} 組第 {} 次沒有回答:{}".format(group, groups, attempt, err))
     return {"ok": False, "error": err}
+
+
+VERDICT_RANK = {"pass": 0, "concern": 1, "fail": 2}
+IMPACT_RANK = {"高": 0, "中": 1, "低": 2}
+
+
+def merge_opus(results: List[dict], unsent: List[str], secs: int) -> dict:
+    """各組判決合成單席(R1-代決 8、21):全部組都沒有回答(含全部不派發)→ ok=False(no-answer),即使同時有
+    未送審內容;否則取已回答各組最嚴(fail > concern > pass),部分組沒有回答或有未送審內容時至少 concern。
+    多組時 findings 前加「[第 k 組]」、依 impact 高 → 低排序、上限 MAX_FINDINGS;evidence、reason 以「第 k 組:…」
+    串接後截 1000 字。只有一組時沿用該組答案(行為等同分組前)。"""
+    n = len(results)
+    answered = [r for r in results if r["ok"]]
+    missing = [r["group"] for r in results if not r["ok"]]
+    if not answered:
+        if n == 1:
+            err = results[0].get("error", "")
+        else:
+            err = "全部 {} 組都沒有回答:{}".format(n, ";".join(
+                "第 {} 組 {}".format(r["group"], r.get("error", "")) for r in results))
+        return {"ok": False, "error": err, "groups": results, "secs": secs}
+    verdict = max((r["out"]["verdict"] for r in answered), key=lambda v: VERDICT_RANK.get(v, 2))
+    forced = []
+    if missing:
+        forced.append("第 {} 組沒有回答".format("、".join(str(k) for k in missing)))
+    if unsent:
+        forced.append("有未送審的內容")
+    if forced and verdict == "pass":
+        verdict = "concern"
+    note = "(合成:{};依 DIR-1 第 13 條至少 concern)".format("、".join(forced)) if forced else ""
+    if n == 1:
+        o = answered[0]["out"]
+        evidence, reason, findings = o.get("evidence", ""), str(o.get("reason", "")) + note, list(o.get("findings") or [])
+    else:
+        evidence = clip(";".join("第 {} 組:{}".format(r["group"], r["out"].get("evidence", "")) for r in answered), 1000)
+        reason = clip(note + ";".join("第 {} 組:{}".format(r["group"], r["out"].get("reason", "")) for r in answered),
+                      1000)
+        findings = []
+        for r in answered:
+            for f in r["out"].get("findings") or []:
+                if isinstance(f, dict):
+                    findings.append(dict(f, item="[第 {} 組] {}".format(r["group"], f.get("item", ""))))
+        findings = sorted(findings, key=lambda f: IMPACT_RANK.get(f.get("impact"), 3))[:MAX_FINDINGS]
+    return {"ok": True, "out": {"verdict": verdict, "evidence": evidence, "reason": reason, "findings": findings},
+            "groups": results, "secs": secs, "attempt": max(r["attempt"] for r in answered)}
+
+
+def ask_opus(cfg: dict, system: str, groups, schema: dict, check, unsent: Optional[List[str]] = None) -> dict:
+    """Opus 席(DIR-1 第 13 條、修訂 1):逐組呼叫 ask_opus_group()(序列,每組一份請求檔、一個全新子代理)。
+    groups 為 opus_groups() 的組清單;傳入字串時當成只有一組。不派發的組(skip)不寫請求檔、不計入累計時間;
+    累計超過 OPUS_SEAT_BUDGET 秒後剩下的組不發請求,記為該組沒有回答。回傳 {"ok", "out"(合成後), "groups",
+    "secs", "attempt"}(合成見 merge_opus())。只讀寫 OPUS_TMP 下的檔案,不呼叫任何網路或子程序。"""
+    if isinstance(groups, str):
+        groups = [{"label": "全部內容", "block": groups, "chars": len(groups), "skip": None}]
+    n = len(groups)
+    start, used = now(), 0.0
+    results = []
+    for k, g in enumerate(groups, 1):
+        info = {"group": k, "label": g.get("label", ""), "chars": g.get("chars", 0)}
+        if g.get("skip"):
+            results.append(dict(info, ok=False, skipped=True, error=g["skip"]))
+            continue
+        if used >= OPUS_SEAT_BUDGET:
+            results.append(dict(info, ok=False, skipped=True,
+                                error="每席累計 {} 秒已用完,未發請求".format(OPUS_SEAT_BUDGET)))
+            continue
+        t = now()
+        r = ask_opus_group(cfg, system, g["block"], schema, check, k, n)
+        if not r.get("skipped"):
+            used += now() - t
+        results.append(dict(info, **r))
+    return merge_opus(results, list(unsent or []), round(now() - start))
 
 
 def ask(cfg: dict, system: str, user: str, schema: dict, check) -> dict:
@@ -734,7 +1242,7 @@ def _phase1_ok(o: dict) -> bool:
 
 
 def run_panel(seats: Dict[str, dict], make_block: Callable[..., str], diff: str,
-              codex_diff: Optional[str] = None) -> Dict[str, dict]:
+              codex_diff: Optional[str] = None, opus_data: Optional[dict] = None) -> Dict[str, dict]:
     """make_block(diff 文字, chg_limit=None) 產生待審資料區塊;Ollama 席的 diff 依各席保留的輸出預算截到放得進 num_ctx。
 
     codex_diff 不是 None 時,Codex 席的「## diff」一律用它(完整 diff,或唯讀檢視的讀取說明),
@@ -746,10 +1254,10 @@ def run_panel(seats: Dict[str, dict], make_block: Callable[..., str], diff: str,
     非 think 的 Ollama 席(CHG-20261028-02):diff 截到 0 仍超過 num_ctx − NUM_PREDICT 時,以
     make_block("", chg_limit=M) 把 CHG 截到放得進,並註明「CHG 由 N 字截短為 M 字」。
 
-    Opus 席(CHG-20261101-02 代決 27):不經 fit_diff()、不用 codex_diff,一律內嵌 filter_diff() 後的 diff。
-    先算不含 diff 的子代理 prompt 字數 F,diff 上限 = min(OPUS_DIFF_LIMIT, OPUS_PROMPT_LIMIT − F);
-    該值小於 OPUS_DIFF_MIN(diff 較短時以實際長度為準)時先以 make_block("", chg_limit=M) 截 CHG。
-    截短時註明「diff 由 N 字截短為 M 字(Opus 席內嵌上限)」「CHG 由 N 字截短為 M 字(Opus 席內嵌上限)」。
+    Opus 席(CHG-20261101-02 修訂 1):不經 make_block()、fit_diff()、codex_diff,改以 opus_groups() 依
+    opus_data(title、body、files、chg_id、risk、chg_text)與 filter_diff() 後的 diff 分組,ask_opus() 逐組交接;
+    注意行為「分 n 組送審」「未送審:…」「第 k 組與第 m 組原屬同一關聯單位,因過大拆開」「第 k 組沒有回答」。
+    有 Opus 席而沒有 opus_data 時丟 ValueError。
     """
     result: Dict[str, dict] = {}
     notes: Dict[str, List[str]] = {}
@@ -758,35 +1266,7 @@ def run_panel(seats: Dict[str, dict], make_block: Callable[..., str], diff: str,
         if note not in notes.setdefault(name, []):
             notes[name].append(note)
 
-    def opus_block_for(name: str, system: str, prefix: str) -> str:
-        sample = OPUS_TMP / "{}.answer.json".format(opus_stem(name, 2))
-
-        def fixed(chg_limit=None) -> int:  # 不含 diff 的子代理 prompt 字數(含答案檔路徑變動的餘裕)
-            return len(opus_prompt(system, prefix + make_block("", chg_limit=chg_limit), VERDICT_SCHEMA,
-                                   sample)) + OPUS_PATH_MARGIN
-
-        cap = min(OPUS_DIFF_LIMIT, OPUS_PROMPT_LIMIT - fixed())
-        need = min(OPUS_DIFF_MIN, len(diff))
-        chg_limit = None
-        if cap < need:  # 光 CHG 與參考資料就讓 diff 放不下 OPUS_DIFF_MIN:先截 CHG
-            chg_chars = len(make_block("")) - len(make_block("", chg_limit=0))
-            chg_limit = max(0, chg_chars - (need - cap))
-            add_note(name, "CHG 由 {} 字截短為 {} 字(Opus 席內嵌上限)".format(chg_chars, chg_limit))
-            cap = min(OPUS_DIFF_LIMIT, OPUS_PROMPT_LIMIT - fixed(chg_limit))
-        cap = max(0, cap)
-        d = diff
-        if len(diff) > cap:
-            d = clip(diff, cap)
-            add_note(name, "diff 由 {} 字截短為 {} 字(Opus 席內嵌上限)".format(len(diff), cap))
-        total = fixed(chg_limit) - OPUS_PATH_MARGIN + len(d)
-        if total > OPUS_PROMPT_LIMIT:  # CHG 截到 0 仍放不下:不再擴大截短範圍,只記注意行(CHG-20261101-02 M-3)
-            add_note(name, "prompt 仍超過 Opus 席內嵌上限({} 字 > {} 字;變更檔案清單或參考資料過大),"
-                           "轉交可能被截斷".format(total, OPUS_PROMPT_LIMIT))
-        return make_block(d, chg_limit=chg_limit)
-
     def block_for(name: str, cfg: dict, system: str, prefix: str) -> str:
-        if cfg.get("engine") == "opus":
-            return opus_block_for(name, system, prefix)
         if cfg.get("engine") == "codex" and codex_diff is not None:
             return make_block(codex_diff)
         fixed = len(system) + len(prefix) + len(make_block(""))
@@ -815,9 +1295,21 @@ def run_panel(seats: Dict[str, dict], make_block: Callable[..., str], diff: str,
                   "列出本領域的發現(最多 {} 項),附證據指向(章節、task 編號或 diff 檔名)、影響、確定度。"
                   "證據必須來自下方資料,不得杜撰。{}{}{}").format(
             name, cfg["q"], MAX_FINDINGS, ADVISORY, DATA_WARNING, TW)
-        prefix = "# 本席參考資料(main 工作副本)\n{}\n\n".format(clip(cfg["ref"], cfg.get("ref_limit", REF_CHAR_LIMIT)))
-        user = prefix + block_for(name, cfg, system, prefix)
-        p1 = ask(cfg, system, user, VERDICT_SCHEMA, _phase1_ok)
+        if cfg.get("engine") == "opus":
+            if opus_data is None:
+                raise ValueError("Opus 席需要 opus_data(CHG-20261101-02 修訂 1 分組繳交)")
+            plan = opus_groups(name, system, cfg, opus_data, diff)
+            for note in plan["notes"]:
+                add_note(name, note)
+            p1 = ask_opus(cfg, system, plan["groups"], VERDICT_SCHEMA, _phase1_ok, unsent=plan["unsent"])
+            for g in p1.get("groups") or []:
+                if not g["ok"] and len(p1["groups"]) > 1:
+                    add_note(name, "第 {} 組沒有回答({})".format(g["group"], g.get("error", "")))
+        else:
+            prefix = "# 本席參考資料(main 工作副本)\n{}\n\n".format(
+                clip(cfg["ref"], cfg.get("ref_limit", REF_CHAR_LIMIT)))
+            user = prefix + block_for(name, cfg, system, prefix)
+            p1 = ask(cfg, system, user, VERDICT_SCHEMA, _phase1_ok)
         result[name] = {"model": cfg["model"], "engine": cfg.get("engine", "ollama"), "phase1": p1}
         if p1.get("fallback"):
             result[name]["model"] = p1["fallback"]["model"]
@@ -840,16 +1332,29 @@ def seat_detail(name: str, r: dict) -> str:
     lines = ["席位:{}".format(name), "模型:{}".format(r["model"])]
     lines += ["注意:{}".format(n) for n in r.get("diff_notes") or []]
     p1 = r["phase1"]
+    groups = p1.get("groups") or []
+    glines = []
+    if len(groups) > 1:  # Opus 席分組明細(R1-代決 9)
+        for g in groups:
+            if g["ok"]:
+                state = "{}(第 {} 次回答,{} 秒)".format(g["out"]["verdict"], g["attempt"], g["secs"])
+            else:
+                state = "{}({})".format("未派發" if g.get("skipped") else "沒有回答", g.get("error", ""))
+            glines.append("第 {} 組:{}({} 字)— {}".format(g["group"], g.get("label", ""), g.get("chars", 0), state))
     if p1["ok"]:
         o = p1["out"]
-        lines += ["判決:{}(第 {} 次回答,{} 秒)".format(o["verdict"], p1["attempt"], p1["secs"]),
-                  "證據:{}".format(o.get("evidence", "")), "理由:{}".format(o.get("reason", ""))]
+        if len(groups) > 1:
+            lines.append("判決:{}(分 {} 組合成,{} 秒)".format(o["verdict"], len(groups), p1["secs"]))
+        else:
+            lines.append("判決:{}(第 {} 次回答,{} 秒)".format(o["verdict"], p1["attempt"], p1["secs"]))
+        lines += glines + ["證據:{}".format(o.get("evidence", "")), "理由:{}".format(o.get("reason", ""))]
         for i, f in enumerate(o.get("findings") or [], 1):
             if isinstance(f, dict):
                 lines.append("{}. [{}/{}] {} — {}".format(i, f.get("impact", ""), f.get("certainty", ""),
                                                            f.get("item", ""), f.get("evidence", "")))
     else:
         lines.append("判決:沒有回答({})".format(p1.get("error", "")))
+        lines += glines
     return clip(sanitize("\n".join(lines)), SEAT_CHAR_LIMIT)
 
 
@@ -902,6 +1407,10 @@ def build_comment(chg_id: str, risk: Optional[str], pr_no: int, head_sha: str, t
     if cut:
         parts.append("- diff 截斷:{} 席送審的 diff 有截短(詳見各席細節),意見可能未看到完整 diff。".format(
             "、".join(cut)))
+    unsent = [n for n, r in result.items() if any(x.startswith("未送審") for x in r.get("diff_notes") or [])]
+    if unsent:
+        parts.append("- 未送審:{} 席有未送審的內容(詳見各席細節),依 DIR-1 第 13 條該席判決至少 concern;"
+                     "統整席讀完整程式與 CHG 全文。".format("、".join(unsent)))
     parts += [
         "",
         "### 各席建議(`[verdict]` 行,建議等級不具否決效力)",
@@ -1191,7 +1700,8 @@ def main(argv=None) -> int:
                     c["codex_version_error"] = version_error
 
     def make_block(diff_text: str, chg_limit: Optional[int] = None) -> str:
-        """chg_limit 為 None 時送 CHG 全文;否則以 clip() 截到 chg_limit 字(用於非 think 的 Ollama 席與 Opus 席)。"""
+        """chg_limit 為 None 時送 CHG 全文;否則以 clip() 截到 chg_limit 字(只用於非 think 的 Ollama 席;
+        Opus 席改走分組,不經本函式)。"""
         return "\n".join([
             "# 待審資料", DATA_WARNING, "<<<待審資料開始>>>",
             "## PR 標題", str(pr.get("title") or ""),
@@ -1225,7 +1735,9 @@ def main(argv=None) -> int:
                 if c["engine"] == "codex":
                     c["codex_dir"] = view
     try:
-        result = run_panel(seats, make_block, fdiff, codex_diff)
+        opus_data = {"title": str(pr.get("title") or ""), "body": str(pr.get("body") or ""), "files": files,
+                     "chg_id": chg_id, "risk": risk, "chg_text": chg_text}
+        result = run_panel(seats, make_block, fdiff, codex_diff, opus_data)
     finally:
         if view is not None:
             safe_remove_view(view)

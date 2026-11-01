@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import math
+import re
 import shutil
 import socket
 import sys
@@ -1084,7 +1085,8 @@ class LocalReviewTest(unittest.TestCase):
             return {"ok": True, "out": {"verdict": "pass", "evidence": "e", "reason": "r", "findings": []},
                     "secs": 1, "attempt": 1}
 
-        seats = local_review.seat_config("中", set())
+        # Opus 席改走分組(opus_groups(),CHG-20261101-02 修訂 1),不經 make_block();本測試只驗 Ollama / Codex 路徑
+        seats = local_review.seat_config("中", set(), opus_seats=set())
         diff = "diff --git a/scripts/x.py b/scripts/x.py\n+print('hi')\n"
         orig = (local_review.ask, local_review.log)
         local_review.ask, local_review.log = fake_ask, (lambda m: None)
@@ -1281,7 +1283,7 @@ class OpusSeatTest(unittest.TestCase):
         return prompt.rsplit("\n", 1)[1]
 
     def assert_prompt_shape(self, prompt):
-        """整份 ≤ 60000 字;答案檔路徑只出現一次,且在最末段。"""
+        """整份 ≤ OPUS_PROMPT_LIMIT(20000 字,修訂 1);答案檔路徑只出現一次,且在最末段。"""
         self.assertLessEqual(len(prompt), local_review.OPUS_PROMPT_LIMIT)
         path = self.answer_path(prompt)
         self.assertTrue(path.endswith(".answer.json"), path)
@@ -1311,7 +1313,8 @@ class OpusSeatTest(unittest.TestCase):
                       "使用者 2026-11-01 指示(DIR-1 第 13 條)", out)
         self.assertNotIn("代 Codex", out)
         for req in env.opus_requests:
-            self.assertIn("opus 席 {} 第 1 次:請求檔 {}".format(req["seat"], req["prompt_path"]), err)
+            self.assertIn("opus 席 {} 第 1 / 1 組 第 1 次:請求檔 {}".format(req["seat"], req["prompt_path"]), err)
+            self.assertEqual((req["group"], req["groups"]), (1, 1))  # 小 PR 只有一組(R1-代決 10)
             self.assertIn("請以 subagent_type review-seat-opus 派全新子代理,prompt 原樣交付", err)
             self.assertIn("前寫入 {}".format(req["answer_path"]), err)
             self.assertEqual(req["attempt"], 1)
@@ -1551,11 +1554,14 @@ class OpusSeatTest(unittest.TestCase):
         self.assertEqual(env.codex_calls, [])
         self.assertFalse(any(a[0].endswith("codex") for a in env.calls))
         self.assertEqual(len(env.ollama_calls), 2)
-        self.assertEqual(sorted(r["seat"] for r in env.opus_requests),
-                         ["compliance", "consistency", "risk", "security"])
+        # 修訂 1 R1-代決 20:compliance 參考資料須完整送達,放不進單份上限 → 不派發、記 no-answer;security 照常派發
+        self.assertEqual(sorted(r["seat"] for r in env.opus_requests), ["consistency", "risk", "security"])
         seats = review_gate.parse_local_review(out)["seats"]
         for s in ("security", "compliance"):
             self.assertEqual(seats[s]["model"], "claude-opus-medium(代 Codex,額度用盡)")
+        self.assertEqual(seats["compliance"]["verdict"], "no-answer")
+        self.assertEqual(seats["security"]["verdict"], "pass")
+        self.assertIn("compliance 參考資料須完整送達(M-2),超過 Opus 席單份上限,未派發", out)
         for s in ("risk", "consistency"):
             self.assertEqual(seats[s]["model"], "claude-opus-medium")
         self.assertIn("其中 security / compliance 為代 Codex(額度用盡,DIR-1 第 12 條)", out)
@@ -1567,94 +1573,18 @@ class OpusSeatTest(unittest.TestCase):
                          {"risk", "consistency", "security", "compliance"})
         self.assertFalse(any(c["think"] for c in cfg.values() if c["engine"] == "opus"))
 
-    # (9) 內嵌上限
-    def big_diff_env(self, diff_chars, chg_extra=0):
-        env = FakeEnv(chg_text=CHG_TEXT + "長" * chg_extra)
-        env.diff_text = "diff --git a/scripts/x.py b/scripts/x.py\n+" + "y" * diff_chars + "\n"
-        return env
-
+    # (9) 只有 Opus 席時不 fetch、不建唯讀檢視(修訂 1:原 60000 / 30000 字截短測試改為分組測試,見 OpusGroupTest)
     def test_small_diff_inline_without_fetch_or_view(self):
         env = FakeEnv()
         code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
         self.assertEqual(code, 0)
         for prompt in env.opus_prompts:
             self.assertIn("## diff\n" + env.diff_text, prompt)
-            # 參考資料沿用既有 REF_CHAR_LIMIT 截斷(consistency 席的 design.md 節錄超過 12000 字);待審資料不截
             self.assertNotIn("截斷於", prompt.split("<<<待審資料開始>>>", 1)[1])
             self.assert_prompt_shape(prompt)
         self.assertFalse(any(a[0] == "git" and ("fetch" in a or "worktree" in a) for a in env.calls))
         self.assertNotIn("diff 截斷", out)
-
-    def test_big_diff_clipped_with_note_without_fetch_or_view(self):
-        env = self.big_diff_env(60000)
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
-        self.assertEqual(code, 0)
-        self.assertFalse(any(a[0] == "git" and ("fetch" in a or "worktree" in a) for a in env.calls))
-        self.assertEqual(len(env.opus_prompts), 2)
-        for prompt in env.opus_prompts:
-            self.assert_prompt_shape(prompt)
-            diff_part = prompt.split("## diff\n", 1)[1].split("\n<<<待審資料結束>>>", 1)[0]
-            self.assertEqual(len(diff_part), local_review.OPUS_DIFF_LIMIT)
-            self.assertIn("截斷於 30000 字", diff_part)
-        self.assertRegex(out, r"diff 由 \d+ 字截短為 30000 字\(Opus 席內嵌上限\)")
-        self.assertIn("diff 截斷:risk、consistency", out)
-        self.assertNotIn("CHG 截斷", out)
-
-    def test_big_chg_clipped_so_diff_keeps_minimum(self):
-        env = self.big_diff_env(20000, chg_extra=70000)
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
-        self.assertEqual(code, 0)
-        for prompt in env.opus_prompts:
-            self.assert_prompt_shape(prompt)
-            self.assertNotIn("長" * 70000, prompt)
-            diff_part = prompt.split("## diff\n", 1)[1].split("\n<<<待審資料結束>>>", 1)[0]
-            self.assertGreaterEqual(len(diff_part), local_review.OPUS_DIFF_MIN)
-        self.assertRegex(out, r"CHG 由 \d+ 字截短為 \d+ 字\(Opus 席內嵌上限\)")
-        self.assertIn("CHG 截斷:risk、consistency", out)
-
-    def test_big_chg_with_short_diff_keeps_whole_diff(self):
-        env = FakeEnv(chg_text=CHG_TEXT + "長" * 70000)
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
-        self.assertEqual(code, 0)
-        prompt = env.opus_prompts[0]
-        self.assert_prompt_shape(prompt)
-        self.assertIn("## diff\n" + env.diff_text, prompt)
-        self.assertIn("CHG 截斷:risk", out)
-        self.assertNotIn("diff 截斷", out)
-
-    def test_prompt_still_over_limit_after_chg_clipped_is_noted(self):
-        """變更檔案清單極大、CHG 截到 0 仍放不下時:不再擴大截短範圍,只記注意行(M-3)。"""
-        env = self.big_diff_env(20000, chg_extra=70000)
-        orig = env.run_cmd
-        many = "".join("scripts/f{:05d}.py\n".format(i) for i in range(4000))  # 約 76000 字
-
-        def run_cmd(argv, input_text=None, timeout=None):
-            if argv[:2] == ["gh", "api"] and any(a.endswith("/files") for a in argv):
-                env.calls.append(list(argv))
-                return many
-            return orig(argv, input_text, timeout)
-        env.run_cmd = run_cmd
-        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
-        self.assertEqual(code, 0)
-        prompt = env.opus_prompts[0]
-        self.assertGreater(len(prompt), local_review.OPUS_PROMPT_LIMIT)
-        self.assertNotIn("長長長", prompt)  # CHG 已截到 0
-        self.assertIn("## diff\n\n<<<待審資料結束>>>", prompt)  # diff 為 0
-        self.assertRegex(out, r"prompt 仍超過 Opus 席內嵌上限\(\d+ 字 > 60000 字;變更檔案清單或參考資料過大\),"
-                              r"轉交可能被截斷")
-        self.assertRegex(out, r"CHG 由 \d+ 字截短為 0 字\(Opus 席內嵌上限\)")
-        path = self.answer_path(prompt)  # 答案檔路徑仍只在最末段
-        self.assertEqual(prompt.count(path), 1)
-        self.assertGreater(prompt.index(path), prompt.rindex("# 答案檔(最末段)"))
-
-    def test_prompt_limit_holds_for_various_sizes(self):
-        for diff_chars, chg_extra in ((29000, 0), (29000, 25000), (5000, 55000), (100000, 100000)):
-            with self.subTest(diff=diff_chars, chg=chg_extra):
-                env = self.big_diff_env(diff_chars, chg_extra)
-                code, _, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
-                self.assertEqual(code, 0)
-                for prompt in env.opus_prompts:
-                    self.assert_prompt_shape(prompt)
+        self.assertNotIn("未送審", out)
 
     # (9b) 子代理定義
     def test_review_seat_agent_definition(self):
@@ -1688,8 +1618,12 @@ class OpusSeatTest(unittest.TestCase):
         self.assertEqual(mods, {"__future__", "argparse", "base64", "json", "math", "os", "re", "shutil", "socket",
                                 "subprocess", "sys", "time", "urllib.request", "pathlib", "typing", "review_gate"})
         src = "".join(inspect.getsource(f) for f in (
-            local_review.ask_opus, local_review.read_opus_answer, local_review.remove_opus_files,
-            local_review.opus_prompt, local_review.opus_stem, local_review.schema_ok, local_review.iso_time))
+            local_review.ask_opus, local_review.ask_opus_group, local_review.merge_opus,
+            local_review.read_opus_answer, local_review.remove_opus_files,
+            local_review.opus_prompt, local_review.opus_stem, local_review.schema_ok, local_review.iso_time,
+            local_review.group_chg, local_review.group_diff, local_review.diff_units, local_review.split_chg,
+            local_review.chg_priority, local_review.split_notes, local_review.opus_ref, local_review.opus_user,
+            local_review.opus_groups))
         for bad in ("run_cmd", "call_ollama", "urllib", "socket", "subprocess", "gh(", "repo_git", "shutil"):
             self.assertNotIn(bad, src)
 
@@ -1712,6 +1646,346 @@ class OpusSeatTest(unittest.TestCase):
         self.assertEqual(os.listdir(fake_home), [])
         home = Path.home().resolve()
         self.assertNotIn(home, env.opus_root.resolve().parents)
+
+
+def py_new_file(path, func, chars, extra=""):
+    """新增 Python 檔的 diff(一個 hunk):函式 func,本文約 chars 字。"""
+    body = "".join("+    v = '{}'\n".format("y" * 90) for _ in range(max(1, chars // 100)))
+    return ("diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n@@ -0,0 +1,9 @@\n"
+            "+def {1}():\n{2}{3}".format(path, func, body, extra))
+
+
+def chg_with_sections(titles, chars):
+    return CHG_TEXT.split("## 安全影響", 1)[0] + "".join(
+        "{}\n{}\n".format(t, "內" * chars) for t in titles)
+
+
+class OpusGroupTest(unittest.TestCase):
+    """CHG-20261101-02 修訂 1:Opus 席分組繳交(R1-T1 test (1)~(16))。"""
+
+    run_main = LocalReviewTest.run_main
+    answer_path = staticmethod(OpusSeatTest.answer_path)
+    assert_prompt_shape = OpusSeatTest.assert_prompt_shape
+
+    def big_env(self, chg_sections=5, diff_funcs=5, size=9000):
+        titles = ["## 修訂 1", "## 安全影響", "## 修改指引", "## 決策與取捨", "## 動機", "## 其他"][:chg_sections]
+        env = FakeEnv(chg_text=chg_with_sections(titles, size))
+        env.diff_text = "".join(py_new_file("scripts/f{}.py".format(i), "func{}".format(i), size)
+                                for i in range(diff_funcs))
+        return env
+
+    def test_constants(self):
+        self.assertEqual(local_review.OPUS_PROMPT_LIMIT, 20000)
+        self.assertEqual((local_review.OPUS_REF_LIMIT, local_review.OPUS_BODY_LIMIT, local_review.OPUS_FILES_LIMIT,
+                          local_review.OPUS_CHG_HEAD_LIMIT), (3000, 1000, 1500, 2000))
+        self.assertEqual((local_review.OPUS_MAX_CHG_GROUPS, local_review.OPUS_MAX_DIFF_GROUPS), (2, 2))
+        self.assertEqual(local_review.OPUS_SEAT_BUDGET, 3600)
+        self.assertEqual(local_review.COMPLIANCE_REF_LIMIT, 24000)
+        for gone in ("OPUS_DIFF_LIMIT", "OPUS_DIFF_MIN"):
+            self.assertFalse(hasattr(local_review, gone), gone)
+        self.assertTrue({"self", "cls", "args", "kwargs", "name", "path", "text", "cfg"}
+                        <= local_review.GROUP_PARAM_STOPWORDS)
+
+    # (1) 真實常數下的固定部分與每份 prompt
+    def test_fixed_part_caps_and_real_inputs_within_limit(self):
+        env = FakeEnv()
+        self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
+        for prompt, seat in zip(env.opus_prompts, ("risk", "consistency")):
+            system = prompt.split("\n\n# 本席參考資料", 1)[0][len("# 系統說明\n"):]
+            cfg = dict(local_review.seat_config("高")[seat], ref="參" * 50000)
+            data = {"title": "標" * 5000, "body": "內" * 5000, "files": ["f/{:05d}.py".format(i) for i in range(2000)],
+                    "chg_id": "CHG-20261101-02", "risk": "高",
+                    "chg_text": "# CHG\n" + "表" * 9000 + "\n## 安全影響\n內容\n"}
+            plan = local_review.opus_groups(seat, system, cfg, data, "")
+            self.assertLessEqual(plan["fixed"], 11000, seat)  # 各項上限合計
+            self.assertEqual(plan["notes"], [])  # 真實常數下不會走防禦分支
+        # 一般輸入:本 CHG 全文(去除「## 審議」節)、真實 consistency 節錄、大 diff(真實 Python 檔)
+        chg = (ROOT / "docs/changes/CHG-20261101-02.md").read_text(encoding="utf-8")
+        env = FakeEnv(chg_text=chg)
+        src = (ROOT / "scripts/local_review.py").read_text(encoding="utf-8")
+        env.diff_text = ("diff --git a/scripts/y.py b/scripts/y.py\nnew file mode 100644\n--- /dev/null\n"
+                         "+++ b/scripts/y.py\n@@ -0,0 +1,9 @@\n" + "".join("+" + l for l in src.splitlines(True)))
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk,consistency"])
+        self.assertEqual(code, 0)
+        self.assertGreater(len(env.opus_prompts), 2)  # 分組了
+        for prompt in env.opus_prompts:
+            self.assert_prompt_shape(prompt)
+        self.assertIn("分 4 組送審(每份 prompt 上限 20000 字)", out)
+
+    # (2) 防禦性分支
+    def test_fixed_part_over_limit_halves_then_skips(self):
+        cfg = dict(local_review.seat_config("中")["risk"], ref="參" * 2000)
+        data = {"title": "t", "body": "b", "files": ["f/{:04d}.py".format(i) for i in range(200)],
+                "chg_id": "CHG-20261101-02", "risk": "中", "chg_text": "# CHG\n" + "表" * 1500 + "\n## 安全影響\n內容\n"}
+        base = local_review.opus_groups("risk", "系統", cfg, data, "")
+        orig = local_review.OPUS_PROMPT_LIMIT
+        try:
+            local_review.OPUS_PROMPT_LIMIT = base["fixed"] - 500  # 參考資料截半(少 1000 字)就放得下
+            plan = local_review.opus_groups("risk", "系統", cfg, data, "")
+            self.assertEqual([n.split("由", 1)[0] for n in plan["notes"] if "截半為" in n], ["參考資料"])
+            self.assertIsNone(plan["groups"][0]["skip"])
+            self.assertTrue(any(u.startswith("參考資料截半捨棄") for u in plan["unsent"]))
+            local_review.OPUS_PROMPT_LIMIT = 3000  # 依序截半仍放不下 → 不派發
+            plan = local_review.opus_groups("risk", "系統", cfg, data, "")
+            self.assertEqual([n.split("由", 1)[0] for n in plan["notes"] if "截半為" in n],
+                             ["參考資料", "變更檔案清單", "CHG 表頭"])
+            self.assertEqual(plan["groups"][0]["skip"], "固定部分超過 Opus 席單份上限,未派發")
+            # 經 main:不寫請求檔、記沒有回答(全部組都未派發 → no-answer)
+            env = FakeEnv()
+            code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+            self.assertEqual(code, 0)
+            self.assertEqual(env.opus_requests, [])
+            self.assertEqual(env.sleeps, [])
+            self.assertIn("未派發", out)
+            self.assertEqual(review_gate.parse_local_review(out)["seats"]["risk"]["verdict"], "no-answer")
+        finally:
+            local_review.OPUS_PROMPT_LIMIT = orig
+        # 部分組未派發、其餘 pass → 至少 concern
+        env = FakeEnv()
+        orig_now, orig_sleep, orig_tmp = local_review.now, local_review.sleep, local_review.OPUS_TMP
+        d = tempfile.mkdtemp(prefix="local_review_test_")
+        self.addCleanup(_RMTREE, d, True)
+        env.opus_root = Path(d) / "outputs" / ".tmp" / "local_review" / "opus"
+        local_review.now, local_review.sleep, local_review.OPUS_TMP = (lambda: env.clock[0]), env.opus_sleep, env.opus_root
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                r = local_review.ask_opus({"seat": "risk"}, "系統", [
+                    {"label": "a", "block": "資料", "chars": 2, "skip": None},
+                    {"label": "b", "block": None, "chars": 0, "skip": "固定部分超過 Opus 席單份上限,未派發"}],
+                    local_review.VERDICT_SCHEMA, local_review._phase1_ok)
+        finally:
+            local_review.now, local_review.sleep, local_review.OPUS_TMP = orig_now, orig_sleep, orig_tmp
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["out"]["verdict"], "concern")
+        self.assertEqual(len(env.opus_requests), 1)
+        self.assertTrue(r["groups"][1]["skipped"])
+
+    # (3) 小 PR 只有一組
+    def test_small_pr_single_group(self):
+        env = FakeEnv()
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(env.opus_requests), 1)
+        self.assertRegex(env.opus_seen[0], r"-risk-g1-1$")
+        self.assertIn("判決:pass(第 1 次回答", out)
+        self.assertNotIn("組送審", out)
+        self.assertNotIn("第 1 組:", out)
+        self.assertIn("分組送審第 1 / 1 組", env.opus_prompts[0])
+
+    # (4) group_diff
+    def hunk(self, func, lines, ctx=None):
+        return "@@ -1,3 +1,3 @@{}\n{}".format(" def {}():".format(ctx) if ctx else "", lines)
+
+    def py_diff(self, *hunks, path="scripts/m.py"):
+        return "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}".format(path, "".join(hunks))
+
+    PAD = "+    pad = '{}'\n".format("p" * 300) * 10  # 約 3200 字,讓兩個無關函式放不進同一組
+
+    def groups_of(self, diff, budget):
+        groups, unsent = local_review.group_diff(diff, budget)
+        self.assertEqual(unsent, [])
+        return [sorted({u["desc"].split(":", 1)[-1] for u in g["units"]}) for g in groups], groups
+
+    def test_group_diff_relations(self):
+        cases = {
+            "直系呼叫": (" def alpha(q):\n-    return 1\n+    return beta(q)\n" + self.PAD,
+                         " def beta(r):\n-    return 2\n+    return 3\n" + self.PAD),
+            "引用參數": (" def alpha():\n-    return 1\n+    return LIMIT_X\n" + self.PAD,
+                         "-LIMIT_X = 1\n+LIMIT_X = 2\n" + self.PAD.replace("+    ", "+")),
+            "共用參數": (" def alpha(widget, name):\n-    return 1\n+    return 2\n" + self.PAD,
+                         " def beta(widget):\n-    return 3\n+    return 4\n" + self.PAD),
+        }
+        for kind, (a, b) in cases.items():
+            with self.subTest(kind=kind):
+                diff = self.py_diff("@@ -1,3 +1,3 @@\n" + a, "@@ -20,3 +20,3 @@\n" + b)
+                owners, _ = self.groups_of(diff, 9000)
+                self.assertEqual(len(owners), 1, owners)
+        # 沒有關係的兩個函式:budget 不足時分到不同組
+        diff = self.py_diff("@@ -1,3 +1,3 @@\n def alpha(q):\n-    return 1\n+    return 5\n" + self.PAD,
+                            "@@ -20,3 +20,3 @@\n def beta(r):\n-    return 2\n+    return 6\n" + self.PAD)
+        owners, _ = self.groups_of(diff, 5000)
+        self.assertEqual(sorted(owners), [["alpha"], ["beta"]])
+        owners, _ = self.groups_of(diff, 9000)  # budget 夠時同一組
+        self.assertEqual(owners, [["alpha", "beta"]])
+        # 停用表的參數名不造成連結
+        diff = self.py_diff("@@ -1,3 +1,3 @@\n def alpha(self, name, path):\n-    return 1\n+    return 5\n" + self.PAD,
+                            "@@ -20,3 +20,3 @@\n def beta(self, name, path):\n-    return 2\n+    return 6\n" + self.PAD)
+        owners, _ = self.groups_of(diff, 5000)
+        self.assertEqual(len(owners), 2)
+
+    def test_group_diff_big_component_split_and_non_python(self):
+        diff = self.py_diff("@@ -1,3 +1,3 @@\n def alpha(q):\n-    return 1\n+    return beta(q)\n" + self.PAD,
+                            "@@ -20,3 +20,3 @@\n def beta(r):\n-    return 2\n+    return 3\n" + self.PAD)
+        groups, unsent = local_review.group_diff(diff, 5000)
+        self.assertEqual(unsent, [])
+        self.assertEqual(len(groups), 2)
+        for g in groups:
+            self.assertIn("第 1、2 組原屬同一關聯單位,因過大拆開", g["notes"])
+            self.assertLessEqual(len(g["text"]), 5000)
+        self.assertIn("return beta(q)", "".join(g["text"] for g in groups))
+        # 非 Python 檔以檔案為單位(兩個 hunk 不拆)
+        md = ("diff --git a/docs/a.md b/docs/a.md\n--- a/docs/a.md\n+++ b/docs/a.md\n@@ -1 +1 @@\n-a\n+b\n"
+              "@@ -9 +9 @@\n-c\n+d\n"
+              "diff --git a/docs/b.md b/docs/b.md\n--- a/docs/b.md\n+++ b/docs/b.md\n@@ -1 +1 @@\n-e\n+f\n")
+        groups, _ = local_review.group_diff(md, 9000)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(sorted(u["desc"] for u in groups[0]["units"]),
+                         ["檔案 / 函式 docs/a.md", "檔案 / 函式 docs/b.md"])
+        self.assertEqual(groups[0]["text"], md)
+        # 省略的 CHG 區塊與 vendored 說明行歸入第一組
+        fd = local_review.filter_diff(
+            "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-x\n+y\n".format(CHG)
+            + "diff --git a/.ai-sdlc/v.py b/.ai-sdlc/v.py\n+v\n" + md)
+        groups, _ = local_review.group_diff(fd, 9000)
+        self.assertIn(local_review.CHG_DIFF_OMITTED, groups[0]["text"])
+        self.assertIn("(vendored 檔案 1 個,不送內容)", groups[0]["text"])
+
+    # (5) group_chg
+    def test_group_chg_priority_split_and_clip(self):
+        titles = ["## 動機", "## 其他甲", "## 決策與取捨", "## 修改指引", "## 修訂 1", "## 安全影響", "## 修訂 2", "## 其他乙"]
+        body = "".join("{}\n{}\n".format(t, "內" * 3000) for t in titles)
+        groups, unsent = local_review.group_chg(body, 3500)
+        firsts = [g["text"].split("\n", 1)[0] for g in groups]
+        self.assertEqual(firsts, ["## 修訂 2", "## 安全影響", "## 修改指引", "## 決策與取捨", "## 動機",
+                                  "## 其他甲", "## 修訂 1", "## 其他乙"])
+        self.assertEqual(unsent, [])
+        # 單一章節過大:依 ### 切;切後仍過大則 clip(),捨棄的內容列入未送審
+        body = "## 安全影響\n前言\n### 甲\n{}\n### 乙\n{}\n".format("甲" * 2000, "乙" * 5000)
+        groups, unsent = local_review.group_chg(body, 3000)
+        self.assertTrue(all(len(g["text"]) <= 3000 for g in groups))
+        self.assertTrue(any("### 甲" in g["text"] for g in groups))
+        self.assertEqual(len(unsent), 1)
+        self.assertRegex(unsent[0], r"^## 安全影響 › ### 乙 截短捨棄 \d+ 字$")
+        # 經 main:截短捨棄 → 未送審 → 至少 concern
+        env = FakeEnv(chg_text=CHG_TEXT + "## 修訂 1\n### 大\n" + "大" * 30000 + "\n")
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(review_gate.parse_local_review(out)["seats"]["risk"]["verdict"], "concern")
+        self.assertIn("未送審:## 修訂 1 › ### 大 截短捨棄", out)
+        self.assertIn("- 未送審:risk 席有未送審的內容", out)
+
+    # (6)(11)(12)(13) 組數上限、stem、自足、標記
+    def test_group_limits_unsent_concern_and_marker(self):
+        env = self.big_env()
+        code, out, err = self.run_main(env, ["--pr", "9", "--dry-run"])
+        self.assertEqual(code, 0)
+        for seat in ("risk", "consistency"):
+            reqs = [r for r in env.opus_requests if r["seat"] == seat]
+            self.assertEqual([(r["group"], r["groups"]) for r in reqs], [(k, 4) for k in (1, 2, 3, 4)])
+            self.assertIn("opus 席 {} 第 3 / 4 組 第 1 次".format(seat), err)
+        self.assertEqual(env.max_requests, 1)
+        for stem in env.opus_seen:
+            self.assertRegex(stem, r"-(risk|consistency)-g[1-4]-1$")
+        for req in env.opus_requests:
+            for p in (req["prompt_path"], req["answer_path"], req["prompt_path"].replace(".prompt.md", ".request.json")):
+                self.assertFalse(Path(p).exists(), p)
+        self.assertFalse(env.opus_root.exists())
+        for prompt in env.opus_prompts:
+            self.assert_prompt_shape(prompt)
+            head, rest = prompt.split("\n\n# 本席參考資料(main 工作副本)\n", 1)
+            tail = rest.split("<<<待審資料結束>>>", 1)[1]
+            for part in (head, tail):
+                for bad in OpusSeatTest.FORBIDDEN:
+                    self.assertNotIn(bad, part)
+            self.assertEqual(head.count("outputs/") + tail.count("outputs/"), 1)
+        parsed = review_gate.parse_local_review(out)
+        for seat in ("risk", "consistency"):  # 各組都 pass,但有未送審 → concern
+            self.assertEqual(parsed["seats"][seat], {"model": "claude-opus-medium", "verdict": "concern"})
+            self.assertIn("[verdict] {} | claude-opus-medium | concern".format(seat), out)
+        self.assertIn("分 4 組送審", out)
+        self.assertRegex(out, r"未送審:章節 ## [^;]+\(\d+ 字\)")
+        self.assertRegex(out, r"檔案 / 函式 scripts/f\d\.py:func\d\(\d+ 字\)")
+        self.assertIn("- 未送審:risk、consistency 席有未送審的內容", out)
+        self.assertIn("判決:concern(分 4 組合成", out)
+        self.assertRegex(out, r"第 1 組:CHG:## 修訂 1\(\d+ 字\)— pass\(第 1 次回答")
+        ok, msgs = review_gate.evaluate(["scripts/x.py", CHG], [owner(out), owner(dec())], HEAD, {CHG: "中"})
+        self.assertTrue(ok, msgs)
+        # CHG 優先序:第 1 組最新修訂、第 2 組安全影響
+        risk_prompts = [p for p, r in zip(env.opus_prompts, env.opus_requests) if r["seat"] == "risk"]
+        self.assertIn("## 修訂 1\n內", risk_prompts[0])
+        self.assertIn("## 安全影響\n內", risk_prompts[1])
+        self.assertIn("def func", risk_prompts[2])
+
+    # (7) 合成
+    def test_merge_opus(self):
+        def ok(k, verdict, findings=()):
+            return {"group": k, "ok": True, "attempt": 1, "secs": 1,
+                    "out": {"verdict": verdict, "evidence": "證{}".format(k), "reason": "理{}".format(k),
+                            "findings": list(findings)}}
+
+        def miss(k, skipped=False):
+            return {"group": k, "ok": False, "error": "逾時", "skipped": skipped}
+        m = local_review.merge_opus
+        r = m([ok(1, "pass"), ok(2, "concern"), miss(3)], [], 9)
+        self.assertEqual(r["out"]["verdict"], "concern")
+        self.assertIn("第 3 組沒有回答", r["out"]["reason"])
+        self.assertEqual(m([ok(1, "pass"), ok(2, "pass"), miss(3)], [], 9)["out"]["verdict"], "concern")
+        self.assertEqual(m([ok(1, "pass"), ok(2, "fail")], [], 9)["out"]["verdict"], "fail")
+        self.assertEqual(m([ok(1, "pass"), ok(2, "pass")], [], 9)["out"]["verdict"], "pass")
+        self.assertEqual(m([ok(1, "pass")], ["章節 ## 動機(10 字)"], 9)["out"]["verdict"], "concern")
+        r = m([miss(1), miss(2, True)], ["章節 ## 動機(10 字)"], 9)  # 全部沒有回答 → no-answer,即使有未送審
+        self.assertFalse(r["ok"])
+        self.assertIn("全部 2 組都沒有回答", r["error"])
+        f = lambda imp: {"item": "i", "evidence": "e", "impact": imp, "certainty": "中"}
+        r = m([ok(1, "pass", [f("低")] * 15), ok(2, "pass", [f("高")] * 15)], [], 9)
+        fs = r["out"]["findings"]
+        self.assertEqual(len(fs), local_review.MAX_FINDINGS)
+        self.assertEqual([x["impact"] for x in fs[:15]], ["高"] * 15)
+        self.assertTrue(fs[0]["item"].startswith("[第 2 組] "))
+        self.assertTrue(fs[-1]["item"].startswith("[第 1 組] "))
+        self.assertEqual(r["out"]["evidence"], "第 1 組:證1;第 2 組:證2")
+        self.assertTrue(local_review.schema_ok(local_review.strict_schema(local_review.VERDICT_SCHEMA), r["out"]))
+        # 經 main:第 2 組沒有回答、其餘 pass → concern,留言列出沒有回答的組
+        env = self.big_env(chg_sections=2, diff_funcs=0)
+        env.opus_mode = lambda e, stem, root: None if "-g2-" in stem else json.dumps(OPUS_OK)
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual(review_gate.parse_local_review(out)["seats"]["risk"]["verdict"], "concern")
+        self.assertIn("第 2 組沒有回答(逾時", out)
+        self.assertNotIn("未送審", out)
+
+    # (8) opus_ref
+    def test_opus_ref_consistency_excerpt(self):
+        design = (ROOT / "docs/structure/design.md").read_text(encoding="utf-8")
+        api = local_review.section(design, "## 介面 / API 契約", "## 設計決策與取捨")
+        cfg = local_review.seat_config("中")["consistency"]
+        self.assertEqual(cfg["ref"], api)  # Ollama / Codex 席的 consistency 參考資料不變
+        self.assertEqual(local_review.seat_config("中", opus_seats=set())["consistency"]["ref"], api)
+        ref = local_review.opus_ref("consistency", cfg)
+        self.assertLessEqual(len(ref), local_review.OPUS_REF_LIMIT)
+        self.assertNotIn("截斷於", ref)
+        subs = re.split(r"(?m)^(?=### )", api)
+        for title in ("### MCP 工具", "### 外部引擎契約"):
+            full = next(x for x in subs if x.startswith(title)).rstrip("\n")
+            self.assertIn(full, ref)
+        for x in subs:
+            if x.startswith("### ") and not x.startswith(("### MCP 工具", "### 外部引擎契約")):
+                self.assertIn("- " + x.split("\n", 1)[0], ref)
+                body = [l for l in x.split("\n")[1:] if len(l.strip()) > 20]
+                if body:  # 其餘小節只列標題,不附本文
+                    self.assertNotIn(body[0], ref)
+        risk = local_review.seat_config("中")["risk"]
+        self.assertEqual(local_review.opus_ref("risk", risk), risk["ref"])  # 1596 字,全文
+
+    # (10) 每席累計上限
+    def test_seat_budget_stops_remaining_groups(self):
+        env = self.big_env()
+        env.opus_mode = "none"
+        start = env.clock[0]
+        code, out, _ = self.run_main(env, ["--pr", "9", "--dry-run", "--seats", "risk"])
+        self.assertEqual(code, 0)
+        self.assertEqual([(r["group"], r["attempt"]) for r in env.opus_requests], [(1, 1), (1, 2), (2, 1), (2, 2)])
+        self.assertGreaterEqual(env.clock[0] - start, 3600)
+        self.assertIn("每席累計 3600 秒已用完,未發請求", out)
+        self.assertEqual(review_gate.parse_local_review(out)["seats"]["risk"]["verdict"], "no-answer")
+
+    # (14) compliance 參考資料上限
+    def test_compliance_ref_within_24000(self):
+        cfg = local_review.seat_config("高", set())["compliance"]
+        ref = local_review.clip(cfg["ref"], cfg["ref_limit"])
+        self.assertLessEqual(len(cfg["ref"]), 24000)
+        self.assertNotIn("截斷於", ref)
+        self.assertEqual(local_review.opus_ref("compliance", cfg), ref)  # Opus 席也不截(R1-代決 20)
 
 
 class CodexViewTest(unittest.TestCase):

@@ -1,5 +1,5 @@
 # language: zh-TW
-# CHG-20261101-02 · DIR-1 第 13 條
+# CHG-20261101-02 · DIR-1 第 13 條(修訂 1:分組繳交)
 功能: 本機審議的 risk、consistency 席由 Opus 子代理擔任
 
   場景: 預設由 Opus 擔任 risk、consistency
@@ -39,11 +39,11 @@
     假設 repo 內有 .claude/agents/review-seat-opus.md
     那麼 其 frontmatter 的 model 為 opus、effort 為 medium、tools 只有 Write
 
-  場景: diff 超過 Opus 席內嵌上限
-    假設 經過濾後的 diff 超過 30000 字,或整份 prompt 會超過 60000 字
+  場景: 送審資料超過 Opus 席單份上限
+    假設 經過濾後的 diff 與 CHG 合計放不進一份 20000 字的請求
     當 腳本寫出 Opus 席的請求檔
-    那麼 diff(必要時連同 CHG)截短並記注意行,整份 prompt 不超過 60000 字,不建立唯讀檢視、不 fetch
-    而且 答案檔路徑只出現在 prompt 最末段
+    那麼 改為分組繳交,每份 prompt 不超過 20000 字,不建立唯讀檢視、不 fetch
+    而且 答案檔路徑只出現在每份 prompt 最末段
 
   場景: 同一席不得同時由 Codex 與 Opus 擔任
     當 以 --codex-seats risk,security,compliance 執行且未改 --opus-seats
@@ -56,3 +56,52 @@
   場景: Codex 額度用盡時由 Opus 代答
     當 以 --codex-seats none --opus-seats risk,consistency,security,compliance 執行
     那麼 security、compliance 的模型標記為 claude-opus-medium(代 Codex,額度用盡)
+
+  # CHG-20261101-02 修訂 1:分組繳交
+  場景: 送審資料超過單份上限時分組繳交
+    假設 CHG 與 diff 合計放不進一份 20000 字的請求
+    當 腳本跑到 Opus 席
+    那麼 CHG 依章節、diff 依直系呼叫、引用參數與共用參數的函式分組
+    而且 每組一份請求檔,每份 prompt 不超過 20000 字,stderr 提示第 k / n 組
+    而且 派發者一次只交接一份,每份各派一個全新的 review-seat-opus 子代理
+
+  場景: 各組答案合成單席判決
+    假設 Opus 席分成多組送審
+    當 各組答案為 pass、concern 與沒有回答
+    那麼 該席判決為 concern,留言列出沒有回答的組
+
+  場景: 部分組沒有回答時不得合成 pass
+    假設 Opus 席分成多組送審
+    當 已回答的組都是 pass,另有一組沒有回答
+    那麼 該席判決為 concern
+    而且 標記與 [verdict] 行格式不變
+
+  場景: 組數超過上限
+    假設 CHG 或 diff 的分組超過各 2 組
+    當 腳本跑到 Opus 席
+    那麼 多出的單位不送審,留言列出未送審的章節、檔案或函式
+
+  場景: 每席累計時間上限
+    假設 Opus 席累計已用 60 分鐘
+    那麼 剩下的組不再發請求,記為沒有回答
+
+  場景: 全部組都沒有回答時記 no-answer
+    假設 Opus 席所有組都沒有回答或都未派發
+    而且 另有未送審的單位
+    那麼 該席判決為 no-answer
+
+  場景: 有未送審的單位時不得合成 pass
+    假設 Opus 席有超出組數上限而未送審的單位
+    當 已送審的組都是 pass
+    那麼 該席判決為 concern,留言列出未送審的單位
+
+  場景: Opus 代答 compliance 時不截參考資料
+    當 以 --codex-seats none --opus-seats risk,consistency,security,compliance 執行
+    那麼 compliance 不派發、記 no-answer 並註明參考資料須完整送達
+    而且 security 照常由 Opus 代答
+
+  場景: 固定部分超過單份上限
+    假設 每組都附的固定部分超過 20000 字
+    當 腳本組出 Opus 席的請求
+    那麼 依序把參考資料、變更檔案清單、CHG 表頭截半並記注意行
+    而且 截半後仍超過時該組不寫請求檔,記為沒有回答並註明未派發
