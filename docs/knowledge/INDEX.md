@@ -13,5 +13,6 @@
 | [DIR-6](directives.md#dir-6--審議席提供意見單一獨立統整席判定可否合併) | 使用者確認 | 全分支 · cicd, review, llm | 六席只提供意見(fail、no-answer 不擋);派獨立 Opus medium 子代理統整並判定 merge / fix,以 review_decision.py 貼出;CI review 看該判定;連續兩輪 fix 交使用者;統整席不讀 outputs/,畫面截圖由派發者複製進 docs/changes/screens/;可在暫存目錄匯出 head 離線跑 repo 內既有測試 | 生效 |
 | [DIR-7](directives.md#dir-7--威脅模型已能寫入本機檔案的攻擊者不在範圍) | 使用者確認 | 全分支 · security, review | 本機單人使用:需先能寫入本機檔案(換成符號連結、在專案目錄放檔、TOCTOU)才成立的威脅不列 security 必修、不作判 fix 理由,記「威脅模型外」;網路面與資料毀損 / 誤刪缺陷仍在範圍;既有 safe_fs 防護保留 | 生效 |
 | [KN-1](patterns.md#kn-1--chg-全文不得出現-doc_integrity_check-的狀態觸發字) | shallow | 全分支 · cicd, review | CHG 全文不寫已實作/已驗收/implemented 等觸發字與私鑰樣本行 | 觀察中(seen 1 / applied 1) |
+| [KN-2](patterns.md#kn-2--chg-收尾時-狀態首行要寫已收尾) | shallow | 全分支 · cicd, review | CHG 收尾時「## 狀態」首行要含「已收尾」,只寫「收尾」會被 SessionStart hook 誤報為未收尾 | 觀察中(seen 1 / applied 1) |
 
-_entries: 8 · 建立:2026-10-22(UTC+0)· 導入時零條目;DIR-1~3 於導入後加入_
+_entries: 9 · 建立:2026-10-22(UTC+0)· 導入時零條目;DIR-1~3 於導入後加入_
