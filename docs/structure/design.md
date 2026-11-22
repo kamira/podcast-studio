@@ -302,6 +302,7 @@ classDiagram
 | 治理腳本 vendored 進 `.ai-sdlc/` | 從 `kamira/ai-skills` checkout vs vendored | 上游 repo 為 private,跨 repo checkout 需秘密;vendored v1.66.0 不需秘密,以 `SHA256SUMS` 驗完整性;腳本隨本 repo 公開(使用者確認閘同意) | 〔觀察〕CHG-20261022-03 |
 | commit 引用 CHG 編號,只改 `docs/knowledge/` 豁免 | 全部要 CHG vs knowledge 豁免 | knowledge 條目是帳本寫入,不是變更 | 〔觀察〕CHG-20261022-03 |
 | plan-check 只查 PR 改到、尚未完成驗收的 CHG | 全部 CHG vs PR 改到的 CHG | 已收尾的舊 CHG 不該因新規則變紅;狀態寫明「計畫待補」的草稿只警告 | 〔觀察〕CHG-20261022-03 |
+| CI 腳本共用 `scripts/ci/gitutil.py` | 各腳本自帶 `git()` / `GitError` / `parse_range()` vs 同目錄共用模組 vs 放 `scripts/` 或根目錄 | 同目錄:CI 直接執行 `trusted/scripts/ci/<x>.py` 時 `sys.path[0]` 是 trusted 副本目錄,共用模組只會從 trusted 載入;腳本不改 `sys.path`(以 `-P` / `PYTHONSAFEPATH` 執行會 import 失敗、exit 1,失敗即擋);`core.quotepath` 差異保留(`secret_scan` 以 `run_git(…, quotepath=False)` 取 bytes,`commit_check`、`plan_check_changed` 以 `git_text` 不帶旗標);`parse_range` 採嚴格版,三支腳本都拒絕 `-` 開頭的端點(exit 2) | 〔觀察〕CHG-20261103-01 |
 | lint 範圍 `ruff check --select E9,F` | ruff 全規則 vs `E9,F` | 既有程式 `E9,F` 全過;全規則會把既有風格債變成紅燈,更嚴格的規則另開 CHG | 〔觀察〕CHG-20261022-03 |
 | 本機審議閘:本機跑、CI 驗留言 | CI 內跑模型 vs 本機跑、CI 驗留言 | 代管 runner 連不到本機 Ollama;`review` job 只驗擁有者留言、目前 head sha、六席意見留言,以及排在其後、同 CHG 的統整判定留言為 `merge`(CHG-20261028-02 起不再看否決席) | 〔觀察〕CHG-20261022-03;CHG-20261028-02 |
 | CD 定義為本機部署腳本 `scripts/deploy_local.sh` | 不做 vs 本機部署腳本 vs 發 release | 產品只在本機執行,沒有遠端環境;部署後驗證只綁本機(fail-closed) | 〔觀察〕CHG-20261022-03 |

@@ -18,7 +18,13 @@ SCRIPT = ROOT / "scripts" / "ci" / "secret_scan.py"
 
 _spec = importlib.util.spec_from_file_location("secret_scan", SCRIPT)
 secret_scan = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(secret_scan)
+# secret_scan 以 `from gitutil import …` 匯入同目錄模組(CHG-20261103-01 代決 8):載入期間暫時把
+# scripts/ci/ 插入 sys.path,載入後移除
+sys.path.insert(0, str(SCRIPT.parent))
+try:
+    _spec.loader.exec_module(secret_scan)
+finally:
+    sys.path.remove(str(SCRIPT.parent))
 
 # 隔離全域 / 系統 git 設定,只用暫存 repo 的 local config
 GIT_ENV = dict(os.environ)
