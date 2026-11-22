@@ -13,6 +13,7 @@
 > 2026-10-30 依 CHG-20261029-01 修訂 1 結構文件更新(以整合分支 `chg/CHG-20261029-01-rev1-impl` 的 T10~T14 為準):清晰度方案 C 取代 v2 與低通;後製鍵演算法標記 `POST_ALGO`;語調 PCHIP 混合曲線與自動補點(`expand_points`、吸附有聲幀);shape stdout 帶 `pitch_points`;合音送顯示字(`tts_text`、`model_units`);前端清晰度警告、語調試算 / 實際套用的畫法、屬性面板合音模式「送模型」「字幕」兩列。
 
 > 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry` 元件與介面、外部 CLI 契約(`claude mcp …`、`codex mcp …`)、`/api/mcp/*` 三個端點列入 HTTP API 表;設計決策 D8~D12(見檔尾「CHG-20261022-02」節)。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):關鍵元件表新增 `value_checks.is_int`。
 
 ## 關鍵元件
 
@@ -36,6 +37,7 @@
 | `local_models_mcp.busy()` | 重讀設定 → `heavy_lock(on_wait=…)` → `redirect_stdout(stderr)` | context manager;等待時寫 stderr | 〔觀察〕 |
 | `safe_fs`(`open_dir` / `open_child` / `open_file` / `open_path` / `open_or_create` / `create_excl` / `lstat` / `entries` / `unlink` / `rmtree` / `rename` / `replace` / `link` / `closing`) | 自受信根目錄(呼叫端給的固定目錄,例 `project.ROOT`、`outputs/`、`static/`)以 `dir_fd` 逐層 `O_NOFOLLOW` 開啟;名稱一律單一路徑元件(空、`.`、`..`、含 `/` 或 NUL 丟 `ValueError`);任一層是符號連結或不是預期種類丟 `UnsafePathError`(`OSError` 子類別),不存在丟 `FileNotFoundError`;`rmtree` 以 fd 遞迴,遇符號連結只 unlink 連結本身;`open_or_create` 以「先開、不存在再 `O_EXCL` 建立」迴圈取代 `O_CREAT`(macOS 上多行程 `openat(O_CREAT \| O_NOFOLLOW)` 實測偶發 ENOENT) | 回傳 fd(呼叫端關閉);訊息不含本機路徑 | 〔觀察〕CHG-20261022-04 DIR-5 修正 4 |
 | `settings`(`load` / `save` / `validate` / `load_meta` / `voice_options`) | 模型設定的唯一存取點,儲存層為 SQLite `config/studio.db` | 見下方「設定模組介面」 | 〔觀察〕 |
+| `value_checks.is_int(v)` | 跨模組共用的整數判斷:`v` 是 `int` 且不是 `bool` 才為 True;只用標準庫,不 import repo 內其他模組;`project`、`settings` 以 `import value_checks` 呼叫,`breezy_worker` 因在 BreezyVoice venv 執行保留本地副本 `_is_int` | `is_int(v) -> bool` | 〔觀察〕CHG-20261103-01 T1 |
 | `nodes.REGISTRY` | 十種節點的宣告與 `run()`,包住 `taiwan_ai` / `media` | 見下方「節點登錄表」 | 〔觀察〕 |
 | `executor.validate(graph)` / `run(graph, emit, cancel=None)` | 驗證流程圖;依拓撲順序在呼叫端執行緒執行並以 `emit(dict)` 推送事件 | 見下方「流程圖格式與執行事件」 | 〔觀察〕 |
 | `studio_server.create_app(...)` / `main()` | FastAPI app;`main()` 以 uvicorn 綁 `127.0.0.1:7860`,啟動時呼叫 `project.startup_cleanup()` | 見下方「HTTP API」「專案 API」 | 〔觀察〕 |

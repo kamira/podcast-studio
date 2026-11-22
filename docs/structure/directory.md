@@ -11,6 +11,7 @@
 > 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry.py`、`tests/test_mcp_registry.py`、`tests/test_server_mcp.py`、`tests/integration/test_mcp_registry_real.py`、`features/mcp_registry.feature`;設定頁新增「MCP 註冊」子頁;`tests/ui_check.py` 新增 `mcp` 組。
 > 2026-11-01 依 CHG-20261101-02 結構文件更新:新增 `.claude/agents/review-seat-opus.md`(本機審議 Opus 席的專案子代理定義,只有 Write 工具)、`features/local_review_opus.feature`;`scripts/local_review.py` 新增 opus 引擎與 `outputs/.tmp/local_review/opus/` 暫存(請求檔 / 答案檔)。
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:`scripts/local_review.py` 職責列補 Opus 席分組繳交,compliance 席參考資料上限改為 24000 字。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):根目錄新增 `value_checks.py`(`project`、`settings` 共用的 `is_int`)與 `tests/test_value_checks.py`。
 
 ## 樹狀
 
@@ -26,6 +27,7 @@ podcast-studio/
 ├── media.py                   # 媒體層(含時間軸匯出 render_timeline、內容嗅探 sniff_binary)
 ├── names.py                   # 名稱規則:工作流程名稱與專案名稱共用的中英日白名單(CHG-20261022-04 T2)
 ├── safe_fs.py                 # 安全路徑工具:自受信根目錄以 dir_fd 逐層 O_NOFOLLOW 開啟、讀寫刪搬(CHG-20261022-04 DIR-5 修正 4)
+├── value_checks.py            # 跨模組共用的值檢查:is_int(project、settings 共用;breezy_worker 保留本地副本)(CHG-20261103-01 T1)
 ├── project.py                 # 專案資料模型:分句、停頓、標註、版本、.trash(CHG-20261022-04 T2)
 ├── timeline.py                # 時間軸計算 layout():片段、字幕 cue、畫面軌(CHG-20261022-04 T4)
 ├── tts_service.py             # 逐句合成服務:髒片段、快取、語速後製(CHG-20261022-04 T3)
@@ -116,6 +118,7 @@ podcast-studio/
 | `static/` | 網頁前端:`index.html`(首頁「精靈」「完整模式」兩張卡片、右上角 ⚙ → 設定頁;設定頁子頁含「語音預設」與「進階流程」節點畫布;底部「免責說明與授權」連結)、`app.js`(共用工具 `window.Studio`、hash 路由、設定頁、畫布)、`project.js`(專案狀態與文稿 / 封面 / 語音 / 匯出面板)、`timeline.js`(時間軸三軌、預覽、屬性、素材庫)、`wizard.js`(首頁、精靈、完整模式)、`edit.js`(停頓、聲調、語速、畫面軌編輯)、`style.css` | 原生 JS,不經建置、不從 CDN 載入;由 `studio_server.py` 只解析 `static/` 之下的真實路徑送出;首頁的 `__STUDIO_TOKEN__` 換成啟動權杖;後四個模組依序載入,以 `Studio.hook(name, fn)` 串接(CHG-20261022-04 T7、T8) | 〔觀察〕 |
 | `projects/` | 專案資料(CHG-20261022-04):`<名稱>/project.json`(`schema_version: 1`)、`history/`(最近 10 版)、`audio/`(合成與自錄音檔)、`assets/`(素材)、`tmp/`(worker 輸入檔,用完即刪)、`.lock`(專案層級鎖);`.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案(30 天後啟動時清除) | `.gitignore`(使用者資料);只經 `project.py` 存取;不經 `/files/*` 提供,音檔與素材只經 `/api/projects/{p}/media/{id}` 送出 | 〔觀察〕 |
 | 根目錄 CHG-20261022-04 模組 | `safe_fs.py`(安全路徑工具,只用標準庫,不 import repo 內其他模組;`project`、`studio_server`、`nodes`、`media`、`tts_service`、`heavy_lock`、`settings` 共用,DIR-5 修正 4)、`names.py`(名稱白名單,`studio_server.py` 與 `project.py` 共用)、`project.py`(資料模型)、`timeline.py`(純函式 `layout()`)、`tts_service.py`(合成服務)、`breezy_worker.py`(以 BreezyVoice venv 執行、只用標準庫與 BreezyVoice 模組,不 import repo 內其他模組) | 相依方向見 `logical.md` | 〔觀察〕 |
+| 根目錄 `value_checks.py` | 跨模組共用的值檢查 `is_int`(只用標準庫,不 import repo 內其他模組;`project`、`settings` 共用;`breezy_worker.py` 在 BreezyVoice venv 執行,保留本地副本) | 測試:`tests/test_value_checks.py` | 〔觀察〕CHG-20261103-01 T1 |
 | `static/vendor/` | Drawflow 0.0.60 的 `drawflow.min.js`、`drawflow.min.css`、`LICENSE.drawflow` 與 `README.md` | 唯一第三方前端檔(CHG-20261022-01 前置 P1);`tests/test_static.py` 比對 README 記載的 SHA-256 | 〔觀察〕 |
 | `workflows/` | 工作流程 JSON(executor 流程圖格式);`default.json` 為預設範本 | 由 `GET/PUT /api/workflows/{name}` 讀寫;使用者另存的檔案(與存檔暫存檔 `.wf-*.tmp`)也落在這裡;git 只追蹤 `default.json`,其他檔案由 `.gitignore` 的 `workflows/*`、`!workflows/default.json` 忽略,存檔後工作樹仍乾淨(CHG-20261026-01 T3);日後不在此新增其他追蹤檔 | 〔觀察〕 |
 | `config/` | 使用者設定:`studio.db`(與 `-wal`、`-shm`)、`.studio.db.lock`、舊 `models.json` | 全部列入 `.gitignore`;只經 `settings.py` 存取,`/files/*` 不提供 | 〔觀察〕 |
