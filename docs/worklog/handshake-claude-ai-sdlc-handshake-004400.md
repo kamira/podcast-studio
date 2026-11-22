@@ -44,3 +44,10 @@ doing:
 next: 等使用者核准 T1 PR #153 合入整合分支;核准後把核准原話寫進 CHG「## 派發記錄」並 commit(DIR-5 第 8 條),再 merge,接著 DIR-5 第 2~4 條審議與合併 PR
 last-updated: 2026-11-22 12:30(UTC+0)
 last-updated: 2026-11-22 00:00(UTC+0)
+
+## 進度更新(2026-11-22)
+
+- T1 PR #153 依使用者原話「核准合入」先記錄(9c334ac)再合入整合分支(7f763a5)。
+- DIR-5:PR #153 六席意見已貼;統整報告 ef7c6ea;一次修正 cd68bf1(只改 CHG)。
+- 合併 PR #154(整合分支 → main,head cd68bf1):六席意見已貼(risk/security/consistency pass;impact/drift/compliance no-answer);DIR-6 統整判定 merge 已貼;CI 四項全綠。
+- next: 等使用者核准 PR #154 merge 進 main;merge 後依 Acceptance operation 派獨立驗收者、寫 ACC 收尾;之後 CHG-20261103-01 續作。
