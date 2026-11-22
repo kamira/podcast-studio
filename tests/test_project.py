@@ -366,17 +366,105 @@ def test_history_rotation_ignores_unrelated_files(projects):
 
 
 def test_history_names_unique_when_clock_and_random_collide(projects, monkeypatch):
+    """撞名時重試換隨機碼、不覆寫既有項目(CHG-20261122-01 改寫:以同名目錄觸發撞名)。"""
     monkeypatch.setattr(pj.time, "time", lambda: BASE.timestamp())
-    seq = iter(["aaaa", "aaaa", "aaaa", "bbbb", "cccc"])
+    seq = iter(["aaaa", "aaaa", "bbbb", "cccc"])
     monkeypatch.setattr(pj, "_rand4", lambda: next(seq))
     p = proj()
-    pj.save(p)
+    assert pj.save(p) is None
+    hist = projects / "夜市的味道" / "history"
+    blocker = hist / "20261027-120000-001-aaaa.json"
+    blocker.mkdir(parents=True)          # 不是一般檔:不計入最新時間戳,但會讓建立版本檔撞名
     v1 = pj.save(p)
     v2 = pj.save(p)
     v3 = pj.save(p)
-    assert v1.endswith("-aaaa") and v2.endswith("-bbbb") and v3.endswith("-cccc")
+    assert v1 == "20261027-120000-000-aaaa"
+    assert v2 == "20261027-120000-001-bbbb"   # 撞名重試換隨機碼
+    assert v3 == "20261027-120000-002-cccc"
     assert len({v1, v2, v3}) == 3
-    assert v1.startswith("20261027-120000-000-")
+    assert blocker.is_dir() and not any(blocker.iterdir())   # 沒有覆寫該目錄
+
+
+# ---------- 版本時間戳嚴格遞增(CHG-20261122-01) ----------
+
+@pytest.mark.parametrize("s", ["20261027-120000-000", "20261027-120000-999", "19700101-000000-001",
+                               "20261231-235959-500"])
+def test_stamp_ms與format_ms互為反函式(s):
+    assert pj._format_ms(pj._stamp_ms(s)) == s
+
+
+def test_format_ms加一毫秒會跨日進位():
+    assert pj._format_ms(pj._stamp_ms("20261027-235959-999") + 1) == "20261028-000000-000"
+
+
+@pytest.mark.parametrize("frac", [0.0, 0.125, 0.5, 0.875])
+def test_stamp_ms與整數毫秒的時間一致(frac):
+    t = BASE.timestamp() + frac
+    assert pj._stamp_ms(pj._stamp(t)) == int(t * 1000)
+
+
+def _stamp_of(vid: str) -> str:
+    return vid[:-len("-xxxx")]
+
+
+def test_同一毫秒連續存檔12次版本時間戳嚴格遞增(projects, monkeypatch):
+    monkeypatch.setattr(pj.time, "time", lambda: BASE.timestamp())
+    p = proj()
+    ids = []
+    for i in range(12):
+        p.script = f"第 {i} 版"
+        ids.append(pj.save(p))
+    assert ids[0] is None
+    vids = ids[1:]
+    assert [_stamp_of(v) for v in vids] == [f"20261027-120000-{k:03d}" for k in range(11)]
+    for v in vids:
+        assert pj.VERSION_RE.fullmatch(v), v
+    assert pj.list_history("夜市的味道") == vids[1:]           # 最後 10 個,順序相同
+    hist = projects / "夜市的味道" / "history"
+    assert sorted(os.listdir(hist)) == sorted(f"{v}.json" for v in vids[1:])
+    assert not (hist / f"{vids[0]}.json").exists()               # 被刪的是最舊的那一個
+    newest = json.loads((hist / f"{vids[-1]}.json").read_text(encoding="utf-8"))
+    assert newest["script"] == "第 10 版"                         # 倒數第二次存檔前的專案檔
+
+
+def test_時鐘倒退時新版本接在最新時間戳加一毫秒(projects, monkeypatch):
+    clock = {"t": BASE.timestamp() + 10}
+    monkeypatch.setattr(pj.time, "time", lambda: clock["t"])
+    p = proj()
+    assert pj.save(p) is None
+    v1 = pj.save(p)
+    assert _stamp_of(v1) == "20261027-120010-000"
+    clock["t"] = BASE.timestamp()                                  # 系統時間往回調 10 秒
+    v2 = pj.save(p)
+    assert _stamp_of(v2) == "20261027-120010-001"
+    assert pj.list_history("夜市的味道") == [v1, v2]
+    assert pj.list_history("夜市的味道")[-1] == v2
+
+
+def test_update產生的版本時間戳也嚴格遞增(repo, monkeypatch):
+    monkeypatch.setattr(pj.time, "time", lambda: BASE.timestamp())
+    pj.create("夜市的味道", "第一句。")
+    _, v1, _ = pj.update("夜市的味道", lambda p: p.defaults.update(speed=1.1))
+    _, v2, _ = pj.update("夜市的味道", lambda p: p.defaults.update(speed=1.2))
+    _, v3, _ = pj.update("夜市的味道", lambda p: p.defaults.update(speed=1.3))
+    assert [_stamp_of(v) for v in (v1, v2, v3)] == [
+        "20261027-120000-000", "20261027-120000-001", "20261027-120000-002"]
+    assert pj.list_history("夜市的味道") == [v1, v2, v3]
+
+
+def test_restore產生的版本時間戳也嚴格遞增(projects, monkeypatch):
+    monkeypatch.setattr(pj.time, "time", lambda: BASE.timestamp())
+    p = proj(script="第 0 版")
+    pj.save(p)
+    p.script = "第 1 版"
+    v1 = pj.save(p)
+    p.script = "第 2 版"
+    v2 = pj.save(p)
+    v3 = pj.restore("夜市的味道", v1)
+    assert [_stamp_of(v) for v in (v1, v2, v3)] == [
+        "20261027-120000-000", "20261027-120000-001", "20261027-120000-002"]
+    assert pj.list_history("夜市的味道") == [v1, v2, v3]
+    assert pj.load("夜市的味道").script == "第 0 版"
 
 
 def test_concurrent_saves_from_two_threads(projects):

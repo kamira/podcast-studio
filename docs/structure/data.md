@@ -10,6 +10,8 @@
 
 > 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增「repo 外讀寫的檔案」一節(MCP 註冊管理讀取的使用者全域設定與路徑規則)。
 
+> 2026-11-22 依 CHG-20261122-01 結構文件更新(以整合分支 `chg/CHG-20261122-01-impl` 的 T1 為準):專案 `history/` 版本時間戳在同一專案內嚴格遞增。
+
 〔觀察〕持久化資料有五類:設定資料庫 `config/studio.db`(使用者資料,不入 git)、工作流程 JSON(`workflows/`)、專案資料 `projects/`(使用者資料,不入 git;CHG-20261022-04)、`outputs/` 下的產出檔與上傳檔、程式內常數。流程執行中的文字(文案、標題、prompt)只存在伺服器記憶體中的執行事件(最近 20 次 run)與瀏覽器畫布上,另存工作流程時隨節點參數或釘住的編輯值寫入 JSON。
 
 ## 實體 / 資料表
@@ -77,7 +79,7 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,�
 | ImageClip(畫面軌) | `id`、`asset`、`start`、`end` | `asset` 為圖片素材 id(不記路徑);`start` 秒、`end` 為 null(到結尾)或秒,皆取到 0.1 |
 | Asset(素材) | `id`、`kind`、`ext`、`bytes`、`label`? | `kind` ∈ image(png、jpg、jpeg、webp)/ audio(wav、mp3、m4a)/ text(txt、md);檔案存於 `assets/<id>.<ext>`;經 `/api/upload` → `POST /api/projects/{p}/assets` 或「送到素材庫」節點進入(後者同樣做檔頭嗅探,DIR-5 修正 M-5) |
 
-- 〔觀察〕目錄:`project.json`、`history/`(舊版 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`,UTC,只保留最近 10 個)、`audio/`(合成音檔 `<快取鍵前 32 碼>.wav` 與變速快取 `<id>-s<語速×100>.wav`、自錄音檔 `<新 id>.wav`)、`assets/`、`tmp/`(worker 輸入檔,用完即刪,啟動時清空)、`.lock`(`fcntl.flock` 專案層級鎖);`projects/.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案,滿 30 天由 `startup_cleanup()` 清除。
+- 〔觀察〕目錄:`project.json`、`history/`(舊版 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`,UTC,只保留最近 10 個;同一專案內版本時間戳嚴格遞增:同一毫秒內存檔或系統時鐘倒退時,取 history 內最新時間戳 + 1 毫秒,所以時間戳可能略晚於實際存檔時間(CHG-20261122-01))、`audio/`(合成音檔 `<快取鍵前 32 碼>.wav` 與變速快取 `<id>-s<語速×100>.wav`、自錄音檔 `<新 id>.wav`)、`assets/`、`tmp/`(worker 輸入檔,用完即刪,啟動時清空)、`.lock`(`fcntl.flock` 專案層級鎖);`projects/.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案,滿 30 天由 `startup_cleanup()` 清除。
 - 〔觀察〕寫入:每次存檔前把舊檔移入 `history/`,以暫存檔 + `os.replace` 原子寫入,載入到存檔全程持專案鎖(`project.update()`);還原版本也是一次存檔。合成結果在整批結束時一次寫回,一次合成最多新增一個 history 版本;合成中途已完成的句子只在伺服器記憶體中疊到專案檢視上,不存檔(DIR-5 修正 M-1)。
 - 〔觀察〕符號連結:`projects/`、`.trash/`、專案目錄、`tmp/`、`history/` 本身是符號連結時一律拒絕處理並記警告;`.trash/`、`tmp/` 內的符號連結不跟隨。
 - 〔觀察〕合成快取鍵 = SHA-256(JSON 陣列 [含標註的合成文字, 聲線檔 SHA-256, 聲線逐字稿 SHA-256, 模型名]);文字、標註、聲線檔、逐字稿或模型任一改變即不命中(修訂 3 R3-4)。

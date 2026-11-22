@@ -4,7 +4,8 @@
 一個專案 = `projects/<名稱>/`:
   project.json   專案檔(本模組的資料模型,`schema_version: 2`;讀到 1 時在記憶體補上 v2 欄位的預設值、
                  下次存檔寫成 2(CHG-20261029-01 D14);其他版本一律拒絕載入,不猜測轉換)
-  history/       舊版專案檔 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`(UTC),只保留最近 HISTORY_KEEP 個
+  history/       舊版專案檔 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`(UTC),只保留最近 HISTORY_KEEP 個;
+                 同一專案內版本時間戳嚴格遞增(同一毫秒或時鐘倒退時取既有最新時間戳 + 1 毫秒)
   audio/ assets/ 合成音檔與素材(T3、T6 寫入;專案檔只記 id,不記任何路徑)
   tmp/           worker 輸入檔(T3 用完即刪;`startup_cleanup()` 清空殘留)
   .lock          專案層級鎖檔(`fcntl.flock`;同一專案的存檔一律序列化,跨執行緒也跨行程)
@@ -100,7 +101,7 @@ import secrets
 import stat
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
@@ -1010,6 +1011,21 @@ def _stamp(now: float | None = None) -> str:
     return f"{dt:%Y%m%d-%H%M%S}-{dt.microsecond // 1000:03d}"
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _stamp_ms(s: str) -> int:
+    """把 `YYYYmmdd-HHMMSS-mmm` 解析成自 epoch 起的整數毫秒(UTC;不經浮點秒數)。"""
+    dt = datetime.strptime(s[:15], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+    return (dt - _EPOCH) // timedelta(seconds=1) * 1000 + int(s[16:19])
+
+
+def _format_ms(ms: int) -> str:
+    """整數毫秒格式化回 `YYYYmmdd-HHMMSS-mmm`(UTC);`_format_ms(_stamp_ms(s)) == s`。"""
+    dt = _EPOCH + timedelta(milliseconds=ms)
+    return f"{dt:%Y%m%d-%H%M%S}-{dt.microsecond // 1000:03d}"
+
+
 def _rand4() -> str:
     return secrets.token_hex(2)
 
@@ -1190,8 +1206,16 @@ def _archive_current(pfd: int, hfd: int) -> str | None:
         return None
     if not stat.S_ISREG(st.st_mode):
         raise UnsafePath("專案檔不是一般檔案(可能是符號連結),拒絕存檔")
+    # 同一專案內版本時間戳嚴格遞增(CHG-20261122-01):已持專案鎖,讀最新時間戳與建檔不會交錯;
+    # 現在時間 ≤ history 最新時間戳(同一毫秒內存檔或時鐘倒退)時取最新 + 1 毫秒。重試只換隨機碼。
+    now = _stamp()
+    entries = _history_entries(hfd)
+    if entries:
+        latest = max(_stamp_ms(e[0]) for e in entries)
+        if _stamp_ms(now) <= latest:
+            now = _format_ms(latest + 1)
     for _ in range(LINK_TRIES):
-        vid = f"{_stamp()}-{_rand4()}"
+        vid = f"{now}-{_rand4()}"
         try:
             safe_fs.link(pfd, PROJECT_FILE, hfd, f"{vid}.json")
             return vid
