@@ -100,6 +100,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import safe_fs
+import value_checks
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "models.json"  # 只作一次性匯入來源(T3 起移出 git)
@@ -203,10 +204,6 @@ _ROLE_KEYS = {
     "image": ("model", "steps"),
     "voice": ("wav", "text"),
 }
-
-
-def _is_int(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
 
 
 def _check_keys(obj, allowed, where, errors) -> bool:
@@ -326,11 +323,11 @@ def validate(cfg, available_models) -> list[str]:
                 errors.append(f"{where}.think:必須是 true、false 或 null")
             if "num_ctx" in r:
                 lo, hi = NUM_CTX_RANGE
-                if not _is_int(r["num_ctx"]) or not lo <= r["num_ctx"] <= hi:
+                if not value_checks.is_int(r["num_ctx"]) or not lo <= r["num_ctx"] <= hi:
                     errors.append(f"{where}.num_ctx:必須是 {lo}–{hi} 的整數")
             if "steps" in r:
                 lo, hi = STEPS_RANGE
-                if not _is_int(r["steps"]) or not lo <= r["steps"] <= hi:
+                if not value_checks.is_int(r["steps"]) or not lo <= r["steps"] <= hi:
                     errors.append(f"{where}.steps:必須是 {lo}–{hi} 的整數")
             if "wav" in r:
                 if not isinstance(r["wav"], str) or not r["wav"].strip():
