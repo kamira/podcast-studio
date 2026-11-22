@@ -12,6 +12,7 @@
 > 2026-11-01 依 CHG-20261101-02 結構文件更新:新增 `.claude/agents/review-seat-opus.md`(本機審議 Opus 席的專案子代理定義,只有 Write 工具)、`features/local_review_opus.feature`;`scripts/local_review.py` 新增 opus 引擎與 `outputs/.tmp/local_review/opus/` 暫存(請求檔 / 答案檔)。
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:`scripts/local_review.py` 職責列補 Opus 席分組繳交,compliance 席參考資料上限改為 24000 字。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):根目錄新增 `value_checks.py`(`project`、`settings` 共用的 `is_int`)與 `tests/test_value_checks.py`。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T2):`scripts/ci/` 新增 `gitutil.py`(`commit_check`、`plan_check_changed`、`secret_scan` 共用的 `GitError`、git 執行與 `--range` 解析)。
 
 ## 樹狀
 

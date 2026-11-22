@@ -11,7 +11,7 @@
 > 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry` 元件(FR-22)、設定頁「MCP 註冊」子頁、流程 H「MCP 註冊 / 重新檢查」與相依方向 `studio_server` → `mcp_registry`。
 > 2026-11-01 依 CHG-20261101-02 結構文件更新:本機審議 risk、consistency 席改由 Opus 子代理擔任(DIR-1 第 13 條);架構圖補 Opus 子代理節點與 `outputs/.tmp/local_review/opus/` 交接,Codex 節點改為 security / compliance 席;DIR-1 說明與「一個 PR 的流程」第 2 步補 Opus 席交接。
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:「一個 PR 的流程」第 2 步 Opus 席改為每份 prompt 上限 20000 字、超過時分組逐份交接。
-> 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):`project`、`settings` 新增相依 `value_checks`(共用 `is_int`);相依方向補記 `settings` → `safe_fs`。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):`project`、`settings` 新增相依 `value_checks`(共用 `is_int`);相依方向補記 `settings` → `safe_fs`;DIR-5 一次修正時,分層表 `settings.py` 依賴欄補 `safe_fs`、「單向、無循環」段改寫 `settings` 的相依說法,三處同步。
 
 ## 分層 / 模組
 
@@ -22,7 +22,7 @@
 | MCP 註冊 `mcp_registry.py` | local-models 在 Claude Code / Codex 的 user scope 註冊:查狀態(Claude 唯讀解析 `.claude.json` 頂層 `mcpServers["local-models"]`、Codex 執行 `codex mcp get --json`)、組指令(`plan`)、執行(`apply`,只經官方 CLI 的 `mcp add` / `mcp remove`)、重新檢查(`claude mcp get` 健康檢查);只操作名稱 `local-models`;回傳字串依「去除 env 值 → `scrub()` → 截斷 64 KB」處理;行程內非阻塞鎖(不進 `heavy_lock`) | 標準庫;外部 CLI `~/.local/bin/{claude,codex}`;不匯入其他專案模組 | FR-22 | 〔觀察〕CHG-20261022-02 T1 |
 | 節點引擎 `executor.py` + `nodes.py` | `executor`:流程圖驗證(種類、型別、有環、必填、參數範圍、節點數)、拓撲排序、依序執行、pinned 跳過、上游失敗下游略過、可取消、重型節點包在 `heavy_lock()` 內;`nodes`:十種節點的埠、參數宣告與 `run()` | `heavy_lock`、`media`、`taiwan_ai` | FR-1~7(功能保留)、FR-16、17、20 | 〔觀察〕 |
 | 入口層:MCP `local_models_mcp.py` | 把模型包成 6 個 stdio 工具;每次工具呼叫重讀設定;重型工具在跨行程 `heavy_lock()` 內執行並把 stdout 導向 stderr | `media`、`taiwan_ai`、`settings`、`heavy_lock`、mcp SDK、Ollama `/api/tags` `/api/ps` | FR-8~13、21 | 〔觀察〕 |
-| 設定 `settings.py` | 模型角色與審議席位設定的唯一存取點:`load()` / `save()` / `validate()` / `load_meta()` / `voice_options()`;SQLite `config/studio.db`;一次性從 `config/models.json` 匯入 | sqlite3(標準函式庫)、`value_checks` | FR-21、23 | 〔觀察〕 |
+| 設定 `settings.py` | 模型角色與審議席位設定的唯一存取點:`load()` / `save()` / `validate()` / `load_meta()` / `voice_options()`;SQLite `config/studio.db`;一次性從 `config/models.json` 匯入 | sqlite3(標準函式庫)、`safe_fs`、`value_checks` | FR-21、23 | 〔觀察〕 |
 | 鎖 `heavy_lock.py` | 跨行程排他鎖 `outputs/.heavy.lock`(`fcntl.flock(LOCK_EX)`),網頁與 MCP 共用 | `safe_fs` | NFR 重型工作互斥(ADP-2) | 〔觀察〕 |
 | 安全路徑 `safe_fs.py` | 自受信根目錄以 `dir_fd` 逐層 `O_RDONLY \| O_NOFOLLOW \| O_DIRECTORY` 走到目標;開檔(`O_NOFOLLOW` + `fstat` 驗一般檔)、列舉(`os.scandir(fd)`)、排他建立、刪除與 fd 遞迴刪除樹(符號連結只刪連結本身)、rename / replace / link(皆相對 dir_fd)。專案資料、`outputs/`、`static/`、`workflows/`、`config/` 的讀寫刪搬一律經它,取代「先以路徑檢查、再以路徑操作」 | 標準庫 | 安全影響(security-boundary) | 〔觀察〕CHG-20261022-04 DIR-5 修正 4 |
 | 媒體層 `media.py` | 生圖、16:9 裁切、疊標題、切句、SRT、ffmpeg 合成 | `taiwan_ai`(`OUT`、`reserve`、`unload_llms`、`MFLUX`、`role_config("image")`)、Pillow、imageio-ffmpeg | FR-4~6、10、12 | 〔觀察〕 |
@@ -306,7 +306,7 @@ flowchart LR
 
 ## 相依方向
 
-〔觀察〕單向、無循環:入口(`studio_server` / `local_models_mcp`)→ `executor` → `nodes` → `media` → `taiwan_ai` → `settings`;`executor` 與 `local_models_mcp` 另依賴 `heavy_lock`;`studio_server` 也直接用 `settings`、`taiwan_ai`。`media` 依賴 `taiwan_ai`,`taiwan_ai` 不依賴 `media`;`settings` 不依賴其他專案模組。
+〔觀察〕單向、無循環:入口(`studio_server` / `local_models_mcp`)→ `executor` → `nodes` → `media` → `taiwan_ai` → `settings`;`executor` 與 `local_models_mcp` 另依賴 `heavy_lock`;`studio_server` 也直接用 `settings`、`taiwan_ai`。`media` 依賴 `taiwan_ai`,`taiwan_ai` 不依賴 `media`;`settings` 只依賴 `safe_fs`、`value_checks`(兩者都不 import repo 內其他模組,不形成循環;見下段)。
 
 〔觀察〕CHG-20261022-04 新增的相依:`studio_server` → `project`、`timeline`、`tts_service`、`names`、`media`;`tts_service` → `project`、`media`、`heavy_lock`、`taiwan_ai`、`breezy_worker`(只取常數,worker 本身以子程序執行);`timeline` → `project`;`project` → `names`、`breezy_worker`(注音格式)、`value_checks`(`is_int`,CHG-20261103-01 T1);`settings` → `safe_fs`、`value_checks`(`is_int`,CHG-20261103-01 T1);`nodes` → `project`、`names`(送到素材庫)、`media`(`sniff_binary`)。`media.render_timeline` 在函式內延後匯入 `project` 與 `tts_service`(`tts_service` 在模組層匯入 `media`),避免循環匯入。`breezy_worker.py` 不匯入 repo 內任何模組。
 
