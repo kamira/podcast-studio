@@ -4,6 +4,8 @@ version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Rust 遷移的並行比對工具:同一組 fixture 交給 Python 模組與 Rust 單元,比對結果是否一致"
+# 不發佈;授權宣告與路線圖第 24 筆一併決定。cargo-deny 的 [licenses.private] 依此略過本 crate(CHG-20261123-01 T3)
+publish = false
 
 # 相依只限 serde(derive)與 serde_json(CHG-20261123-01 代決 4);
 # 命令列以標準函式庫解析,測試只用內建 #[test]。
