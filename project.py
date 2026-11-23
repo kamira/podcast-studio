@@ -4,7 +4,8 @@
 一個專案 = `projects/<名稱>/`:
   project.json   專案檔(本模組的資料模型,`schema_version: 2`;讀到 1 時在記憶體補上 v2 欄位的預設值、
                  下次存檔寫成 2(CHG-20261029-01 D14);其他版本一律拒絕載入,不猜測轉換)
-  history/       舊版專案檔 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`(UTC),只保留最近 HISTORY_KEEP 個
+  history/       舊版專案檔 `YYYYmmdd-HHMMSS-<毫秒>-<4 碼隨機>.json`(UTC),只保留最近 HISTORY_KEEP 個;
+                 同一專案內版本時間戳嚴格遞增(同一毫秒或時鐘倒退時取既有最新時間戳 + 1 毫秒)
   audio/ assets/ 合成音檔與素材(T3、T6 寫入;專案檔只記 id,不記任何路徑)
   tmp/           worker 輸入檔(T3 用完即刪;`startup_cleanup()` 清空殘留)
   .lock          專案層級鎖檔(`fcntl.flock`;同一專案的存檔一律序列化,跨執行緒也跨行程)
@@ -100,13 +101,14 @@ import secrets
 import stat
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
 import breezy_worker
 import names
 import safe_fs
+import value_checks
 
 log = logging.getLogger("project")
 
@@ -293,15 +295,11 @@ def _check_annotations(text: str, anns, where: str) -> list[dict]:
 
 # ---------- 連音、清晰度、字詞清晰度、語調(CHG-20261029-01 T1) ----------
 
-def _is_int(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
 def check_percent(v, where: str):
     """拉桿百分比:null 或 0~100 的整數(連音、清晰度、圓弧、字詞清晰度值)。"""
     if v is None:
         return None
-    if not _is_int(v) or not 0 <= v <= 100:
+    if not value_checks.is_int(v) or not 0 <= v <= 100:
         raise ProjectError(f"{where}必須是 0 到 100 的整數(百分比)")
     return v
 
@@ -318,7 +316,7 @@ def _check_word_clarity(text: str, items, where: str) -> list[dict]:
         if not isinstance(it, dict) or set(it) != {"start", "end", "value"}:
             raise ProjectError(f"{where}.word_clarity 每項必須恰為 start、end、value 三個欄位")
         a, b = it["start"], it["end"]
-        if not _is_int(a) or not _is_int(b) or not 0 <= a < b <= len(text):
+        if not value_checks.is_int(a) or not value_checks.is_int(b) or not 0 <= a < b <= len(text):
             raise ProjectError(f"{where}.word_clarity 的範圍必須在句子之內且起點小於終點")
         if not all(_is_hanzi(ch) for ch in text[a:b]):
             raise ProjectError(f"{where}.word_clarity 只能設定在漢字上(不可含標點或其他字元)")
@@ -473,9 +471,9 @@ def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> l
             raise ProjectError(f"{where}.fusions 每項必須恰為 index、length、zhuyin、source 四個欄位"
                                "(另可選填 display)")
         i, n = f["index"], f["length"]
-        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX:
+        if not value_checks.is_int(n) or not FUSION_MIN <= n <= FUSION_MAX:
             raise ProjectError(f"{where}.fusions 的字數必須是 {FUSION_MIN} 到 {FUSION_MAX}")
-        if not _is_int(i) or not 0 <= i or i + n > len(text):
+        if not value_checks.is_int(i) or not 0 <= i or i + n > len(text):
             raise ProjectError(f"{where}.fusions 的位置超出句子範圍")
         if not all(_is_hanzi(c) for c in text[i:i + n]):
             raise ProjectError(f"{where}.fusions 只能合併相鄰的漢字")
@@ -523,7 +521,7 @@ def _check_fusion_off(text: str, items, where: str) -> list[dict]:
         if not isinstance(d, dict) or set(d) != {"index", "length"}:
             raise ProjectError(f"{where}.fusion_off 每項必須恰為 index、length 兩個欄位")
         i, n = d["index"], d["length"]
-        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX or not _is_int(i) or i < 0 or i + n > len(text):
+        if not value_checks.is_int(n) or not FUSION_MIN <= n <= FUSION_MAX or not value_checks.is_int(i) or i < 0 or i + n > len(text):
             raise ProjectError(f"{where}.fusion_off 的範圍超出句子")
         if {"index": i, "length": n} not in out:
             out.append({"index": i, "length": n})
@@ -1010,6 +1008,21 @@ def _stamp(now: float | None = None) -> str:
     return f"{dt:%Y%m%d-%H%M%S}-{dt.microsecond // 1000:03d}"
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _stamp_ms(s: str) -> int:
+    """把 `YYYYmmdd-HHMMSS-mmm` 解析成自 epoch 起的整數毫秒(UTC;不經浮點秒數)。"""
+    dt = datetime.strptime(s[:15], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+    return (dt - _EPOCH) // timedelta(seconds=1) * 1000 + int(s[16:19])
+
+
+def _format_ms(ms: int) -> str:
+    """整數毫秒格式化回 `YYYYmmdd-HHMMSS-mmm`(UTC);`_format_ms(_stamp_ms(s)) == s`。"""
+    dt = _EPOCH + timedelta(milliseconds=ms)
+    return f"{dt:%Y%m%d-%H%M%S}-{dt.microsecond // 1000:03d}"
+
+
 def _rand4() -> str:
     return secrets.token_hex(2)
 
@@ -1190,8 +1203,16 @@ def _archive_current(pfd: int, hfd: int) -> str | None:
         return None
     if not stat.S_ISREG(st.st_mode):
         raise UnsafePath("專案檔不是一般檔案(可能是符號連結),拒絕存檔")
+    # 同一專案內版本時間戳嚴格遞增(CHG-20261122-01):已持專案鎖,讀最新時間戳與建檔不會交錯;
+    # 現在時間 ≤ history 最新時間戳(同一毫秒內存檔或時鐘倒退)時取最新 + 1 毫秒。重試只換隨機碼。
+    now = _stamp()
+    entries = _history_entries(hfd)
+    if entries:
+        latest = max(_stamp_ms(e[0]) for e in entries)
+        if _stamp_ms(now) <= latest:
+            now = _format_ms(latest + 1)
     for _ in range(LINK_TRIES):
-        vid = f"{_stamp()}-{_rand4()}"
+        vid = f"{now}-{_rand4()}"
         try:
             safe_fs.link(pfd, PROJECT_FILE, hfd, f"{vid}.json")
             return vid

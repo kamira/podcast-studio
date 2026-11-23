@@ -13,6 +13,8 @@
 > 2026-10-30 依 CHG-20261029-01 修訂 1 結構文件更新(以整合分支 `chg/CHG-20261029-01-rev1-impl` 的 T10~T14 為準):清晰度方案 C 取代 v2 與低通;後製鍵演算法標記 `POST_ALGO`;語調 PCHIP 混合曲線與自動補點(`expand_points`、吸附有聲幀);shape stdout 帶 `pitch_points`;合音送顯示字(`tts_text`、`model_units`);前端清晰度警告、語調試算 / 實際套用的畫法、屬性面板合音模式「送模型」「字幕」兩列。
 
 > 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry` 元件與介面、外部 CLI 契約(`claude mcp …`、`codex mcp …`)、`/api/mcp/*` 三個端點列入 HTTP API 表;設計決策 D8~D12(見檔尾「CHG-20261022-02」節)。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):關鍵元件表新增 `value_checks.is_int`。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T2):設計決策表新增「CI 腳本共用 `scripts/ci/gitutil.py`」一列。
 
 ## 關鍵元件
 
@@ -36,6 +38,7 @@
 | `local_models_mcp.busy()` | 重讀設定 → `heavy_lock(on_wait=…)` → `redirect_stdout(stderr)` | context manager;等待時寫 stderr | 〔觀察〕 |
 | `safe_fs`(`open_dir` / `open_child` / `open_file` / `open_path` / `open_or_create` / `create_excl` / `lstat` / `entries` / `unlink` / `rmtree` / `rename` / `replace` / `link` / `closing`) | 自受信根目錄(呼叫端給的固定目錄,例 `project.ROOT`、`outputs/`、`static/`)以 `dir_fd` 逐層 `O_NOFOLLOW` 開啟;名稱一律單一路徑元件(空、`.`、`..`、含 `/` 或 NUL 丟 `ValueError`);任一層是符號連結或不是預期種類丟 `UnsafePathError`(`OSError` 子類別),不存在丟 `FileNotFoundError`;`rmtree` 以 fd 遞迴,遇符號連結只 unlink 連結本身;`open_or_create` 以「先開、不存在再 `O_EXCL` 建立」迴圈取代 `O_CREAT`(macOS 上多行程 `openat(O_CREAT \| O_NOFOLLOW)` 實測偶發 ENOENT) | 回傳 fd(呼叫端關閉);訊息不含本機路徑 | 〔觀察〕CHG-20261022-04 DIR-5 修正 4 |
 | `settings`(`load` / `save` / `validate` / `load_meta` / `voice_options`) | 模型設定的唯一存取點,儲存層為 SQLite `config/studio.db` | 見下方「設定模組介面」 | 〔觀察〕 |
+| `value_checks.is_int(v)` | 跨模組共用的整數判斷:`v` 是 `int` 且不是 `bool` 才為 True;只用標準庫,不 import repo 內其他模組;`project`、`settings` 以 `import value_checks` 呼叫,`breezy_worker` 因在 BreezyVoice venv 執行保留本地副本 `_is_int` | `is_int(v) -> bool` | 〔觀察〕CHG-20261103-01 T1 |
 | `nodes.REGISTRY` | 十種節點的宣告與 `run()`,包住 `taiwan_ai` / `media` | 見下方「節點登錄表」 | 〔觀察〕 |
 | `executor.validate(graph)` / `run(graph, emit, cancel=None)` | 驗證流程圖;依拓撲順序在呼叫端執行緒執行並以 `emit(dict)` 推送事件 | 見下方「流程圖格式與執行事件」 | 〔觀察〕 |
 | `studio_server.create_app(...)` / `main()` | FastAPI app;`main()` 以 uvicorn 綁 `127.0.0.1:7860`,啟動時呼叫 `project.startup_cleanup()` | 見下方「HTTP API」「專案 API」 | 〔觀察〕 |
@@ -302,6 +305,7 @@ classDiagram
 | 治理腳本 vendored 進 `.ai-sdlc/` | 從 `kamira/ai-skills` checkout vs vendored | 上游 repo 為 private,跨 repo checkout 需秘密;vendored v1.66.0 不需秘密,以 `SHA256SUMS` 驗完整性;腳本隨本 repo 公開(使用者確認閘同意) | 〔觀察〕CHG-20261022-03 |
 | commit 引用 CHG 編號,只改 `docs/knowledge/` 豁免 | 全部要 CHG vs knowledge 豁免 | knowledge 條目是帳本寫入,不是變更 | 〔觀察〕CHG-20261022-03 |
 | plan-check 只查 PR 改到、尚未完成驗收的 CHG | 全部 CHG vs PR 改到的 CHG | 已收尾的舊 CHG 不該因新規則變紅;狀態寫明「計畫待補」的草稿只警告 | 〔觀察〕CHG-20261022-03 |
+| CI 腳本共用 `scripts/ci/gitutil.py` | 各腳本自帶 `git()` / `GitError` / `parse_range()` vs 同目錄共用模組 vs 放 `scripts/` 或根目錄 | 同目錄:CI 直接執行 `trusted/scripts/ci/<x>.py` 時 `sys.path[0]` 是 trusted 副本目錄,共用模組只會從 trusted 載入;腳本不改 `sys.path`(以 `-P` / `PYTHONSAFEPATH` 執行會 import 失敗、exit 1,失敗即擋);`core.quotepath` 差異保留(`secret_scan` 以 `run_git(…, quotepath=False)` 取 bytes,`commit_check`、`plan_check_changed` 以 `git_text` 不帶旗標);`parse_range` 採嚴格版,三支腳本都拒絕 `-` 開頭的端點(exit 2) | 〔觀察〕CHG-20261103-01 |
 | lint 範圍 `ruff check --select E9,F` | ruff 全規則 vs `E9,F` | 既有程式 `E9,F` 全過;全規則會把既有風格債變成紅燈,更嚴格的規則另開 CHG | 〔觀察〕CHG-20261022-03 |
 | 本機審議閘:本機跑、CI 驗留言 | CI 內跑模型 vs 本機跑、CI 驗留言 | 代管 runner 連不到本機 Ollama;`review` job 只驗擁有者留言、目前 head sha、六席意見留言,以及排在其後、同 CHG 的統整判定留言為 `merge`(CHG-20261028-02 起不再看否決席) | 〔觀察〕CHG-20261022-03;CHG-20261028-02 |
 | CD 定義為本機部署腳本 `scripts/deploy_local.sh` | 不做 vs 本機部署腳本 vs 發 release | 產品只在本機執行,沒有遠端環境;部署後驗證只綁本機(fail-closed) | 〔觀察〕CHG-20261022-03 |
