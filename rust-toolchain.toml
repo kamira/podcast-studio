@@ -1,0 +1,6 @@
+# 釘版工具鏈(CHG-20261123-01 代決 3):channel 寫完整版號,不寫 stable。
+# 須與 Cargo.toml [workspace.package] 的 rust-version 相同;升級另開 CHG。
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

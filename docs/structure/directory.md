@@ -13,6 +13,7 @@
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:`scripts/local_review.py` 職責列補 Opus 席分組繳交,compliance 席參考資料上限改為 24000 字。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):根目錄新增 `value_checks.py`(`project`、`settings` 共用的 `is_int`)與 `tests/test_value_checks.py`。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T2):`scripts/ci/` 新增 `gitutil.py`(`commit_check`、`plan_check_changed`、`secret_scan` 共用的 `GitError`、git 執行與 `--range` 解析)。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T1):根目錄新增 Rust virtual workspace(`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`)與 `crates/studio-core/`(空骨架);`.gitignore` 補 `/target/`。
 
 ## 樹狀
 
@@ -34,6 +35,11 @@ podcast-studio/
 ├── tts_service.py             # 逐句合成服務:髒片段、快取、語速後製(CHG-20261022-04 T3)
 ├── mcp_registry.py            # local-models 的 MCP 註冊管理(Claude Code / Codex user scope,只經官方 CLI;CHG-20261022-02 T1)
 ├── breezy_worker.py           # BreezyVoice worker(在 BreezyVoice venv 執行:synth / annotate;CHG-20261022-04 T1)
+├── Cargo.toml                 # Rust virtual workspace:members = crates/*、resolver 3、edition 2024(CHG-20261123-01 T1)
+├── Cargo.lock                 # cargo 產生並入 git;會解析相依的 cargo 指令帶 --locked
+├── rust-toolchain.toml        # 釘版工具鏈(完整版號,含 rustfmt、clippy;與 rust-version 相同)
+├── crates/                    # Rust 程式(CHG-20261123-01 起)
+│   └── studio-core/           # 產品核心空骨架:Cargo.toml、src/lib.rs(只有 crate 說明文件)、tests/skeleton.rs
 ├── static/                    # 網頁前端(原生 HTML/JS/CSS,免建置)
 │   ├── index.html             # 首頁(精靈 / 完整模式兩張卡片)、精靈、完整模式、設定頁(含「進階流程」節點畫布)、免責說明頁
 │   ├── app.js                 # 共用工具 window.Studio、路由、設定頁、節點畫布
@@ -104,7 +110,7 @@ podcast-studio/
 │   ├── agents/
 │   │   └── review-seat-opus.md  # 本機審議 Opus 意見席的子代理定義(只有 Write 工具;CHG-20261101-02)
 │   └── worktrees/             # agent worktree(ignored,CHG-20261022-03 T9)
-├── .gitignore
+├── .gitignore                 # 含 Rust 建置產物 /target/(CHG-20261123-01 T1)
 ├── outputs/                   # 產出物(ignored);uploads/ 為上傳檔,.heavy.lock 為重型鎖,ui_check/ 為 UI 檢查截圖,.tmp/ 為 /api/annotate 暫存,.tmp/review_decision/ 為統整席判定 JSON,.tmp/local_review/ 為本機審議 Codex 席暫存與 Opus 席請求檔 / 答案檔(opus/)
 ├── projects/                  # 專案資料(ignored,使用者資料):<名稱>/{project.json,history/,audio/,assets/,tmp/,.lock}、.trash/
 ├── .review/                   # 本機審議 Codex 席的 PR head 唯讀檢視(ignored,審完即移除;CHG-20261028-01)
@@ -115,7 +121,9 @@ podcast-studio/
 
 | 路徑 | 職責 | 備註 | 等級 |
 |------|------|------|------|
-| `/`(根目錄 `.py`) | 全部 Python 程式碼;平鋪,沒有 package | 入口檔(`studio_server.py`、`local_models_mcp.py`)以 `sys.path.insert` import 共用模組;相依方向見 `logical.md` | 〔觀察〕 |
+| `/`(根目錄 `.py`) | 全部 Python 程式碼;平鋪,沒有 package | 入口檔(`studio_server.py`、`local_models_mcp.py`)以 `sys.path.insert` import 共用模組;相依方向見 `logical.md`;Rust 程式在 `crates/`(CHG-20261123-01 起) | 〔觀察〕 |
+| `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`(Rust workspace 與釘版工具鏈) | 根目錄 virtual workspace:`members = ["crates/*"]`、`resolver = "3"`、`[workspace.package]` 的 `edition = "2024"` 與 `rust-version`(與 `rust-toolchain.toml` 的 `channel` 同一完整版號);`rust-toolchain.toml` 另列 `rustfmt`、`clippy` 元件、`profile = "minimal"`;`Cargo.lock` 入 git | rustup 由工作目錄往上找 `rust-toolchain.toml`,repo 內任何位置都套用同一釘版;會解析相依的 cargo 指令帶 `--locked`(`cargo fmt` 除外);升級工具鏈另開 CHG;建置產物 `target/` 由 `.gitignore` 忽略;成員目錄名與 package 名相同(kebab-case) | 〔觀察〕CHG-20261123-01 T1 |
+| `crates/studio-core/` | Rust 產品核心的空骨架:`Cargo.toml`(沒有任何相依)、`src/lib.rs`(只有 crate 說明文件與 `#![forbid(unsafe_code)]`,不含任何函式)、`tests/skeleton.rs`(crate 可連結、`rust-version` 與 `rust-toolchain.toml` 版號一致) | 路線圖第 2 筆起逐模組加入 | 〔觀察〕CHG-20261123-01 T1 |
 | `static/` | 網頁前端:`index.html`(首頁「精靈」「完整模式」兩張卡片、右上角 ⚙ → 設定頁;設定頁子頁含「語音預設」與「進階流程」節點畫布;底部「免責說明與授權」連結)、`app.js`(共用工具 `window.Studio`、hash 路由、設定頁、畫布)、`project.js`(專案狀態與文稿 / 封面 / 語音 / 匯出面板)、`timeline.js`(時間軸三軌、預覽、屬性、素材庫)、`wizard.js`(首頁、精靈、完整模式)、`edit.js`(停頓、聲調、語速、畫面軌編輯)、`style.css` | 原生 JS,不經建置、不從 CDN 載入;由 `studio_server.py` 只解析 `static/` 之下的真實路徑送出;首頁的 `__STUDIO_TOKEN__` 換成啟動權杖;後四個模組依序載入,以 `Studio.hook(name, fn)` 串接(CHG-20261022-04 T7、T8) | 〔觀察〕 |
 | `projects/` | 專案資料(CHG-20261022-04):`<名稱>/project.json`(`schema_version: 1`)、`history/`(最近 10 版)、`audio/`(合成與自錄音檔)、`assets/`(素材)、`tmp/`(worker 輸入檔,用完即刪)、`.lock`(專案層級鎖);`.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案(30 天後啟動時清除) | `.gitignore`(使用者資料);只經 `project.py` 存取;不經 `/files/*` 提供,音檔與素材只經 `/api/projects/{p}/media/{id}` 送出 | 〔觀察〕 |
 | 根目錄 CHG-20261022-04 模組 | `safe_fs.py`(安全路徑工具,只用標準庫,不 import repo 內其他模組;`project`、`studio_server`、`nodes`、`media`、`tts_service`、`heavy_lock`、`settings` 共用,DIR-5 修正 4)、`names.py`(名稱白名單,`studio_server.py` 與 `project.py` 共用)、`project.py`(資料模型)、`timeline.py`(純函式 `layout()`)、`tts_service.py`(合成服務)、`breezy_worker.py`(以 BreezyVoice venv 執行、只用標準庫與 BreezyVoice 模組,不 import repo 內其他模組) | 相依方向見 `logical.md` | 〔觀察〕 |

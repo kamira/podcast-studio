@@ -21,3 +21,6 @@ workflows/*
 
 # 專案資料(projects/<名稱>/、.trash/)屬使用者資料,不入 git(CHG-20261022-04 T2)
 projects/
+
+# Rust 建置產物(cargo,CHG-20261123-01 T1)
+/target/
