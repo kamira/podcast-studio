@@ -2,7 +2,7 @@
 
 - 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
 - 分支(Branch):main
-- 版本:v1.18(變更歷程見 §11)
+- 版本:v1.19(變更歷程見 §11)
 - 日期:2026-10-22
 - 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24;v1.5 修改 FR-21、FR-25、FR-31、FR-34 並新增 ADP-12,待 CHG-20261022-01/04 修訂 2 確認閘;v1.18 架構調整——跨平台、Rust 原生 GUI 應用程式、逐步替換——CHG-20261122-02 確認閘 2026-11-23 由使用者覆核(含修改),草案 PR #152 於 2026-11-23 合入 main(`2f7ce02`),v1.18 新增與改寫的條文自此生效;條文經 ACC-20261123-02 使用者確認)
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
@@ -215,7 +215,7 @@
 | 上傳(v1.1) | 只收白名單副檔名;單檔上限 200 MB;檔名由伺服器重新產生(不信任使用者檔名);只能讀寫 `outputs/` 之下,拒絕路徑穿越 | 新需求 FR-19 的安全要求 |
 | 重型工作互斥(v1.1) | 網頁與 MCP **跨行程**共用一把檔案鎖,同時只跑一個重型工作(解 ADP-2) | 新需求 |
 | 全域設定(v1.1) | 寫 repo 外設定(MCP 註冊)必須使用者在網頁上逐次按下確認,且只透過官方 CLI | 新需求 FR-22 |
-| 開發流程(v1.4) | merge 前 CI 全綠:`document`、`chg`、`program`、`review` 四項 check 全部通過才能 merge 進 main;由 main ruleset 強制 | CHG-20261022-03 / DIR-2 |
+| 開發流程(v1.4;v1.19 改五項) | merge 前 CI 全綠:`document`、`chg`、`program`、`review`、`rust` 五項 check 全部通過才能 merge 進 main;由 main ruleset 強制 | CHG-20261022-03 / DIR-2;CHG-20261123-01 |
 
 > v1.18 架構調整新增與改寫的非功能需求見 §6.1(草案 PR 合入 main 後生效)。
 
@@ -330,7 +330,7 @@
 - **結構設計圖**:預設畫給使用者看並等確認(使用者未表示要跳過)。
 - **CI/CD(v1.4,CHG-20261022-03 / DIR-2)**:
   - 每個步驟一個 PR:開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號(只改 `docs/knowledge/` 者除外),不直接 push main。
-  - merge 前 `document`、`chg`、`program`、`review` 四項 check 必須全部通過。`review` 檢查看擁有者對目前 head 的六席意見留言,以及排在其後、CHG 相同的統整判定留言(`review-decision` 標記)為 `merge`(DIR-6,CHG-20261028-02);各席判決為意見,不具否決效力。
+  - merge 前 `document`、`chg`、`program`、`review`、`rust` 五項 check 必須全部通過。`rust` 為三平台(ubuntu、macos、windows)Rust 格式、lint、測試、release 建置、比對工具示範與 cargo-deny 稽核(矩陣 job `rust-platform` 的彙總,任一平台未成功即失敗;CHG-20261123-01)。`review` 檢查看擁有者對目前 head 的六席意見留言,以及排在其後、CHG 相同的統整判定留言(`review-decision` 標記)為 `merge`(DIR-6,CHG-20261028-02);各席判決為意見,不具否決效力。
   - 改到任何程式路徑的 PR,不論風險分級,merge 前一律等使用者核准;只改 `docs/`、`features/` 的 PR 可在 CI 綠後自動 merge。DIR-5 整合分支的 task PR 同樣適用:合入前先在 CHG「## 派發記錄」寫入使用者核准原話並 commit,再合入(DIR-5 第 8 條,CHG-20261030-02)。
   - 改到治理基礎設施路徑(`.github/`、`scripts/ci/`、`tests/ci/`、`.ai-sdlc/`、`scripts/local_review.py`、`scripts/review_decision.py`、`scripts/deploy_local.sh`)的 PR,另需擁有者留言 `<!-- infra-approved sha=<head> -->`。
   - main 只允許 squash merge,squash 標題帶 CHG 編號。
@@ -392,3 +392,4 @@
 | v1.16 | 2026-11-01 | §8 CI/CD 約定:本機審議一項改為 risk、consistency 常設由 Opus 子代理擔任(請求檔 / 答案檔交接、資料外送例外比照 DIR-6 第 10 條),子代理以 `.claude/agents/review-seat-opus.md` 派出(只有 Write 工具、資料全部內嵌);預設參數不再需要 `--codex-seats risk,security,compliance`;Codex 額度用盡代答範圍縮為 security、compliance,末句「至使用者明示恢復 Codex 為止」校正為「Codex 恢復作答後回到 Codex 擔任」(對齊第 12 條條件式) | 使用者 2026-11-01 指示;CHG-20261101-02;DIR-1 第 13 條 |
 | v1.17 | 2026-11-01 | §8 本機審議一項:Opus 席每份請求 prompt 上限 20000 字,超過時分組(CHG 依章節、diff 依直系呼叫 / 引用參數 / 共用參數的函式;每席 CHG、diff 各至多 2 組,超出不送審)逐份交接 | 使用者 2026-11-01 指示;CHG-20261101-02 修訂 1;DIR-1 第 13 條 |
 | v1.18 | 2026-11-22 | 架構調整(草案 PR 合入 main 後生效):§1 新增架構調整目標;§2 新增「遷移範圍」(MCP 伺服器遷移到 Rust、治理 CI 腳本不遷移,均經確認閘使用者決定);§4 新增 4.7「v1.18 架構調整對既有需求的影響」(FR-1、4、10、15、16、17、19、21、22、24、31、32、34、35 保留語意、改寫操作方式,不刪需求);§5 加一行指向 §6.1;§6 新增 6.1「非功能需求:v1.18 新增與改寫」(跨平台三平台、原生 GUI 應用程式、效能指標待量化、應用程式不開監聽埠、建置期離線例外、資料相容、重型工作鎖擴及 Rust);§6 新增 v1.18 限制與待確認 Q5~Q12;§7 註明既有條件適用 Python 版、Rust 版條件由各模組 CHG 寫入;§8「依賴」改為只適用尚未遷移的 Python 模組,新增「技術約束」(新程式以 Rust 撰寫、原生 GUI、前後端分離非硬性規定、一個模組一筆 CHG、治理工具調整待 Rust 版合入 main 後另開 CHG);§9 不改。2026-11-23 確認閘修改:遷移粒度改為一個 Python 模組一筆 CHG、MCP 改為 Rust、治理工具不遷移 | 使用者 2026-11-22 指示與選項(原話見 CHG-20261122-02「## 動機」);CHG-20261122-02 |
+| v1.19 | 2026-11-24 | CI 新增 Rust 三平台檢查:§5「開發流程」列改為五項 check(加 `rust`),來源欄加 CHG-20261123-01;§8 CI/CD 第二點改為五項 check,並補 `rust` 的內容(三平台 Rust 格式、lint、測試、release 建置、比對工具示範與 cargo-deny 稽核,矩陣 job `rust-platform` 的彙總);其餘各節不改(§6.1「跨平台」已寫 CI 矩陣三平台)。v1.18 原文——§5 列:「\| 開發流程(v1.4) \| merge 前 CI 全綠:`document`、`chg`、`program`、`review` 四項 check 全部通過才能 merge 進 main;由 main ruleset 強制 \| CHG-20261022-03 / DIR-2 \|」;§8 第二點:「merge 前 `document`、`chg`、`program`、`review` 四項 check 必須全部通過。`review` 檢查看擁有者對目前 head 的六席意見留言,以及排在其後、CHG 相同的統整判定留言(`review-decision` 標記)為 `merge`(DIR-6,CHG-20261028-02);各席判決為意見,不具否決效力。」 | CHG-20261123-01 代決 14 |
