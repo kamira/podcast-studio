@@ -15,6 +15,7 @@
 > 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry` 元件與介面、外部 CLI 契約(`claude mcp …`、`codex mcp …`)、`/api/mcp/*` 三個端點列入 HTTP API 表;設計決策 D8~D12(見檔尾「CHG-20261022-02」節)。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):關鍵元件表新增 `value_checks.is_int`。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T2):設計決策表新增「CI 腳本共用 `scripts/ci/gitutil.py`」一列。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T2):關鍵元件表新增 `parity`(比對器與 Python 轉接器);設計決策表新增「並行比對工具:Rust 比對器 + Python 轉接器、JSON 行協定」一列。
 
 ## 關鍵元件
 
@@ -49,6 +50,8 @@
 | `tts_service`(`load_voice`、`cache_key`、`dirty_segments`、`synth`、`apply_speed`) | 只合成髒片段、內容雜湊快取、逐句 emit、語速後製(ffmpeg `atempo`,單一濾鏡) | `synth(project, emit)` 就地更新片段 `audio`、不存檔,回 `{"synthesized", "cached"}`;每句 emit `{"type": "segment", "id", "seconds", "cached", "audio"}`;`apply_speed(segment, project)` 回變速後音檔路徑;失敗丟 `SynthError`(繁中、不含路徑) | 〔觀察〕CHG-20261022-04 T3;`audio` 欄位為 DIR-5 修正 M-1 |
 | `breezy_worker.py` | 在 BreezyVoice venv 執行的子程序:`synth`(逐句合成、模型載入一次)、`annotate`(逐字注音) | 見下方「BreezyVoice worker 介面」 | 〔觀察〕CHG-20261022-04 T1 |
 | `media.render_timeline(project, layout)` | 依 layout 匯出 MP4 + SRT;片段音檔經 `tts_service.apply_speed` 取變速後檔案、以 `O_NOFOLLOW` 開啟經 stdin 交給 ffmpeg 解碼(以 `-t` 截在片段需要的長度);畫面以 concat demuxer 依 0.1 秒格排程 | `(mp4, srt)`;輸出以 `taiwan_ai.reserve()` 佔位;未合成或路徑不安全丟 `RenderError`(`.segments` 列出片段);逾時 max(600, 音訊秒數 × 2) 秒 | 〔觀察〕CHG-20261022-04 T5;`-t` 解碼截止為 DIR-5 修正 M-3 |
+| `parity`(`crates/parity`:`Fixture::parse`、`Registry`、`parse_response` / `match_responses`、`compare` → `Report`、`py::run`;執行檔 `parity run` / `parity list`) | Rust 遷移的並行比對工具:讀 fixture `{"unit", "cases": [{"id", "input"}]}`(案例 id 唯一),同行程以登錄表執行 Rust 單元(`fn(&serde_json::Value) -> Outcome`,panic 以 `catch_unwind` 記為 `error` `panic`),以子程序執行 `crates/parity/py/adapter.py --unit <名>`(argv 清單、不經 shell、`PYTHONUTF8=1`、`PYTHONDONTWRITEBYTECODE=1`、逾時預設 60 秒)取得 Python 結果,逐案例比對 | JSON 行協定:請求 `{"id","input"}`;回應 `ok`(`value`)/ `reject`(`code`)/ `error`(`class`),多出的欄位(如 `message`)不比對,容許 `
+`;回應須筆數相同、id 依序對應。判定:`outcome` 相同且 `value` JSON 值完全相等(整數 1 ≠ 浮點 1.0)、`code` / `class` 相同。文字報告最後一行「結論:一致 / 不一致」,`--format json` 同內容;退出碼 0 一致 / 1 不一致 / 2 參數、fixture、轉接器錯誤(stderr 繁中、不輸出結論)。直譯器:`--python` → `PARITY_PYTHON` → Windows `python`、其他 `python3`。不寫檔、不使用網路 | 〔觀察〕CHG-20261123-01 T2 |
 | `media.sniff_binary(ext, head)` | 依檔頭位元組判斷內容與副檔名是否相符(png、jpg、webp、wav、mp3、m4a) | `/api/upload` 與「送到素材庫」節點共用,規則單一來源 | 〔觀察〕DIR-5 修正 M-5(由 `studio_server._sniff_binary` 搬出,規則不變) |
 
 〔觀察〕設定中的 `roles.image`(`model`、`steps`)與 `roles.voice`(`wav`、`text`)由 `media.generate_image()`、`taiwan_ai.speak()` 在每次呼叫時經 `taiwan_ai.role_config()` → `settings.load()` 讀取(CHG-20261026-01 T1、T2);網頁節點與 MCP 工具共用這兩個函式,MCP 不需另改即跟上。`--base-model` 仍固定 `schnell`,設定頁沒有對應欄位〔觀察〕;換成 dev 系模型時以錯誤基底執行(CHG-20261026-01 代決 3)。
@@ -306,6 +309,7 @@ classDiagram
 | commit 引用 CHG 編號,只改 `docs/knowledge/` 豁免 | 全部要 CHG vs knowledge 豁免 | knowledge 條目是帳本寫入,不是變更 | 〔觀察〕CHG-20261022-03 |
 | plan-check 只查 PR 改到、尚未完成驗收的 CHG | 全部 CHG vs PR 改到的 CHG | 已收尾的舊 CHG 不該因新規則變紅;狀態寫明「計畫待補」的草稿只警告 | 〔觀察〕CHG-20261022-03 |
 | CI 腳本共用 `scripts/ci/gitutil.py` | 各腳本自帶 `git()` / `GitError` / `parse_range()` vs 同目錄共用模組 vs 放 `scripts/` 或根目錄 | 同目錄:CI 直接執行 `trusted/scripts/ci/<x>.py` 時 `sys.path[0]` 是 trusted 副本目錄,共用模組只會從 trusted 載入;腳本不改 `sys.path`(以 `-P` / `PYTHONSAFEPATH` 執行會 import 失敗、exit 1,失敗即擋);`core.quotepath` 差異保留(`secret_scan` 以 `run_git(…, quotepath=False)` 取 bytes,`commit_check`、`plan_check_changed` 以 `git_text` 不帶旗標);`parse_range` 採嚴格版,三支腳本都拒絕 `-` 開頭的端點(exit 2) | 〔觀察〕CHG-20261103-01 |
+| 並行比對工具:Rust 比對器 + Python 轉接器、JSON 行協定 | (a) 比對器與 Rust 端用 Rust,Python 端以標準函式庫轉接器 vs (b) Python 比對器 + 每個 Rust 單元一個 CLI vs (c) 兩者都做 | (a) 符合「新程式以 Rust 撰寫」,Rust 單元同行程呼叫、不需 CLI 包裝;Python 端只負責 import 被比對的模組並轉成協定;協定欄位刻意最少,擴充只以新增選用欄位進行;相依只限 `serde`、`serde_json`,命令列以標準函式庫解析 | 〔觀察〕CHG-20261123-01 代決 4~7、T2 |
 | lint 範圍 `ruff check --select E9,F` | ruff 全規則 vs `E9,F` | 既有程式 `E9,F` 全過;全規則會把既有風格債變成紅燈,更嚴格的規則另開 CHG | 〔觀察〕CHG-20261022-03 |
 | 本機審議閘:本機跑、CI 驗留言 | CI 內跑模型 vs 本機跑、CI 驗留言 | 代管 runner 連不到本機 Ollama;`review` job 只驗擁有者留言、目前 head sha、六席意見留言,以及排在其後、同 CHG 的統整判定留言為 `merge`(CHG-20261028-02 起不再看否決席) | 〔觀察〕CHG-20261022-03;CHG-20261028-02 |
 | CD 定義為本機部署腳本 `scripts/deploy_local.sh` | 不做 vs 本機部署腳本 vs 發 release | 產品只在本機執行,沒有遠端環境;部署後驗證只綁本機(fail-closed) | 〔觀察〕CHG-20261022-03 |
