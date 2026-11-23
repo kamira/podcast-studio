@@ -11,6 +11,8 @@
 > 2026-10-30 依 CHG-20261022-02 結構文件更新(以整合分支 `chg/CHG-20261022-02-impl` 的 T1~T3 為準):新增 `mcp_registry.py`、`tests/test_mcp_registry.py`、`tests/test_server_mcp.py`、`tests/integration/test_mcp_registry_real.py`、`features/mcp_registry.feature`;設定頁新增「MCP 註冊」子頁;`tests/ui_check.py` 新增 `mcp` 組。
 > 2026-11-01 依 CHG-20261101-02 結構文件更新:新增 `.claude/agents/review-seat-opus.md`(本機審議 Opus 席的專案子代理定義,只有 Write 工具)、`features/local_review_opus.feature`;`scripts/local_review.py` 新增 opus 引擎與 `outputs/.tmp/local_review/opus/` 暫存(請求檔 / 答案檔)。
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:`scripts/local_review.py` 職責列補 Opus 席分組繳交,compliance 席參考資料上限改為 24000 字。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):根目錄新增 `value_checks.py`(`project`、`settings` 共用的 `is_int`)與 `tests/test_value_checks.py`。
+> 2026-11-22 依 CHG-20261103-01 結構文件更新(T2):`scripts/ci/` 新增 `gitutil.py`(`commit_check`、`plan_check_changed`、`secret_scan` 共用的 `GitError`、git 執行與 `--range` 解析)。
 
 ## 樹狀
 
@@ -26,6 +28,7 @@ podcast-studio/
 ├── media.py                   # 媒體層(含時間軸匯出 render_timeline、內容嗅探 sniff_binary)
 ├── names.py                   # 名稱規則:工作流程名稱與專案名稱共用的中英日白名單(CHG-20261022-04 T2)
 ├── safe_fs.py                 # 安全路徑工具:自受信根目錄以 dir_fd 逐層 O_NOFOLLOW 開啟、讀寫刪搬(CHG-20261022-04 DIR-5 修正 4)
+├── value_checks.py            # 跨模組共用的值檢查:is_int(project、settings 共用;breezy_worker 保留本地副本)(CHG-20261103-01 T1)
 ├── project.py                 # 專案資料模型:分句、停頓、標註、版本、.trash(CHG-20261022-04 T2)
 ├── timeline.py                # 時間軸計算 layout():片段、字幕 cue、畫面軌(CHG-20261022-04 T4)
 ├── tts_service.py             # 逐句合成服務:髒片段、快取、語速後製(CHG-20261022-04 T3)
@@ -73,6 +76,7 @@ podcast-studio/
 ├── scripts/                   # 開發流程腳本(CHG-20261022-03)
 │   ├── ci/
 │   │   ├── commit_check.py        # commit 引用 CHG 編號檢查
+│   │   ├── gitutil.py             # CI 腳本共用:GitError、git 執行、範圍解析(CHG-20261103-01)
 │   │   ├── plan_check_changed.py  # PR 改到的 CHG 做 plan-check
 │   │   ├── review_gate.py         # 驗意見留言與統整判定 / infra-approved
 │   │   ├── secret_scan.py         # 全 repo 與 commit 範圍秘密掃描
@@ -115,6 +119,7 @@ podcast-studio/
 | `static/` | 網頁前端:`index.html`(首頁「精靈」「完整模式」兩張卡片、右上角 ⚙ → 設定頁;設定頁子頁含「語音預設」與「進階流程」節點畫布;底部「免責說明與授權」連結)、`app.js`(共用工具 `window.Studio`、hash 路由、設定頁、畫布)、`project.js`(專案狀態與文稿 / 封面 / 語音 / 匯出面板)、`timeline.js`(時間軸三軌、預覽、屬性、素材庫)、`wizard.js`(首頁、精靈、完整模式)、`edit.js`(停頓、聲調、語速、畫面軌編輯)、`style.css` | 原生 JS,不經建置、不從 CDN 載入;由 `studio_server.py` 只解析 `static/` 之下的真實路徑送出;首頁的 `__STUDIO_TOKEN__` 換成啟動權杖;後四個模組依序載入,以 `Studio.hook(name, fn)` 串接(CHG-20261022-04 T7、T8) | 〔觀察〕 |
 | `projects/` | 專案資料(CHG-20261022-04):`<名稱>/project.json`(`schema_version: 1`)、`history/`(最近 10 版)、`audio/`(合成與自錄音檔)、`assets/`(素材)、`tmp/`(worker 輸入檔,用完即刪)、`.lock`(專案層級鎖);`.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案(30 天後啟動時清除) | `.gitignore`(使用者資料);只經 `project.py` 存取;不經 `/files/*` 提供,音檔與素材只經 `/api/projects/{p}/media/{id}` 送出 | 〔觀察〕 |
 | 根目錄 CHG-20261022-04 模組 | `safe_fs.py`(安全路徑工具,只用標準庫,不 import repo 內其他模組;`project`、`studio_server`、`nodes`、`media`、`tts_service`、`heavy_lock`、`settings` 共用,DIR-5 修正 4)、`names.py`(名稱白名單,`studio_server.py` 與 `project.py` 共用)、`project.py`(資料模型)、`timeline.py`(純函式 `layout()`)、`tts_service.py`(合成服務)、`breezy_worker.py`(以 BreezyVoice venv 執行、只用標準庫與 BreezyVoice 模組,不 import repo 內其他模組) | 相依方向見 `logical.md` | 〔觀察〕 |
+| 根目錄 `value_checks.py` | 跨模組共用的值檢查 `is_int`(只用標準庫,不 import repo 內其他模組;`project`、`settings` 共用;`breezy_worker.py` 在 BreezyVoice venv 執行,保留本地副本) | 測試:`tests/test_value_checks.py` | 〔觀察〕CHG-20261103-01 T1 |
 | `static/vendor/` | Drawflow 0.0.60 的 `drawflow.min.js`、`drawflow.min.css`、`LICENSE.drawflow` 與 `README.md` | 唯一第三方前端檔(CHG-20261022-01 前置 P1);`tests/test_static.py` 比對 README 記載的 SHA-256 | 〔觀察〕 |
 | `workflows/` | 工作流程 JSON(executor 流程圖格式);`default.json` 為預設範本 | 由 `GET/PUT /api/workflows/{name}` 讀寫;使用者另存的檔案(與存檔暫存檔 `.wf-*.tmp`)也落在這裡;git 只追蹤 `default.json`,其他檔案由 `.gitignore` 的 `workflows/*`、`!workflows/default.json` 忽略,存檔後工作樹仍乾淨(CHG-20261026-01 T3);日後不在此新增其他追蹤檔 | 〔觀察〕 |
 | `config/` | 使用者設定:`studio.db`(與 `-wal`、`-shm`)、`.studio.db.lock`、舊 `models.json` | 全部列入 `.gitignore`;只經 `settings.py` 存取,`/files/*` 不提供 | 〔觀察〕 |
@@ -126,7 +131,7 @@ podcast-studio/
 | `.claude/agents/` | Claude Code 專案子代理定義(CHG-20261101-02) | `review-seat-opus.md` 為本機審議 Opus 意見席(DIR-1 第 13 條):frontmatter `model: opus`、`effort: medium`、`tools: Write`,本文只有固定約束(只依 prompt 內資料判斷、唯一動作是寫答案檔);派發者一律以 subagent_type `review-seat-opus` 派 Opus 席;目前不在治理基礎設施清單(CHG-20261101-02 代決 26,列入後續改善) | 〔觀察〕 |
 | `docs/knowledge/` | 使用者教過的規則:`INDEX.md`、`directives.md`(DIR-n)、`patterns.md`、`vocabulary.json` | 只改本目錄的 commit 免引用 CHG 編號(CHG-20261022-03) | 〔觀察〕 |
 | `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03(「統整席判定需修正」場景由 CHG-20261028-02 改寫);`local_review_codex.feature` 屬 CHG-20261028-01;`review_decision.feature` 屬 CHG-20261028-02;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04(對應功能隨該筆合併 PR 進 main);`mcp_registry` 屬 CHG-20261022-02;`local_review_opus` 屬 CHG-20261101-02 | 〔觀察〕 |
-| `scripts/ci/` | CI 治理檢查:`commit_check.py`、`plan_check_changed.py`、`review_gate.py`(驗意見留言與統整判定)、`secret_scan.py`、`secret_allowlist.txt` | 只用 Python 標準函式庫;CI 一律從 base 分支的 trusted/ 副本(CI 執行期目錄,不在 repo 內)執行 | 〔觀察〕 |
+| `scripts/ci/` | CI 治理檢查:`commit_check.py`、`plan_check_changed.py`、`review_gate.py`(驗意見留言與統整判定)、`secret_scan.py`、`secret_allowlist.txt`;`gitutil.py`(`GitError`、git 執行、`--range` 解析,`commit_check`、`plan_check_changed`、`secret_scan` 共用;CI 從 trusted 副本同目錄載入,CHG-20261103-01) | 只用 Python 標準函式庫;CI 一律從 base 分支的 trusted/ 副本(CI 執行期目錄,不在 repo 內)執行 | 〔觀察〕 |
 | `scripts/local_review.py` | 本機審議會(DIR-1 六席,各席獨立作答一次),以 `gh pr comment` 貼出各席意見(建議等級不具否決效力,DIR-6) | 只讀 PR 資料、主工作副本不 checkout;拒絕 fork 與非擁有者 PR;diff 經過濾後超過 30000 字時,以 head sha 在 `.review/pr-<編號>-<sha12>/` 建 `--no-checkout` 的 detached worktree(不寫出追蹤檔、停用 hook)供 Codex 席以 `git show` / `git diff --no-textconv --no-ext-diff` 唯讀讀取完整程式,審完(含例外)以 `safe_remove_view()` 移除——本次與舊檢視共用,只在目錄內僅有 `.git` 時刪該指標檔與空目錄並 `git worktree prune`(不用 git 的強制移除、不遞迴刪除),否則留下目錄並警告;同名舊目錄另須是登記的 worktree,否則拒絕、不刪;Ollama 席仍依 `num_ctx` 截短(CHG-20261028-01);非 think 的 Ollama 席在 diff 截到 0 仍放不進時截短 CHG 並記注意行(CHG-20261028-02);互讀階段已移除;compliance 席參考資料去除 directive「歷史」區塊、上限 24000 字(CHG-20261028-02 DIR-5 修正;CHG-20261101-02 修訂 1 提高);opus 引擎(CHG-20261101-02):risk、consistency 預設由 Opus 子代理擔任,跑到 Opus 席時在 `outputs/.tmp/local_review/opus/` 寫請求檔(`<stem>.prompt.md`、`<stem>.request.json`)、輪詢答案檔 `<stem>.answer.json`(上限 256 KB、本機嚴格 schema 檢查,每次 15 分鐘、重派一次換新 stem),每次嘗試結束刪除該 stem 的檔、目錄空了以非遞迴 rmdir 移除;每份請求 prompt 上限 20000 字,超過時 CHG 依章節、diff 依函式關聯分組(每席 CHG、diff 各至多 2 組,超出不送審),每組一份請求檔(stem 含 `g<組>`)、逐份交接,各組判決合成單席(CHG-20261101-02 修訂 1);不新增網路呼叫;`--opus-seats` 覆寫,與 `--codex-seats` 重疊 exit 2 | 〔觀察〕 |
 | `scripts/review_decision.py` | 驗證統整席子代理寫出的判定 JSON,以 `gh pr comment` 貼出帶 `review-decision` 標記的判定留言(DIR-6) | 治理基礎設施(需 `infra-approved`);不呼叫模型、不寫檔;拒絕 fork、非擁有者 PR、不在 main 執行;需目前 head 的六席意見留言;`model`、`effort` 只取自參數;JSON 文字經 `sanitize()` 放在程式碼區塊內(CHG-20261028-02) | 〔觀察〕 |
 | `.review/` | 本機審議 Codex 席的 PR head 唯讀檢視 | `.gitignore`;只由 `scripts/local_review.py` 建立與移除,平時不存在(CHG-20261028-01) | 〔觀察〕 |

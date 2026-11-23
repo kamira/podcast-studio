@@ -27,9 +27,10 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+from gitutil import GitError, parse_range, run_git
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -139,24 +140,13 @@ def mask(text: str) -> str:
     return text[:SHOW_CHARS] + "…"
 
 
-class GitError(Exception):
-    """git 指令執行失敗。"""
-
-
 class AllowlistError(Exception):
     """豁免清單格式錯誤。"""
 
 
 def git(repo: Path, *args: str) -> bytes:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "-c", "core.quotepath=false", *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", "replace").strip()
-        raise GitError("git {} 失敗:{}".format(" ".join(args), err))
-    return proc.stdout
+    """帶 `-c core.quotepath=false` 執行 git、回傳 bytes:非 ASCII 檔名以原字路徑回報與比對豁免清單。"""
+    return run_git(repo, *args, quotepath=False)
 
 
 def load_allowlist(path: Path):
@@ -246,15 +236,6 @@ def scan_range(repo: Path, rng: str, entries):
             if lineno is not None:
                 lineno += 1
     return findings, commits
-
-
-def parse_range(text: str):
-    if ".." not in text or "..." in text:
-        return None
-    base, head = text.split("..", 1)
-    if not base or not head or base.startswith("-") or head.startswith("-"):
-        return None
-    return base, head
 
 
 def main(argv=None) -> int:

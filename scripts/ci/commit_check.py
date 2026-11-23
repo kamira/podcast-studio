@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+from gitutil import GitError, git_text as git, parse_range
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -32,22 +33,6 @@ for _stream in (sys.stdout, sys.stderr):
 
 CHG_RE = re.compile(r"CHG-\d{8}-\d{2}")
 KNOWLEDGE_PREFIX = "docs/knowledge/"
-
-
-class GitError(Exception):
-    """git 指令執行失敗。"""
-
-
-def git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", "replace").strip()
-        raise GitError("git {} 失敗:{}".format(" ".join(args), err))
-    return proc.stdout.decode("utf-8", "replace")
 
 
 def parent_count(repo: Path, sha: str) -> int:
@@ -85,15 +70,6 @@ def check_commit(repo: Path, sha: str, subject_only: bool):
         shown = "、".join(others[:3]) + (" 等" if len(others) > 3 else "")
         reason = "{}未含 CHG 編號,且改動了 docs/knowledge/ 以外的檔案:{}".format(where, shown)
     return (short, subject, reason)
-
-
-def parse_range(text: str):
-    if ".." not in text or "..." in text:
-        return None
-    base, head = text.split("..", 1)
-    if not base or not head:
-        return None
-    return base, head
 
 
 def main(argv=None) -> int:

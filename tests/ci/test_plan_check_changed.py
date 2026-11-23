@@ -165,6 +165,18 @@ class PlanCheckChangedTest(unittest.TestCase):
                         "--runner", str(self.runner))
         self.assertEqual(code, 2, out)
 
+    def test_dash_leading_range_rejected(self):
+        """CHG-20261103-01 代決 9:`-` 開頭的 base / head 不交給 git,印參數錯誤並 exit 2(事實 H)。"""
+        for rng_args in (("--range=-x..HEAD",), ("--range", "HEAD..-x")):
+            with self.subTest(rng=rng_args):
+                proc = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--repo", str(self.repo.path),
+                     "--runner", str(self.runner), *rng_args],
+                    env=GIT_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                err = proc.stderr.decode("utf-8")
+                self.assertEqual(proc.returncode, 2, err)
+                self.assertIn("參數錯誤:--range 必須是 <base>..<head> 格式,收到:", err)
+
     def test_accepted_word_outside_status_section_ignored(self):
         """KN-1 回歸:狀態節以外出現「已驗收」不得讓 CHG 被略過。"""
         self.repo.commit("CHG-20261022-02 新增", {

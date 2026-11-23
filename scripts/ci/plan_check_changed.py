@@ -31,6 +31,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from gitutil import GitError, git_text as git, parse_range
+
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -42,22 +44,6 @@ ACCEPTED_RE = re.compile(r"已驗收|accepted", re.IGNORECASE)
 PLAN_PENDING = "計畫待補"
 DEFAULT_RUNNER = (Path(__file__).resolve().parents[2] / ".ai-sdlc" / "skills"
                   / "ai-sdlc-autopilot" / "scripts" / "autopilot_runner.py")
-
-
-class GitError(Exception):
-    """git 指令執行失敗。"""
-
-
-def git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", "replace").strip()
-        raise GitError("git {} 失敗:{}".format(" ".join(args), err))
-    return proc.stdout.decode("utf-8", "replace")
 
 
 def status_section(text: str) -> str:
@@ -83,15 +69,6 @@ def classify(text: str) -> str:
     if PLAN_PENDING in section:
         return "plan-pending"
     return "check"
-
-
-def parse_range(text: str):
-    if ".." not in text or "..." in text:
-        return None
-    base, head = text.split("..", 1)
-    if not base or not head:
-        return None
-    return base, head
 
 
 def changed_chg_files(repo: Path, base: str, head: str) -> list:

@@ -76,3 +76,9 @@
   場景: 程式變更不自動 merge
     假設 PR 自評低風險且改到 media.py,CI 全綠
     那麼 主 agent 停下等使用者核准,不自動 merge
+
+  場景: CI 腳本拒絕以 - 開頭的範圍
+    假設 commit_check、plan_check_changed、secret_scan 共用 scripts/ci/gitutil.py 的 parse_range
+    當 以 --range=-x..HEAD 或 --range HEAD..-x 執行任一支腳本
+    那麼 腳本不呼叫 git 處理該範圍,stderr 印出「參數錯誤:--range 必須是 <base>..<head> 格式」
+    而且 退出碼為 2

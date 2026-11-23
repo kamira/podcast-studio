@@ -108,6 +108,7 @@ from pathlib import Path
 import breezy_worker
 import names
 import safe_fs
+import value_checks
 
 log = logging.getLogger("project")
 
@@ -294,15 +295,11 @@ def _check_annotations(text: str, anns, where: str) -> list[dict]:
 
 # ---------- 連音、清晰度、字詞清晰度、語調(CHG-20261029-01 T1) ----------
 
-def _is_int(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
 def check_percent(v, where: str):
     """拉桿百分比:null 或 0~100 的整數(連音、清晰度、圓弧、字詞清晰度值)。"""
     if v is None:
         return None
-    if not _is_int(v) or not 0 <= v <= 100:
+    if not value_checks.is_int(v) or not 0 <= v <= 100:
         raise ProjectError(f"{where}必須是 0 到 100 的整數(百分比)")
     return v
 
@@ -319,7 +316,7 @@ def _check_word_clarity(text: str, items, where: str) -> list[dict]:
         if not isinstance(it, dict) or set(it) != {"start", "end", "value"}:
             raise ProjectError(f"{where}.word_clarity 每項必須恰為 start、end、value 三個欄位")
         a, b = it["start"], it["end"]
-        if not _is_int(a) or not _is_int(b) or not 0 <= a < b <= len(text):
+        if not value_checks.is_int(a) or not value_checks.is_int(b) or not 0 <= a < b <= len(text):
             raise ProjectError(f"{where}.word_clarity 的範圍必須在句子之內且起點小於終點")
         if not all(_is_hanzi(ch) for ch in text[a:b]):
             raise ProjectError(f"{where}.word_clarity 只能設定在漢字上(不可含標點或其他字元)")
@@ -474,9 +471,9 @@ def _check_fusions(text: str, items, annotations, word_clarity, where: str) -> l
             raise ProjectError(f"{where}.fusions 每項必須恰為 index、length、zhuyin、source 四個欄位"
                                "(另可選填 display)")
         i, n = f["index"], f["length"]
-        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX:
+        if not value_checks.is_int(n) or not FUSION_MIN <= n <= FUSION_MAX:
             raise ProjectError(f"{where}.fusions 的字數必須是 {FUSION_MIN} 到 {FUSION_MAX}")
-        if not _is_int(i) or not 0 <= i or i + n > len(text):
+        if not value_checks.is_int(i) or not 0 <= i or i + n > len(text):
             raise ProjectError(f"{where}.fusions 的位置超出句子範圍")
         if not all(_is_hanzi(c) for c in text[i:i + n]):
             raise ProjectError(f"{where}.fusions 只能合併相鄰的漢字")
@@ -524,7 +521,7 @@ def _check_fusion_off(text: str, items, where: str) -> list[dict]:
         if not isinstance(d, dict) or set(d) != {"index", "length"}:
             raise ProjectError(f"{where}.fusion_off 每項必須恰為 index、length 兩個欄位")
         i, n = d["index"], d["length"]
-        if not _is_int(n) or not FUSION_MIN <= n <= FUSION_MAX or not _is_int(i) or i < 0 or i + n > len(text):
+        if not value_checks.is_int(n) or not FUSION_MIN <= n <= FUSION_MAX or not value_checks.is_int(i) or i < 0 or i + n > len(text):
             raise ProjectError(f"{where}.fusion_off 的範圍超出句子")
         if {"index": i, "length": n} not in out:
             out.append({"index": i, "length": n})
