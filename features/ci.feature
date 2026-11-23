@@ -82,3 +82,10 @@
     當 以 --range=-x..HEAD 或 --range HEAD..-x 執行任一支腳本
     那麼 腳本不呼叫 git 處理該範圍,stderr 印出「參數錯誤:--range 必須是 <base>..<head> 格式」
     而且 退出碼為 2
+
+  # CHG-20261123-01 T3:Rust 三平台矩陣 rust-platform 與彙總 job rust(代決 8、9、10)
+  場景: Rust 三平台任一失敗讓 rust 檢查變紅
+    假設 PR 的 Rust 程式在 ubuntu、macos、windows 其中一個平台的 fmt、clippy、test、release 建置、比對工具示範或 cargo-deny 失敗
+    當 CI 執行 rust-platform 矩陣與彙總 job rust
+    那麼 rust 檢查失敗
+    而且 main ruleset 把 rust 列為必要檢查,PR 不能 merge
