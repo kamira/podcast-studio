@@ -7,7 +7,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use parity::py::{adapter_path, resolve_python};
-use parity::{Case, Fixture, Outcome, ProtocolError, encode_request, match_responses, parse_response};
+use parity::{
+    Case, Fixture, Outcome, ProtocolError, encode_request, match_responses, parse_response,
+};
 use serde_json::{Value, json};
 
 fn case(id: &str, input: Value) -> Case {
@@ -23,7 +25,8 @@ fn parses_three_outcomes() {
     assert_eq!(ok.id, "a");
     assert_eq!(ok.outcome, Outcome::Ok(json!(3)));
 
-    let reject = parse_response(r#"{"id": "b", "outcome": "reject", "code": "not_digits"}"#).unwrap();
+    let reject =
+        parse_response(r#"{"id": "b", "outcome": "reject", "code": "not_digits"}"#).unwrap();
     assert_eq!(
         reject.outcome,
         Outcome::Reject {
@@ -57,8 +60,10 @@ fn accepts_crlf_line_ending() {
 #[test]
 fn message_text_is_not_compared() {
     // 人看的訊息文字不比對:只差 message 的兩行解析成相同結果。
-    let a = parse_response(r#"{"id": "a", "outcome": "reject", "code": "x", "message": "甲"}"#).unwrap();
-    let b = parse_response(r#"{"id": "a", "outcome": "reject", "code": "x", "message": "乙"}"#).unwrap();
+    let a = parse_response(r#"{"id": "a", "outcome": "reject", "code": "x", "message": "甲"}"#)
+        .unwrap();
+    let b = parse_response(r#"{"id": "a", "outcome": "reject", "code": "x", "message": "乙"}"#)
+        .unwrap();
     assert_eq!(a, b);
 }
 
@@ -123,7 +128,10 @@ fn match_responses_rejects_wrong_count() {
     let cases = vec![case("a", json!(1)), case("b", json!(2))];
     let responses = vec![parse_response(r#"{"id": "a", "outcome": "ok", "value": 1}"#).unwrap()];
     let err = match_responses(&cases, responses).unwrap_err();
-    assert!(matches!(err, ProtocolError::CountMismatch { .. }), "{err:?}");
+    assert!(
+        matches!(err, ProtocolError::CountMismatch { .. }),
+        "{err:?}"
+    );
 }
 
 /// L2:真的 Python 轉接器輸出的每一行,Rust 解析器都接受,且 id 依序對應。

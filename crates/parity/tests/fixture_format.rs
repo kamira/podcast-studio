@@ -118,15 +118,25 @@ fn run_parity(unit: &str, fixture: &Path) -> std::process::Output {
 fn assert_exit2_without_conclusion(out: &std::process::Output) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "stdout={stdout} stderr={stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={stdout} stderr={stderr}"
+    );
     assert!(!stdout.contains("結論"), "格式錯誤不得輸出結論:{stdout}");
-    assert!(stderr.contains("fixture"), "stderr 應說明 fixture 錯誤:{stderr}");
+    assert!(
+        stderr.contains("fixture"),
+        "stderr 應說明 fixture 錯誤:{stderr}"
+    );
 }
 
 #[test]
 fn cli_exit2_on_bad_fixtures() {
     let cases = [
-        ("missing_unit.json", r#"{"cases": [{"id": "a", "input": "1"}]}"#),
+        (
+            "missing_unit.json",
+            r#"{"cases": [{"id": "a", "input": "1"}]}"#,
+        ),
         ("missing_cases.json", r#"{"unit": "demo.parse_count"}"#),
         (
             "dup_id.json",

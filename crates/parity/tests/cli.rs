@@ -75,8 +75,14 @@ fn drift_demo_exits_1_and_lists_edge_1000() {
         .find(|l| l.contains("edge_1000"))
         .unwrap_or_else(|| panic!("報告須列出 edge_1000:{stdout}"));
     // 兩邊結果摘要
-    assert!(line.contains("Python") && line.contains("ok 1000"), "{line}");
-    assert!(line.contains("Rust") && line.contains("reject out_of_range"), "{line}");
+    assert!(
+        line.contains("Python") && line.contains("ok 1000"),
+        "{line}"
+    );
+    assert!(
+        line.contains("Rust") && line.contains("reject out_of_range"),
+        "{line}"
+    );
 }
 
 #[test]
@@ -101,7 +107,11 @@ fn json_format_has_same_content() {
 fn assert_adapter_failure(out: &Output) {
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "stdout={stdout} stderr={stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={stdout} stderr={stderr}"
+    );
     assert!(!stdout.contains("結論"), "轉接器失敗不得輸出結論:{stdout}");
     assert!(stderr.contains("Python"), "stderr 須說明原因:{stderr}");
 }
@@ -116,7 +126,11 @@ fn missing_interpreter_exits_2() {
         &["--python", missing.to_str().unwrap()],
     );
     assert_adapter_failure(&out);
-    assert!(text(&out.stderr).contains("無法啟動"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("無法啟動"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
@@ -161,7 +175,10 @@ fn sleep_unit_absent_without_env() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = text(&out.stdout);
     assert!(stdout.lines().any(|l| l == "demo.parse_count"), "{stdout}");
-    assert!(stdout.lines().any(|l| l == "demo.parse_count_drift"), "{stdout}");
+    assert!(
+        stdout.lines().any(|l| l == "demo.parse_count_drift"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("demo.sleep"), "{stdout}");
 }
 
@@ -176,10 +193,41 @@ fn bad_arguments_exit_2() {
         vec!["run", "--unit", "demo.parse_count"],
         vec!["run", "--fixture", f],
         vec!["run", "--unit", "demo.nope", "--fixture", f],
-        vec!["run", "--unit", "demo.parse_count", "--fixture", f, "--format", "xml"],
-        vec!["run", "--unit", "demo.parse_count", "--fixture", f, "--timeout", "0"],
-        vec!["run", "--unit", "demo.parse_count", "--fixture", f, "--timeout", "abc"],
-        vec!["run", "--unit", "demo.parse_count", "--fixture", f, "--bogus"],
+        vec![
+            "run",
+            "--unit",
+            "demo.parse_count",
+            "--fixture",
+            f,
+            "--format",
+            "xml",
+        ],
+        vec![
+            "run",
+            "--unit",
+            "demo.parse_count",
+            "--fixture",
+            f,
+            "--timeout",
+            "0",
+        ],
+        vec![
+            "run",
+            "--unit",
+            "demo.parse_count",
+            "--fixture",
+            f,
+            "--timeout",
+            "abc",
+        ],
+        vec![
+            "run",
+            "--unit",
+            "demo.parse_count",
+            "--fixture",
+            f,
+            "--bogus",
+        ],
         vec!["run", "--unit"],
         vec!["list", "extra"],
     ];
@@ -187,7 +235,11 @@ fn bad_arguments_exit_2() {
         let out = parity(&args).output().unwrap();
         let stdout = text(&out.stdout);
         let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(2), "{args:?} stdout={stdout} stderr={stderr}");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} stdout={stdout} stderr={stderr}"
+        );
         assert!(!stdout.contains("結論"), "{args:?}:{stdout}");
         assert!(!stderr.trim().is_empty(), "{args:?} 須在 stderr 說明");
     }
