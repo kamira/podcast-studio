@@ -2,9 +2,9 @@
 
 - 專案:podcast-studio(本機 AI 模型串接:Podcast 工作室網頁 + local-models MCP 伺服器)
 - 分支(Branch):main
-- 版本:v1.17(變更歷程見 §11)
+- 版本:v1.18(變更歷程見 §11)
 - 日期:2026-10-22
-- 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24;v1.5 修改 FR-21、FR-25、FR-31、FR-34 並新增 ADP-12,待 CHG-20261022-01/04 修訂 2 確認閘)
+- 狀態:草稿(v1.0 為導入反推;v1.1 新增 FR-16~23、v1.2 新增 FR-24~30、v1.3 新增 FR-31~34 並修改 FR-16/24;v1.5 修改 FR-21、FR-25、FR-31、FR-34 並新增 ADP-12,待 CHG-20261022-01/04 修訂 2 確認閘;v1.18 架構調整——跨平台、Rust 原生 GUI 應用程式、逐步替換——CHG-20261122-02 確認閘 2026-11-23 由使用者覆核(含修改),待草案 PR 審議與合入;草案 PR 合入 main 之前,v1.18 新增與改寫的條文不生效,以 v1.17 為準)
 - 帳本落點:`docs/`(宣告,非推論。導入時 `docs/` 不存在,無 site generator / 生成產物佔用)
 - 導入方式:adopt(存量導入,程式已存在、從未治理)
 - Governance-baseline: 7da165b6048897abb8acac4bba69db9677827471
@@ -31,6 +31,8 @@
 
 成功定義:〔未知〕使用者尚未給出可量測的成功標準(見 §6 待確認 Q3)。
 
+〔使用者決定,2026-11-22,CHG-20261122-02〕**架構調整(v1.18)**:產品改為**跨平台(macOS、Windows、Linux)、高效率**的 **Rust 原生 GUI 桌面應用程式**,前後端分離不是硬性規定。以**逐步替換**遷移:先建 Rust 核心,**一個 Python 模組一筆 CHG**(使用者 2026-11-23 確認閘原話「按照1模組1CHG」),每筆把一個模組(或一個不可再拆的功能單元)的功能移到 Rust 並以並行比對證明等價;過渡期 Python 網頁版照常運作、與 Rust 應用程式並存,Python 檔案到最後的退役 CHG 才一起刪除;每一步可獨立驗收、可回滾。上述 1~5 步的功能目標與「全程離線」不變。決策與遷移路線圖見 CHG-20261122-02。
+
 ## 2. 範圍
 
 ### 納入
@@ -46,6 +48,19 @@
 - 〔推論,來源:`PODCAST_STUDIO.md §10.5 #7`〕MCP `write_code` 工具(已移除,由 `reason` 兼任)
 - 〔推論,來源:`PODCAST_STUDIO.md §10.5 #6`〕Claude 桌面 app 聊天的 MCP 註冊
 - 〔觀察〕`tools/BreezyVoice/`(第三方 repo,不納入 git,由腳本重建)、`outputs/`(產出物)
+
+### 遷移範圍(v1.18,CHG-20261122-02;確認閘 2026-11-23 已由使用者逐條覆核)
+
+> 上列「納入」是現況盤點(其中 Gradio `podcast_studio.py` 一行自 v1.6 起已不符現況,網頁實為 `studio_server.py` + `static/`;本筆不改該行,只記錄)。本節定義 Rust 遷移的範圍。
+
+| 對象 | 是否遷移到 Rust | 理由 | 等級 |
+|------|----------------|------|------|
+| 網頁 `studio_server.py` + 前端 `static/`(約 7.6k 行) | **是**,改寫為 Rust 原生 GUI;不移植前端程式碼 | 使用者選「純 Rust 原生 GUI」(捨棄現有前端) | 使用者決定 |
+| 產品核心模組(`project`、`settings`、`names`、`value_checks`、`safe_fs`、`heavy_lock`、`timeline`、`media`、`tts_service`、`executor`、`nodes`、`fusion`、`taiwan_ai`、`mcp_registry`) | **是**,依路線圖**一個模組一筆 CHG**;Python 檔案到退役 CHG 才一起刪 | 平台綁定(`fcntl`、`pwd`、`dir_fd`/`O_NOFOLLOW`)集中在這些模組;Windows 原生無法 import | 使用者決定(範圍;粒度為確認閘 2026-11-23「按照1模組1CHG」,並選「照常並存,最後一起刪」) |
+| `breezy_worker.py`(在 BreezyVoice venv 內執行,含後製 `shape`) | **否**,維持 Python,作為外部程序;介面(JSON 協定)不變 | BreezyVoice 是 PyTorch Python,只能當外部程序呼叫;後製依賴 venv 內 numpy / scipy / librosa | 代決,確認閘 2026-11-23 使用者確認 |
+| MCP 伺服器 `local_models_mcp.py`(FR-8~13) | **是**(路線圖後段的 `local_models_mcp`、`mcp_registry` 各一筆 CHG,Rust stdio 伺服器,工具契約不變);遷移前 Python 版照常提供 | 與應用程式共用設定資料庫、重型工作鎖與核心;Python 版經 `heavy_lock`(`fcntl`)與 `settings`(`fcntl`)在 Windows 無法執行 | 使用者決定(確認閘 2026-11-23「MCP改為Rust」) |
+| 治理 CI 與審議工具(`scripts/ci/`、`scripts/local_review.py`、`scripts/review_decision.py`、`scripts/check.sh`、`scripts/deploy_local.sh`)與 vendored `.ai-sdlc/` | **否**,本路線圖不遷移,維持 Python / bash;治理工具的調整待 Rust 版本完成、實際跑過、審查沒問題並合進 main 之後,再另開 CHG 進行 | 不是產品;只在 GitHub Actions 的 ubuntu 與使用者本機 macOS 執行;vendored 腳本不得改(CHG-20261022-03 全域約束);遷移不帶來使用者面效益 | 使用者決定(確認閘 2026-11-23「治理工具不遷移」「治理工具的調整待Rust版本完成並跑過後審查沒問題合到main branch再進行調整」) |
+| `setup_breezyvoice.sh` 與 `patches/breezyvoice-mac/` | **否**(不改寫成 Rust);另需三平台的重建方式(FR-15 修改,見 §4.7) | 建置期工具,不是執行期 | 代決,確認閘 2026-11-23 使用者確認 |
 
 ## 3. 利害關係人
 
@@ -165,6 +180,25 @@
     - 「可以放在之前提到的對話機制調整文案上」
     - 「開 CHG 寫進 §4.6」
 
+### 4.7 v1.18 架構調整對既有需求的影響(2026-11-22,CHG-20261122-02;代決,確認閘 2026-11-23 使用者確認)
+
+> 原則:**需求語意保留、操作方式改寫,不刪需求**。下表只列描述中綁定「網頁 / HTTP / macOS」的 FR;未列者(FR-2、3、5~9、11~13、18、20、23、25~30、33、36~40)語意與平台無關,不改。改寫只約束 Rust 應用程式;過渡期 Python 網頁版仍依原文。各條的 Rust 版驗收條件由路線圖對應模組的 CHG 寫入 §7,不在本筆定案。
+
+| FR | 原描述中綁定之處 | 影響 | 處置(Rust 應用程式適用) |
+|----|------------------|------|---------------------------|
+| FR-1 | 「推理模型寫初稿 → Breeze2 潤飾 → OpenCC `s2twp`」 | OpenCC 在 Rust 需另找實作 | 語意不變;簡轉繁仍以 OpenCC `s2twp` 規則為準(Rust 綁定或外部程序由 `taiwan_ai` 模組 CHG 決定),輸出須與 Python 版逐字一致 |
+| FR-4、FR-10 | 「FLUX 1360×768」(`mflux`,只在 Apple Silicon) | Windows / Linux 沒有 MLX | 語意不變;macOS 續用 mflux,Windows / Linux 改用跨平台本機生圖後端(CHG-20261122-02 代決推薦 stable-diffusion.cpp,同為 FLUX.1-schnell 模型);兩後端畫面不要求逐像素相同,只要求尺寸與流程相同 |
+| FR-4 | 底部疊中文標題(STHeiti 字型路徑寫死) | Windows / Linux 沒有 STHeiti | 語意不變;字型改為隨附開源繁中字型或使用者選擇(代決,見 §6 Q11) |
+| FR-15 | 「在 macOS ARM 重建 BreezyVoice」 | Windows / Linux 需各自重建 | 修改為「在三平台各自重建 BreezyVoice」;可行性〔未知〕,由 `tts_service` 模組 CHG 實測(§6 Q10) |
+| FR-16、FR-17 | 「網頁以節點畫布編排」「開啟網頁即載入預設範本」 | 沒有網頁 | 「網頁」改為「應用程式」;節點拖拉、型別檢查、拓撲逐一執行、狀態與預覽、預設範本不變 |
+| FR-19 | 檔案拖到畫布;「上傳檔存 `outputs/uploads/`」;超過 200 MB 回 413 | 沒有 HTTP 上傳 | 由作業系統檔案管理員拖進視窗;白名單、200 MB 上限、檔名由程式重新產生、只寫 `outputs/uploads/` 不變;HTTP 狀態碼改為等義的錯誤訊息 |
+| FR-21 | 「在網頁設定頁管理」 | 沒有網頁 | 改為「在應用程式設定頁管理」;`config/studio.db`(schema 3)仍是唯一來源,與 MCP 共用,MCP 每次呼叫重讀 |
+| FR-22 | 經 `~/.local/bin/claude`、`~/.local/bin/codex` 官方 CLI | 三平台 CLI 安裝位置不同 | 語意不變(只透過官方 CLI、不直接改設定檔、逐次確認);CLI 位置改為依平台尋找,由 `mcp_registry` 模組 CHG 決定 |
+| FR-24 | 「預覽視窗(瀏覽器內即時播放…)」 | 沒有瀏覽器 | 改為「應用程式內即時播放畫面 + 語音 + 字幕,不必先渲染」;其餘不變 |
+| FR-31、FR-34、FR-35 | 「網頁不使用分頁列」、首頁卡片、右上角設定圖示、底部連結 | 沒有網頁 | 「網頁」改為「應用程式視窗」;卡片只有圖示與名稱、無分頁列、不放步驟說明或「本機執行」字樣等規則不變 |
+| FR-32 | 「精靈讀 `GET /api/workflows/default` 的頂層 `steps`」 | 沒有 HTTP API | 改為「精靈讀 `workflows/default.json` 的頂層 `steps`」;語意不變 |
+| FR-14 | (已棄用) | — | 不移植 |
+
 ## 5. 非功能需求
 
 | 類別 | 要求 | 來源等級 |
@@ -183,6 +217,8 @@
 | 全域設定(v1.1) | 寫 repo 外設定(MCP 註冊)必須使用者在網頁上逐次按下確認,且只透過官方 CLI | 新需求 FR-22 |
 | 開發流程(v1.4) | merge 前 CI 全綠:`document`、`chg`、`program`、`review` 四項 check 全部通過才能 merge 進 main;由 main ruleset 強制 | CHG-20261022-03 / DIR-2 |
 
+> v1.18 架構調整新增與改寫的非功能需求見 §6.1(草案 PR 合入 main 後生效)。
+
 ## 6. 限制與假設
 
 - 限制:
@@ -198,10 +234,41 @@
   - **導入期間使用者提出的新需求**(不屬於現況盤點,**不在導入 commit 內實作或定案**,導入後以 CHG 進 requirement-analysis):網頁能配置模型(與 MCP 共用)、網頁支援 drag and drop。
   - **Q3** 驗收標準的量化門檻(例:2 分鐘稿端到端幾分鐘內產出、字幕時間誤差上限)。建議:先以「端到端跑完且產出可播放 MP4 + SRT」為門檻,效能數字等量測後再訂。
   - **Q4** `PODCAST_STUDIO.md` 與本帳本的關係:保留為人寫的設計文件(本帳本引用它),或日後併入 `docs/structure/`?建議:保留不動,本帳本只引用。
+- 限制與假設(v1.18,CHG-20261122-02):
+  - 〔觀察〕現行 Python 版無法在 Windows 原生執行:`heavy_lock`、`project`、`settings` 直接 import `fcntl`,`mcp_registry` 直接 import `pwd`,`studio_server`、`taiwan_ai`、`media`、`local_models_mcp` 經由它們間接失敗;`safe_fs` 依賴 `dir_fd`、`O_NOFOLLOW`、`O_DIRECTORY`(Windows 沒有)。2026-11-22 Windows 上 `scripts/check.sh` 收集階段 22 個錯誤(派發者回報;起草者未重跑)
+  - 〔觀察〕mflux 依賴 Apple MLX,只在 Apple Silicon 執行;BreezyVoice 是 PyTorch Python(`tools/BreezyVoice/.venv`),只能以外部程序呼叫;Ollama 跨平台;ffmpeg 目前取自 Python 套件 `imageio_ffmpeg` 附帶的執行檔(`media.py`、`tts_service.py`),不是系統 ffmpeg
+  - 〔推論〕GitHub-hosted runner 沒有 GPU、Ollama 與模型檔,CI 只能以替身測試外部引擎;真實引擎的三平台驗證只能在使用者實機上做
+- 待確認(v1.18,需使用者回答;不阻擋確認閘,但對應的路線圖 CHG 開工前要有答案):
+  - **Q5** 「高效率」指的是哪些面向,§6.1 效能(待量化)五項指標的目標數字各是多少?(建議:先由路線圖「GUI 框架定案與應用程式殼」那筆 CHG 量出 Python 版基準值,再訂目標)
+  - **Q6** 三平台操作驗收用的實機:Windows、Linux 各有哪台機器(CPU、GPU 廠牌與記憶體)?沒有實機的平台是否接受只有 CI 證據?
+  - **Q7** 支援範圍:macOS 是否含 Intel;Windows 版本;Linux 發行版與視窗系統(X11 / Wayland);是否支援 ARM 版 Windows / Linux
+  - **Q8** 發佈方式:只需要從原始碼 `cargo build`,或需要安裝檔(dmg / msi / AppImage 等)與程式碼簽章?
+  - **Q9** 資料位置:沿用 repo 目錄下的 `projects/`、`config/`、`outputs/`、`workflows/`,或改到各平台的使用者資料目錄(改的話以複製方式移轉、不搬移原檔)?
+  - **Q10** Windows / Linux 上的 BreezyVoice:接受只用 CPU(預期很慢)嗎?若重建不可行,這兩個平台的語音功能如何處置?
+  - **Q11** 封面標題字型:三平台統一隨附開源繁中字型(macOS 封面外觀會與現在不同),或各平台用系統字型、macOS 續用 STHeiti?
+  - **Q12** Python 網頁版的退役時點:Rust 應用程式功能涵蓋完畢後刪除,或長期保留為備援?
+
+### 6.1 非功能需求:v1.18 新增與改寫(CHG-20261122-02;草案 PR 合入 main 後生效)
+
+> 本節屬於 §5 非功能需求,放在 §6 之下是因為審議工具(`scripts/local_review.py`)送給意見席的 §5 參考資料上限 3000 字,§5 本體須維持在上限內。
+
+> 上表的「安全」「可維護性」「相容性」「離線前端」四列描述現況與過渡期 Python 網頁版,繼續適用於尚未遷移的部分;Rust 應用程式改依下表。
+
+| 類別 | 要求 | 來源等級 |
+|------|------|----------|
+| 跨平台 | 支援 **macOS、Windows、Linux** 三平台;三平台都列為支援平台,並在 CI 矩陣測試(GitHub-hosted `macos-latest`、`windows-latest`、`ubuntu-latest`)。各平台的最低版本、CPU 架構(macOS Intel、Windows / Linux ARM 是否支援)與 Linux 發行版 / 視窗系統〔未知〕(§6 Q7) | 使用者決定(2026-11-22,選「macOS + Windows + Linux (Recommended)」) |
+| 應用程式形態 | Rust **原生 GUI 桌面應用程式**(不用 WebView、不開本機網頁伺服器);前後端分離不是硬性規定,可為單一應用程式 | 使用者決定(2026-11-22,選「純 Rust 原生 GUI」;原話「不必把前後端分離為硬性規定,可為應用程式」) |
+| 效能(待量化) | 「高效率」以下列指標量測,**目標數字〔未知〕待使用者給定**(§6 Q5),在數字給定前只量測、不判通過與否:(1) 冷啟動到首頁可操作的時間;(2) 閒置常駐記憶體(不含 Ollama、BreezyVoice、生圖等外部引擎);(3) 時間軸拖拉片段或關鍵點時,輸入到畫面更新的延遲與幀率(以 2000 片段專案量測);(4) 開啟專案(2000 片段、含波形)到可編輯的時間;(5) 匯出時除 ffmpeg 編碼以外的額外耗時。基準值由路線圖「GUI 框架定案與應用程式殼」那筆 CHG 以現行 Python 網頁版在同一台機器量測 | 使用者原話「架構調整為跨平台 高效率」;指標為代決 |
+| 效能(界線) | 推理、語音合成、生圖的耗時由外部引擎(Ollama、BreezyVoice、mflux / 生圖後端)決定,改寫 Rust **不承諾**縮短 | 〔推論〕外部引擎不在改寫範圍 |
+| 安全(應用程式) | Rust 應用程式**不開任何監聽埠**(取代「網頁只監聽 `127.0.0.1`」);對外連線只允許 Ollama 的 loopback 位址(預設 `127.0.0.1:11434`);MCP 只走 stdio;路徑防護維持「自受信根目錄逐層開啟、不跟隨符號連結、最後一層須為一般檔」的語意,Windows 以對應機制實現(另含 Windows 保留名稱與 `\`、`:` 的名稱檢查) | 代決(CHG-20261122-02 安全影響) |
+| 離線(建置期) | Rust 相依套件於建置期下載(`Cargo.lock` 入 git、版本釘死),執行期不下載任何東西;字型等資源隨程式附帶 | 比照 `setup_breezyvoice.sh` 的建置期例外;代決 |
+| 資料相容 | 既有 `projects/`(專案檔 schema 2 與 `history/`)、`config/studio.db`(schema 3)、`workflows/` 必須可由 Rust 應用程式直接讀寫,**不得要求使用者重建或手動轉換資料**;過渡期 Python 版與 Rust 版讀寫同一份資料時,彼此的檔案鎖互相排斥 | 代決 |
+| 重型工作互斥(v1.18) | v1.1 的跨行程重型工作鎖擴及 Rust 應用程式:Python 網頁版、Python MCP、Rust 應用程式、Rust MCP 共用同一把鎖(`outputs/.heavy.lock`) | 代決 |
 
 ## 7. 驗收條件
 
 > 導入**不是**驗收(治理基準點第 6 條)。以下條件**全部未驗證**,狀態以 `docs/acceptance/` 的 ACC 為準。
+> v1.18(2026-11-22,CHG-20261122-02):本節既有條件描述的是 Python 網頁版(`uv run --script studio_server.py`、HTTP 狀態碼、`Host` / `Origin` / `X-Studio-Token`),過渡期繼續適用於 Python 版,本筆不改。Rust 應用程式的對應條件依 §4.7 的「保留語意、改寫操作方式」,由路線圖各模組 CHG 逐條寫入本節(例:HTTP 403 / 413 改為「應用程式沒有監聽埠」與等義的拒絕訊息;`uv run --script studio_server.py` 改為 Rust 應用程式的啟動方式),並在三平台各驗一次;未寫入前不得以 Python 版的驗收結果代表 Rust 版。
 > v1.6(2026-10-26,CHG-20261022-01 結構文件更新):網頁由 Gradio 四分頁改為 `studio_server.py`(首頁右上角 ⚙ → 設定 › 進階流程的節點畫布),驗收條件改寫為新介面;FR-1~7 的功能要求不變。
 
 - [ ] FR-1/2/17/20:`uv run --script studio_server.py` 後從首頁 ⚙ 進入「設定 › 進階流程」,載入預設範本,填主題與標題按「執行」;2 分鐘稿字數落在 500 ± 20%,全文無簡體字(OpenCC 反向檢查);在文字節點上編輯輸出後該節點標為釘住,重跑時不重新產生、下游使用編輯值
@@ -246,7 +313,16 @@
 - **禁止替基準點以前補造 CHG**:基準點前沒有治理,這件事本身就是記錄。
 - **§9 待補項不得被「順手」修掉**:要修就開 CHG,並在 CHG 引用 ADP 編號。
 - **語言**:使用者面文字、程式註解、文件用繁體中文與台灣用語(沿用 `taiwan_ai.TW`)。
-- **依賴**:維持 PEP 723 單檔 script 形式(`uv run --script`),新依賴寫進檔頭 `dependencies`。
+- **技術約束(v1.18,CHG-20261122-02;草案 PR 合入 main 後生效)**:
+  - **新程式以 Rust 撰寫**;介面為 Rust 原生 GUI 桌面應用程式(框架依 CHG-20261122-02 代決,以路線圖「GUI 框架定案與應用程式殼」CHG 的原型實測定案);前後端分離不是硬性規定。
+  - 三平台(macOS、Windows、Linux)都要能建置與執行;平台差異集中在少數模組,以條件編譯或抽象層處理,不在業務邏輯中散布平台判斷。
+  - Rust 工具鏈以 `rust-toolchain.toml` 釘版本,`Cargo.lock` 入 git;新增 crate 須在引入它的那筆 CHG 列出用途與授權。
+  - 外部引擎(Ollama、BreezyVoice、mflux、跨平台生圖後端、ffmpeg)一律以**外部程序或 loopback HTTP(只限 Ollama)**呼叫,不以 FFI 嵌入;BreezyVoice 永遠是外部程序。
+  - **不得要求使用者重建資料**:Rust 版讀寫既有專案檔、設定資料庫與工作流程 JSON 的格式與 schema 版本,不另立新格式;schema 升級沿用「舊版自動升級、未知版本拒絕」規則,並由引入升級的那筆 CHG 定案。
+  - **遷移粒度**:一個 Python 模組(或一個不可再拆的功能單元)一筆 CHG;每筆以並行比對證明 Rust 與 Python 行為等價,Python 網頁版照常運作,Python 產品程式到退役 CHG 才一起刪除(`breezy_worker.py` 不移植)。
+  - **治理工具**:治理 CI 與審議工具、vendored `.ai-sdlc/` 不在遷移範圍;治理工具的調整待 Rust 版本完成、實際跑過、審查沒問題並合進 main 之後,再另開 CHG 進行。
+  - **過渡期**:尚未遷移的 Python 模組維持原規則(下一條 PEP 723、`busy()` 等);Python 版的缺陷修正與小改仍可照常開 CHG,但不再為 Python 網頁版新增功能,除非使用者明示。
+- **依賴(Python,過渡期)**:尚未遷移的 Python 模組維持 PEP 723 單檔 script 形式(`uv run --script`),新依賴寫進檔頭 `dependencies`;本條只適用於尚未遷移的模組、`breezy_worker.py` 與治理 CI 腳本(v1.18 起;v1.17 原文:「維持 PEP 723 單檔 script 形式(`uv run --script`),新依賴寫進檔頭 `dependencies`。」)。
 - **MCP 工具**:工具內一律用 `busy()`(鎖 + stdout 導向 stderr);新增重型工具必須進同一把鎖。
 - **不送資料出本機**:新增任何網路呼叫屬於高風險變更(違反 §5 隱私)。
 - **產出物**寫到 `outputs/`,回傳絕對路徑;`outputs/` 不入 git。
@@ -315,3 +391,4 @@
 | v1.15 | 2026-11-01 | §4.6「AI 寫稿可用對話方式調整草稿內容」條目底下補記語音自然度三個方向(口語化腳本、拉長切段或保留上下文、換聊天風格參考音檔)並照錄使用者原話;歸為可選功能,不給 FR 編號、不列優先級、不列入 §7 與 §9 | 使用者 2026-11-01 指示;CHG-20261101-01 T1 |
 | v1.16 | 2026-11-01 | §8 CI/CD 約定:本機審議一項改為 risk、consistency 常設由 Opus 子代理擔任(請求檔 / 答案檔交接、資料外送例外比照 DIR-6 第 10 條),子代理以 `.claude/agents/review-seat-opus.md` 派出(只有 Write 工具、資料全部內嵌);預設參數不再需要 `--codex-seats risk,security,compliance`;Codex 額度用盡代答範圍縮為 security、compliance,末句「至使用者明示恢復 Codex 為止」校正為「Codex 恢復作答後回到 Codex 擔任」(對齊第 12 條條件式) | 使用者 2026-11-01 指示;CHG-20261101-02;DIR-1 第 13 條 |
 | v1.17 | 2026-11-01 | §8 本機審議一項:Opus 席每份請求 prompt 上限 20000 字,超過時分組(CHG 依章節、diff 依直系呼叫 / 引用參數 / 共用參數的函式;每席 CHG、diff 各至多 2 組,超出不送審)逐份交接 | 使用者 2026-11-01 指示;CHG-20261101-02 修訂 1;DIR-1 第 13 條 |
+| v1.18 | 2026-11-22 | 架構調整(草案 PR 合入 main 後生效):§1 新增架構調整目標;§2 新增「遷移範圍」(MCP 伺服器遷移到 Rust、治理 CI 腳本不遷移,均經確認閘使用者決定);§4 新增 4.7「v1.18 架構調整對既有需求的影響」(FR-1、4、10、15、16、17、19、21、22、24、31、32、34、35 保留語意、改寫操作方式,不刪需求);§5 加一行指向 §6.1;§6 新增 6.1「非功能需求:v1.18 新增與改寫」(跨平台三平台、原生 GUI 應用程式、效能指標待量化、應用程式不開監聽埠、建置期離線例外、資料相容、重型工作鎖擴及 Rust);§6 新增 v1.18 限制與待確認 Q5~Q12;§7 註明既有條件適用 Python 版、Rust 版條件由各模組 CHG 寫入;§8「依賴」改為只適用尚未遷移的 Python 模組,新增「技術約束」(新程式以 Rust 撰寫、原生 GUI、前後端分離非硬性規定、一個模組一筆 CHG、治理工具調整待 Rust 版合入 main 後另開 CHG);§9 不改。2026-11-23 確認閘修改:遷移粒度改為一個 Python 模組一筆 CHG、MCP 改為 Rust、治理工具不遷移 | 使用者 2026-11-22 指示與選項(原話見 CHG-20261122-02「## 動機」);CHG-20261122-02 |
