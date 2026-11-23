@@ -1,1 +1,11 @@
+# Rust virtual workspace(CHG-20261123-01 代決 2、3)。
+# 成員放 crates/<名稱>/,目錄名與 package 名相同(kebab-case)。
+# 工具鏈版號釘在 rust-toolchain.toml;rust-version 與其相同,升級另開 CHG。
+# license 留白:本 repo 尚無授權宣告,不在本筆決定。
 [workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.100.0"

@@ -1,0 +1,9 @@
+[package]
+name = "studio-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "podcast-studio 的 Rust 產品核心(空骨架;路線圖第 2 筆起逐模組加入)"
+
+# 沒有任何相依(CHG-20261123-01 代決 4)。
+[dependencies]

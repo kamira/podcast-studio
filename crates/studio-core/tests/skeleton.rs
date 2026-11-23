@@ -18,8 +18,8 @@ fn toolchain_file() -> PathBuf {
 /// 取出 `channel` 欄位的字串值(容許 `\r\n` 行尾)。
 fn pinned_channel() -> String {
     let path = toolchain_file();
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("讀不到 {}:{e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("讀不到 {}:{e}", path.display()));
     text.lines()
         .map(str::trim)
         .find_map(|line| {
@@ -33,7 +33,11 @@ fn pinned_channel() -> String {
 fn toolchain_channel_is_full_version() {
     let channel = pinned_channel();
     let parts: Vec<&str> = channel.split('.').collect();
-    assert_eq!(parts.len(), 3, "channel 須為完整版號 x.y.z,實際為 {channel:?}");
+    assert_eq!(
+        parts.len(),
+        3,
+        "channel 須為完整版號 x.y.z,實際為 {channel:?}"
+    );
     assert!(
         parts
             .iter()
