@@ -16,7 +16,7 @@
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):關鍵元件表新增 `value_checks.is_int`。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T2):設計決策表新增「CI 腳本共用 `scripts/ci/gitutil.py`」一列。
 > 2026-11-23 依 CHG-20261123-01 結構文件更新(T2):關鍵元件表新增 `parity`(比對器與 Python 轉接器);設計決策表新增「並行比對工具:Rust 比對器 + Python 轉接器、JSON 行協定」一列。
-> 2026-11-24 依 CHG-20261123-01 結構文件更新(T3):設計決策表「CI 平台」列補 Rust job 另用 macOS、Windows 代管 runner;「main 保護以 ruleset 強制」列改五項;新增「cargo-deny 稽核」「Rust CI 矩陣 + 彙總 job」兩列。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T3):設計決策表「CI 平台」列補 Rust job 另用 macOS、Windows 代管 runner;「main 保護以 ruleset 強制」列改五項;新增「cargo-deny 稽核」「Rust CI 矩陣 + 彙總 job」兩列。
 
 ## 關鍵元件
 
@@ -314,8 +314,8 @@ classDiagram
 | lint 範圍 `ruff check --select E9,F` | ruff 全規則 vs `E9,F` | 既有程式 `E9,F` 全過;全規則會把既有風格債變成紅燈,更嚴格的規則另開 CHG | 〔觀察〕CHG-20261022-03 |
 | 本機審議閘:本機跑、CI 驗留言 | CI 內跑模型 vs 本機跑、CI 驗留言 | 代管 runner 連不到本機 Ollama;`review` job 只驗擁有者留言、目前 head sha、六席意見留言,以及排在其後、同 CHG 的統整判定留言為 `merge`(CHG-20261028-02 起不再看否決席) | 〔觀察〕CHG-20261022-03;CHG-20261028-02 |
 | CD 定義為本機部署腳本 `scripts/deploy_local.sh` | 不做 vs 本機部署腳本 vs 發 release | 產品只在本機執行,沒有遠端環境;部署後驗證只綁本機(fail-closed) | 〔觀察〕CHG-20261022-03 |
-| main 保護以 ruleset 強制 | ruleset vs 只靠約定 | repo 已公開,ruleset 免費可用;要求五項 check(`document`、`chg`、`program`、`review`、`rust`)通過、禁止直接 push 與 force push、只允許 squash(`rust` 由使用者於 CHG-20261123-01 合併 PR 合入 main 後加入 ruleset,執行計畫第 8 步;ACC 以唯讀讀取 ruleset 確認) | 〔觀察〕CHG-20261022-03;CHG-20261123-01 |
-| cargo-deny 稽核(`deny.toml`) | (a) cargo-deny vs (b) cargo-audit vs (c) 不導入、各 CHG 人工列授權 | 一個工具涵蓋授權白名單、禁用與重複版本、來源限制(只允許 crates.io)與 RustSec 漏洞公告,四項全部阻擋;以 `cargo install --locked cargo-deny@<釘版>` 自 crates.io 原始碼建置(不下載預建執行檔),只在 ubuntu 一格執行,`[graph] targets` 涵蓋三平台;代價是每次 CI 數分鐘建置、advisories 需下載公告資料庫、新公告可能讓無關 PR 變紅(處置:另開 CHG 升級或具名豁免) | 〔觀察〕CHG-20261123-01 代決 10 |
+| main 保護以 ruleset 強制 | ruleset vs 只靠約定 | repo 已公開,ruleset 免費可用;要求五項 check(`document`、`chg`、`program`、`review`、`rust`)通過、禁止直接 push 與 force push、只允許 squash(現為四項;`rust` 於 CHG-20261123-01 合併 PR 合入 main 後由使用者加入 ruleset,執行計畫第 8 步;ACC observe (4) 以唯讀讀取 ruleset 確認) | 〔觀察〕CHG-20261022-03;CHG-20261123-01 |
+| cargo-deny 稽核(`deny.toml`) | (a) cargo-deny vs (b) cargo-audit vs (c) 不導入、各 CHG 人工列授權 | 一個工具涵蓋授權白名單、禁用與重複版本、來源限制(只允許 crates.io)與 RustSec 漏洞公告,四項全部阻擋;以 `cargo install --locked cargo-deny@0.22.0`(`ci.yml` 所釘版號)自 crates.io 原始碼建置(不下載預建執行檔),只在 ubuntu 一格執行,`[graph] targets` 涵蓋三平台;代價是每次 CI 數分鐘建置、advisories 需下載公告資料庫、新公告可能讓無關 PR 變紅(處置:另開 CHG 升級或具名豁免) | 〔觀察〕CHG-20261123-01 代決 10 |
 | Rust CI 矩陣 + 彙總 job | (a) 矩陣 `rust-platform` + 彙總 `rust` vs (b) 三個矩陣 check 名稱各列必要檢查 | ruleset 只需一個固定名稱 `rust`;`rust` 以 `needs: rust-platform`、`if: always()` 讀 `needs.rust-platform.result`,不是 `success`(失敗、取消、略過)即失敗;日後增減平台不必改 ruleset;`fail-fast: false` 讓三平台都跑完 | 〔觀察〕CHG-20261123-01 代決 8、9 |
 | security、compliance 審議席由 Codex 擔任 | 本機 Ollama vs Codex(雲端,`-s read-only`) | 實審中 8B / 27B 輸出截斷或誤判,Codex 回答證據具體;送審資料送出本機屬使用者明示例外,前提是 repo 已公開 | 〔觀察〕DIR-1 第 9 條(使用者 2026-10-23 指示) |
 | 暫停 27B 審議 | 27B vs Codex 擔任高風險 risk 席 | 使用者指示暫不使用 27B;`scripts/local_review.py` 的預設參數(risk、consistency 由 Opus,security、compliance 由 Codex)不會選到 27B;`seat_config()` 在 risk 或 security 以 `--opus-seats`、`--codex-seats` 改回 Ollama 且 CHG 為高風險時仍會選 27B,暫停期間不得這樣審高風險 CHG(CHG-20261101-02 改記) | 〔觀察〕DIR-1 第 10 條(使用者 2026-10-23 指示) |

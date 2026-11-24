@@ -12,7 +12,7 @@
 > 2026-11-01 依 CHG-20261101-02 結構文件更新:本機審議 risk、consistency 席改由 Opus 子代理擔任(DIR-1 第 13 條);架構圖補 Opus 子代理節點與 `outputs/.tmp/local_review/opus/` 交接,Codex 節點改為 security / compliance 席;DIR-1 說明與「一個 PR 的流程」第 2 步補 Opus 席交接。
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:「一個 PR 的流程」第 2 步 Opus 席改為每份 prompt 上限 20000 字、超過時分組逐份交接。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):`project`、`settings` 新增相依 `value_checks`(共用 `is_int`);相依方向補記 `settings` → `safe_fs`;DIR-5 一次修正時,分層表 `settings.py` 依賴欄補 `safe_fs`、「單向、無循環」段改寫 `settings` 的相依說法,三處同步。
-> 2026-11-24 依 CHG-20261123-01 結構文件更新(T3):開發流程節的架構圖加 `rust-platform`(三平台矩陣)、`rust`(彙總)與 ruleset 五項;checkout 說明改為四個治理相關 job 取 `pr/` 與 `trusted/`、`rust-platform` 只取 PR head;ruleset 列改五項;「CI 四項」改「CI 五項」並補 `rust` 說明。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T3):開發流程節的架構圖加 `rust-platform`(三平台矩陣)、`rust`(彙總)與 ruleset 五項;checkout 說明改為四個治理相關 job 取 `pr/` 與 `trusted/`、`rust-platform` 只取 PR head;ruleset 列改五項;「CI 四項」改「CI 五項」並補 `rust` 說明。
 
 ## 分層 / 模組
 
@@ -365,7 +365,7 @@ flowchart LR
 ```
 
 - 〔觀察〕`document`、`chg`、`program`、`review` 四個治理相關 job 都先把 PR head 取到 `pr/`、base 取到 `trusted/`,治理檢查一律執行 `trusted/` 的腳本,PR 內容只當資料讀取;`rust-platform` 只取 PR head 到 `pr/`、不取 `trusted/`(本質是建置並執行 PR 的 Rust 程式,與 `program` 同屬已接受的殘留風險),`rust` 不取任何程式碼(`.github/workflows/ci.yml` 檔頭註解;CHG-20261123-01)。
-- 〔觀察〕main 的 ruleset 要求 `document`、`chg`、`program`、`review`、`rust` 五項通過,禁止直接 push 與 force push,合併只允許 squash(CHG-20261022-03 派發記錄 T7;`rust` 由使用者於 CHG-20261123-01 合併 PR 合入 main 後加入 ruleset,執行計畫第 8 步;ACC 以唯讀讀取 ruleset 確認)。
+- 〔觀察〕main 的 ruleset 要求 `document`、`chg`、`program`、`review`、`rust` 五項通過,禁止直接 push 與 force push,合併只允許 squash(CHG-20261022-03 派發記錄 T7;現為四項,`rust` 於 CHG-20261123-01 合併 PR 合入 main 後由使用者加入 ruleset,執行計畫第 8 步;ACC observe (4) 以唯讀讀取 ruleset 確認)。
 - 〔觀察〕DIR-1 第 9 條:security、compliance 席由 Codex 擔任;第 13 條:risk、consistency 席不分風險分級常設由 Opus 子代理(`.claude/agents/review-seat-opus.md`,Opus、effort medium,只有 Write 工具)擔任;第 10 條暫停 27B。執行方式為預設參數 `python3 scripts/local_review.py --pr <N>`(risk、consistency 由 Opus,security、compliance 由 Codex,impact、drift 由本機 Ollama,不會選到 27B);`--opus-seats` 覆寫 Opus 席,與 `--codex-seats` 重疊時 exit 2(照舊帶 `--codex-seats risk,security,compliance` 也會 exit 2,CHG-20261101-02 代決 12)。
 - 〔觀察〕`program` job 在 `scripts/check.sh` 不存在時跳過該步;該檔已由 CHG-20261022-01 T1 建立,現在每個 PR 都會執行產品 pytest。
 
