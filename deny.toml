@@ -1,0 +1,58 @@
+# cargo-deny 設定(CHG-20261123-01 代決 10)。
+# CI 只在 rust-platform 的 ubuntu-latest 一格以 `cargo deny --locked check` 執行;
+# licenses、bans、sources、advisories 四項全部阻擋(任一項錯誤即 job 失敗)。
+# 本檔的任何放寬(補列授權、豁免公告、允許其他來源)都須另經 CHG。
+
+[graph]
+# 三平台的目標三元組:讓平台專屬相依也被檢查(CI 只在 ubuntu 執行)
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+[advisories]
+# RustSec 漏洞公告一律擋下(含 unmaintained、unsound;yanked 版本也擋)。
+# 與 PR 無關的新公告出現時,處置是另開 CHG 升級該 crate,或在 ignore 以具名條目豁免
+# (豁免本身須經 CHG),不改成不阻擋。
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# 白名單只列寬鬆授權,不列任何 copyleft 授權。
+# 補列須為非 copyleft 的寬鬆授權,並在 CHG 派發記錄寫明是哪個 crate 需要。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "Unlicense",
+]
+confidence-threshold = 0.93
+
+[licenses.private]
+# 略過標記 `publish = false` 的 workspace 成員(本 repo 自己的 crate,尚無授權宣告;
+# 授權宣告與路線圖第 24 筆發佈一併決定)。只對 workspace 成員生效,第三方 crate 一律檢查。
+ignore = true
+
+[bans]
+# 同一 crate 多個版本只警告;版本萬用字元(`*`)禁止
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# 只允許 crates.io;不允許任何 git 相依與其他 registry
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

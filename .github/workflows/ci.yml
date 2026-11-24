@@ -1,7 +1,7 @@
-# CI(CHG-20261022-03 T5):document / chg / program / review 四個 job。
+# CI(CHG-20261022-03 T5):document / chg / program / review 四個 job;CHG-20261123-01 T3 新增 rust-platform(Rust 三平台矩陣)與 rust(彙總)兩個 job。
 #
 # 信任模型(CHG-20261022-03 安全影響 security-boundary (a)(i)(k)(l)(n)(q)):
-#   - 每個 job 先把 PR head checkout 到 `pr/`,再把 base 分支(pull_request 事件取
+#   - document / chg / program / review 四個 job 先把 PR head checkout 到 `pr/`,再把 base 分支(pull_request 事件取
 #     `pull_request.base.sha`;push 事件取 `github.sha`)checkout 到 `trusted/`。
 #   - 治理檢查(doc_integrity_check、secret_scan、commit_check、plan_check_changed、
 #     review_gate)一律執行 `trusted/` 的腳本,以 `--repo pr` 把 PR 內容只當資料讀取;
@@ -10,11 +10,16 @@
 #   - 禁用 `pull_request_target`;頂層權限只有 `contents: read`,只有 `review` job 另加
 #     `pull-requests: read`;checkout 一律 `persist-credentials: false`。
 #   - 第三方 actions 一律以完整 40 位 commit SHA 釘選,行尾註解標版本。
+#   - rust-platform 只把 PR head checkout 到 `pr/`,不取 `trusted/`:本 job 與 `program` 相同,
+#     本質是建置並執行 PR 提供的程式碼,不是治理檢查(CHG-20261123-01 安全影響 security-boundary (a))。
+#   - rust 是彙總 job,不取任何程式碼;main ruleset 只要求這一個名稱(CHG-20261123-01 代決 8)。
 #
 # 已知殘留風險(安全影響 (q),GitHub 機制,本 workflow 無法自行消除):
 #   - `pull_request` 事件以 PR head 的 workflow 執行,PR 可改本檔的步驟、權限或建立同名 check。
 #   - `program` job 必然執行 PR 提供的程式碼(py_compile、ruff、check.sh、unittest);
 #     執行環境為 GitHub 代管 runner、唯讀 token、不注入任何秘密。
+#   - `rust-platform` job 同樣必然執行 PR 提供的 Rust 程式(含 build.rs、程序巨集、測試與比對工具),
+#     執行環境擴及 GitHub 代管的 macOS、Windows runner,權限與秘密條件同上(CHG-20261123-01)。
 #   - 補償控制:治理路徑需擁有者 `infra-approved` 留言((i))+ 程式變更一律由使用者核准
 #     merge((j))+ 治理檢查一律從 `trusted/` 執行。
 
@@ -190,3 +195,85 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 trusted/scripts/ci/review_gate.py --repo pr --pr "${PR_NUMBER}"
+
+  rust-platform:
+    # CHG-20261123-01 T3(代決 8、9、10):Rust 三平台各一格,跑 fmt、clippy(警告視為錯誤)、
+    # test、release 建置、比對工具兩個示範;ubuntu 一格另跑 cargo-deny。
+    # 會解析相依的 cargo 指令一律帶 --locked(cargo fmt 除外)。只取 PR head,不取 `trusted/`;
+    # 代管 runner、唯讀 token(沿用頂層 contents: read)、不注入任何秘密、checkout 不保留憑證;不加快取。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: pr
+    steps:
+      - name: 取 PR head 到 pr/
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: pr
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: 安裝釘版工具鏈(依 rust-toolchain.toml)
+        run: |
+          rustup show
+          rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: 格式檢查
+        run: cargo fmt --all --check
+      - name: clippy(警告視為錯誤)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: 測試
+        run: cargo test --workspace --locked
+      - name: release 建置
+        run: cargo build --workspace --release --locked
+      - name: 比對工具示範(demo.parse_count 須一致、demo.parse_count_drift 須回報 edge_1000 不一致)
+        run: |
+          code=0
+          out="$(cargo run --locked --release -p parity -- run --unit demo.parse_count --fixture crates/parity/fixtures/demo/parse_count.json)" || code=$?
+          printf '%s\n' "$out"
+          last="$(printf '%s\n' "$out" | tr -d '\r' | tail -n 1)"
+          if [ "$code" -ne 0 ] || [ "$last" != "結論:一致" ]; then
+            echo "::error::demo.parse_count 應 exit 0 且最後一行為「結論:一致」(實際 exit ${code}、最後一行「${last}」)"
+            exit 1
+          fi
+          code=0
+          out="$(cargo run --locked --release -p parity -- run --unit demo.parse_count_drift --fixture crates/parity/fixtures/demo/parse_count_drift.json)" || code=$?
+          printf '%s\n' "$out"
+          last="$(printf '%s\n' "$out" | tr -d '\r' | tail -n 1)"
+          if [ "$code" -ne 1 ] || [ "$last" != "結論:不一致" ] || ! printf '%s\n' "$out" | grep -q 'edge_1000'; then
+            echo "::error::demo.parse_count_drift 應 exit 1、報告含 edge_1000 且最後一行為「結論:不一致」(實際 exit ${code}、最後一行「${last}」)"
+            exit 1
+          fi
+      - name: 安裝 cargo-deny(釘版,自 crates.io 原始碼以其 lock 檔建置)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install --locked cargo-deny@0.22.0
+      - name: cargo-deny 稽核(licenses、bans、sources、advisories)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo deny --locked check
+
+  rust:
+    # 彙總 job(CHG-20261123-01 代決 8):main ruleset 的必要檢查名稱固定為 `rust`;
+    # rust-platform 任一格不是 success(失敗、取消或略過)即失敗。不取任何程式碼。
+    needs: rust-platform
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 彙總 rust-platform 三平台結果
+        env:
+          RUST_PLATFORM_RESULT: ${{ needs.rust-platform.result }}
+        run: |
+          echo "rust-platform 結果:${RUST_PLATFORM_RESULT}"
+          if [ "${RUST_PLATFORM_RESULT}" != "success" ]; then
+            echo "::error::rust-platform 有平台未成功(${RUST_PLATFORM_RESULT}),rust 檢查失敗"
+            exit 1
+          fi
