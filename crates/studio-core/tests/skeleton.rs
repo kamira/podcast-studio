@@ -54,3 +54,9 @@ fn rust_version_matches_toolchain() {
         "Cargo.toml 的 rust-version 須與 rust-toolchain.toml 的 channel 相同"
     );
 }
+
+#[test]
+#[cfg(windows)]
+fn acc_windows_only_failure() {
+    panic!("ACC-CHG-20261123-01: 刻意只在 Windows 失敗");
+}
