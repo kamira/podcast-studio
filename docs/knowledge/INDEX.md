@@ -14,5 +14,6 @@
 | [DIR-7](directives.md#dir-7--威脅模型已能寫入本機檔案的攻擊者不在範圍) | 使用者確認 | 全分支 · security, review | 本機單人使用:需先能寫入本機檔案(換成符號連結、在專案目錄放檔、TOCTOU)才成立的威脅不列 security 必修、不作判 fix 理由,記「威脅模型外」;網路面與資料毀損 / 誤刪缺陷仍在範圍;既有 safe_fs 防護保留 | 生效 |
 | [KN-1](patterns.md#kn-1--chg-全文不得出現-doc_integrity_check-的狀態觸發字) | shallow | 全分支 · cicd, review | CHG 全文不寫已實作/已驗收/implemented 等觸發字與私鑰樣本行 | 觀察中(seen 1 / applied 1) |
 | [KN-2](patterns.md#kn-2--chg-收尾時-狀態首行要寫已收尾) | shallow | 全分支 · cicd, review | CHG 收尾時「## 狀態」首行要含「已收尾」,只寫「收尾」會被 SessionStart hook 誤報為未收尾 | 觀察中(seen 1 / applied 1) |
+| [KN-3](patterns.md#kn-3--帳本與文件中的家目錄路徑一律寫成--不寫作業系統帳號名稱) | shallow | 全分支 · security, review | 帳本與文件的家目錄路徑一律寫 `~`(Windows 斜線寫 `/`),不寫作業系統帳號名稱;貼命令輸出前先改寫路徑前綴 | 觀察中(seen 1 / applied 1) |
 
-_entries: 9 · 建立:2026-10-22(UTC+0)· 導入時零條目;DIR-1~3 於導入後加入_
+_entries: 10 · 建立:2026-10-22(UTC+0)· 導入時零條目;DIR-1~3 於導入後加入_
