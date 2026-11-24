@@ -1,0 +1,17 @@
+{
+  "unit": "demo.parse_count",
+  "cases": [
+    {"id": "plain_3", "input": "3"},
+    {"id": "edge_1", "input": "1"},
+    {"id": "edge_1000", "input": "1000"},
+    {"id": "zero", "input": "0"},
+    {"id": "over_1001", "input": "1001"},
+    {"id": "letters", "input": "12a"},
+    {"id": "empty", "input": ""},
+    {"id": "not_string_number", "input": 42},
+    {"id": "not_string_null", "input": null},
+    {"id": "leading_zeros", "input": "0007"},
+    {"id": "fullwidth_digit", "input": "３"},
+    {"id": "huge", "input": "99999999999999999999"}
+  ]
+}

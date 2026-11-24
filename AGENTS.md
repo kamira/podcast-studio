@@ -26,6 +26,11 @@
 uv run --script studio_server.py       # 網頁 http://127.0.0.1:7860(設定存 config/studio.db,不入 git)
 uv run --script local_models_mcp.py    # MCP 伺服器(stdio)
 ./setup_breezyvoice.sh                 # 重建 tools/BreezyVoice
+cargo fmt --all --check                                       # Rust 本機閘 1:格式
+cargo clippy --workspace --all-targets --locked -- -D warnings  # Rust 本機閘 2:lint(警告視為錯誤)
+cargo test --workspace --locked                               # Rust 本機閘 3:測試
 ```
 
 外部依賴(不在 repo 內):Ollama(`localhost:11434`)、`~/.local/bin/mflux-generate`、`tools/BreezyVoice/.venv`。安裝方式見 `PODCAST_STUDIO.md §7`。
+
+Rust(CHG-20261123-01 起):需要 rustup(第一次在 repo 內執行 `cargo` 時依 `rust-toolchain.toml` 自動安裝釘版工具鏈);Windows 另需 MSVC Build Tools(含 C++ 工具)並把 `%USERPROFILE%\.cargo\bin` 加入 PATH,macOS 另需 Xcode Command Line Tools。CI 的 `rust` 檢查另跑三平台 release 建置、比對工具示範與 cargo-deny。

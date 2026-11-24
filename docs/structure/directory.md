@@ -13,6 +13,9 @@
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:`scripts/local_review.py` 職責列補 Opus 席分組繳交,compliance 席參考資料上限改為 24000 字。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):根目錄新增 `value_checks.py`(`project`、`settings` 共用的 `is_int`)與 `tests/test_value_checks.py`。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T2):`scripts/ci/` 新增 `gitutil.py`(`commit_check`、`plan_check_changed`、`secret_scan` 共用的 `GitError`、git 執行與 `--range` 解析)。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T1):根目錄新增 Rust virtual workspace(`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`)與 `crates/studio-core/`(空骨架);`.gitignore` 補 `/target/`。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T2):新增 `crates/parity/`(並行比對工具:比對器、JSON 行協定、Rust 單元登錄表、示範單元、Python 轉接器 `py/adapter.py`、示範 fixture `fixtures/demo/`)、`tests/test_parity_adapter.py`、`features/parity.feature`;`Cargo.lock` 新增 `serde`、`serde_json` 及其遞移相依。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T3):根目錄新增 `deny.toml`(cargo-deny 設定);`.github/workflows/ci.yml` 新增 `rust-platform`(Rust 三平台矩陣)與 `rust`(彙總)兩個 job,共六個 job;main ruleset 要求五項(`rust` 由使用者於 CHG-20261123-01 合併 PR 合入 main 後加入 ruleset,執行計畫第 8 步;ACC 以唯讀讀取 ruleset 確認);新增 `tests/test_ci_rust_job.py`;`features/ci.feature` 新增一個場景;兩個 crate 的 `Cargo.toml` 設 `publish = false`(DIR-5 一次修正補註)。
 
 ## 樹狀
 
@@ -34,6 +37,17 @@ podcast-studio/
 ├── tts_service.py             # 逐句合成服務:髒片段、快取、語速後製(CHG-20261022-04 T3)
 ├── mcp_registry.py            # local-models 的 MCP 註冊管理(Claude Code / Codex user scope,只經官方 CLI;CHG-20261022-02 T1)
 ├── breezy_worker.py           # BreezyVoice worker(在 BreezyVoice venv 執行:synth / annotate;CHG-20261022-04 T1)
+├── Cargo.toml                 # Rust virtual workspace:members = crates/*、resolver 3、edition 2024(CHG-20261123-01 T1)
+├── Cargo.lock                 # cargo 產生並入 git;會解析相依的 cargo 指令帶 --locked
+├── rust-toolchain.toml        # 釘版工具鏈(完整版號,含 rustfmt、clippy;與 rust-version 相同)
+├── deny.toml                  # cargo-deny 設定:授權白名單、bans、只允許 crates.io、漏洞公告(CHG-20261123-01 T3)
+├── crates/                    # Rust 程式(CHG-20261123-01 起)
+│   ├── studio-core/           # 產品核心空骨架:Cargo.toml、src/lib.rs(只有 crate 說明文件)、tests/skeleton.rs
+│   └── parity/                # 並行比對工具(執行檔 parity;CHG-20261123-01 T2)
+│       ├── src/               # lib.rs(協定型別、fixture、登錄表、比對與報告)、py.rs(啟動轉接器)、main.rs(命令列)、demo.rs(示範單元)
+│       ├── py/adapter.py      # Python 轉接器(只用標準函式庫;JSON 行協定)
+│       ├── fixtures/demo/     # 示範 fixture:parse_count.json、parse_count_drift.json(合成資料)
+│       └── tests/             # fixture_format.rs、protocol.rs、registry.rs、cli.rs
 ├── static/                    # 網頁前端(原生 HTML/JS/CSS,免建置)
 │   ├── index.html             # 首頁(精靈 / 完整模式兩張卡片)、精靈、完整模式、設定頁(含「進階流程」節點畫布)、免責說明頁
 │   ├── app.js                 # 共用工具 window.Studio、路由、設定頁、節點畫布
@@ -71,7 +85,8 @@ podcast-studio/
 │   ├── acceptance/            # ACC-YYYYMMDD-NN.md(另有 .gitkeep)
 │   └── knowledge/{INDEX.md,directives.md,patterns.md,vocabulary.json}
 ├── features/                  # 行為規格(Gherkin .feature,CHG 的 Behaviour spec)
-│   ├── ci.feature             # CHG-20261022-03
+│   ├── ci.feature             # CHG-20261022-03(「Rust 三平台任一失敗讓 rust 檢查變紅」場景屬 CHG-20261123-01 T3)
+│   ├── parity.feature         # CHG-20261123-01 T2:並行比對工具
 │   └── …                      # canvas、file_dnd、heavy_lock、local_review_opus、mcp_registry、pause_tone、settings、timeline_editor、wizard_speed
 ├── scripts/                   # 開發流程腳本(CHG-20261022-03)
 │   ├── ci/
@@ -88,6 +103,8 @@ podcast-studio/
 ├── tests/
 │   ├── conftest.py            # 把 repo 根目錄放進 sys.path
 │   ├── test_*.py              # 產品程式的 pytest(CHG-20261022-01)
+│   ├── test_parity_adapter.py # 比對工具 Python 轉接器的 pytest(CHG-20261123-01 T2)
+│   ├── test_ci_rust_job.py    # CI Rust job、deny.toml、ci.feature 新場景的結構測試(CHG-20261123-01 T3)
 │   ├── ui_check.py            # UI 互動檢查(Playwright 無頭 Chromium;不屬 pytest,見下表)
 │   ├── integration/           # 真模型 / 真 CLI 整合測試(test_breezy_worker_real.py 以 BreezyVoice venv 執行;test_mcp_registry_real.py 用真 claude / codex CLI 與暫存設定目錄;不列入 check.sh)
 │   └── ci/                    # scripts/ 的單元測試(unittest)
@@ -98,13 +115,13 @@ podcast-studio/
 │       ├── scripts/           # doc_integrity_check.py、autopilot_runner.py 等(含 lib/)
 │       └── assets/            # 政策與基準 JSON
 ├── .github/
-│   └── workflows/ci.yml       # CI:document / chg / program / review
+│   └── workflows/ci.yml       # CI:document / chg / program / review / rust-platform(三平台矩陣)/ rust(彙總)
 ├── .claude/
 │   ├── launch.json            # Claude 桌面 app 啟動網頁(uv run --script studio_server.py)
 │   ├── agents/
 │   │   └── review-seat-opus.md  # 本機審議 Opus 意見席的子代理定義(只有 Write 工具;CHG-20261101-02)
 │   └── worktrees/             # agent worktree(ignored,CHG-20261022-03 T9)
-├── .gitignore
+├── .gitignore                 # 含 Rust 建置產物 /target/(CHG-20261123-01 T1)
 ├── outputs/                   # 產出物(ignored);uploads/ 為上傳檔,.heavy.lock 為重型鎖,ui_check/ 為 UI 檢查截圖,.tmp/ 為 /api/annotate 暫存,.tmp/review_decision/ 為統整席判定 JSON,.tmp/local_review/ 為本機審議 Codex 席暫存與 Opus 席請求檔 / 答案檔(opus/)
 ├── projects/                  # 專案資料(ignored,使用者資料):<名稱>/{project.json,history/,audio/,assets/,tmp/,.lock}、.trash/
 ├── .review/                   # 本機審議 Codex 席的 PR head 唯讀檢視(ignored,審完即移除;CHG-20261028-01)
@@ -115,7 +132,11 @@ podcast-studio/
 
 | 路徑 | 職責 | 備註 | 等級 |
 |------|------|------|------|
-| `/`(根目錄 `.py`) | 全部 Python 程式碼;平鋪,沒有 package | 入口檔(`studio_server.py`、`local_models_mcp.py`)以 `sys.path.insert` import 共用模組;相依方向見 `logical.md` | 〔觀察〕 |
+| `/`(根目錄 `.py`) | 全部 Python 程式碼;平鋪,沒有 package | 入口檔(`studio_server.py`、`local_models_mcp.py`)以 `sys.path.insert` import 共用模組;相依方向見 `logical.md`;Rust 程式在 `crates/`(CHG-20261123-01 起) | 〔觀察〕 |
+| `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`(Rust workspace 與釘版工具鏈) | 根目錄 virtual workspace:`members = ["crates/*"]`、`resolver = "3"`、`[workspace.package]` 的 `edition = "2024"` 與 `rust-version`(與 `rust-toolchain.toml` 的 `channel` 同一完整版號);`rust-toolchain.toml` 另列 `rustfmt`、`clippy` 元件、`profile = "minimal"`;`Cargo.lock` 入 git | rustup 由工作目錄往上找 `rust-toolchain.toml`,repo 內任何位置都套用同一釘版;會解析相依的 cargo 指令帶 `--locked`(`cargo fmt` 除外);升級工具鏈另開 CHG;建置產物 `target/` 由 `.gitignore` 忽略;成員目錄名與 package 名相同(kebab-case) | 〔觀察〕CHG-20261123-01 T1 |
+| `crates/studio-core/` | Rust 產品核心的空骨架:`Cargo.toml`(沒有任何相依)、`src/lib.rs`(只有 crate 說明文件與 `#![forbid(unsafe_code)]`,不含任何函式)、`tests/skeleton.rs`(crate 可連結、`rust-version` 與 `rust-toolchain.toml` 版號一致) | 路線圖第 2 筆起逐模組加入;`Cargo.toml` 設 `publish = false`(不發佈;cargo-deny 依此略過,CHG-20261123-01 T3),之後在 `crates/` 新增的成員也須設定 | 〔觀察〕CHG-20261123-01 T1 |
+| `crates/parity/` | 並行比對工具(執行檔 `parity`):`src/lib.rs`(協定型別 `Outcome`、`Fixture`、Rust 單元登錄表 `Registry`、`compare` 與文字 / JSON 報告)、`src/py.rs`(以 argv 清單啟動 `py/adapter.py`、逾時終止)、`src/main.rs`(`run`、`list` 子命令,退出碼 0 / 1 / 2)、`src/demo.rs` 與轉接器內的示範單元 `demo.parse_count`、`demo.parse_count_drift`(測試專用 `demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄);`fixtures/<單元>/` 放 fixture;`tests/` 為契約測試 | 相依只有 `serde`(derive)、`serde_json`;轉接器只用標準函式庫,本筆不 import 任何產品模組(路線圖第 2 筆起可 import 被比對的模組);fixture 只放合成資料,不得放使用者資料;工具不寫檔、不使用網路;示範單元只屬比對工具,不得被產品程式引用;Python 端測試為 `tests/test_parity_adapter.py`(由 `scripts/check.sh` 收集);`Cargo.toml` 設 `publish = false`(不發佈;cargo-deny 依此略過,CHG-20261123-01 T3) | 〔觀察〕CHG-20261123-01 T2 |
+| `deny.toml` | cargo-deny 設定(CHG-20261123-01 代決 10):`[graph] targets` 列三平台六個目標三元組;`licenses` 白名單只列寬鬆授權(不含 copyleft),`[licenses.private] ignore = true` 只略過標記 `publish = false` 的 workspace 成員;`bans` 禁止萬用字元版本、多版本只警告;`sources` 只允許 crates.io、不允許 git 相依;`advisories` 一律阻擋(含 unmaintained、unsound、yanked),`ignore` 為空 | CI 只在 `rust-platform` 的 ubuntu 一格以 `cargo deny --locked check` 執行;任何放寬(補列授權、豁免公告、其他來源)須另經 CHG;結構測試 `tests/test_ci_rust_job.py` | 〔觀察〕CHG-20261123-01 T3 |
 | `static/` | 網頁前端:`index.html`(首頁「精靈」「完整模式」兩張卡片、右上角 ⚙ → 設定頁;設定頁子頁含「語音預設」與「進階流程」節點畫布;底部「免責說明與授權」連結)、`app.js`(共用工具 `window.Studio`、hash 路由、設定頁、畫布)、`project.js`(專案狀態與文稿 / 封面 / 語音 / 匯出面板)、`timeline.js`(時間軸三軌、預覽、屬性、素材庫)、`wizard.js`(首頁、精靈、完整模式)、`edit.js`(停頓、聲調、語速、畫面軌編輯)、`style.css` | 原生 JS,不經建置、不從 CDN 載入;由 `studio_server.py` 只解析 `static/` 之下的真實路徑送出;首頁的 `__STUDIO_TOKEN__` 換成啟動權杖;後四個模組依序載入,以 `Studio.hook(name, fn)` 串接(CHG-20261022-04 T7、T8) | 〔觀察〕 |
 | `projects/` | 專案資料(CHG-20261022-04):`<名稱>/project.json`(`schema_version: 1`)、`history/`(最近 10 版)、`audio/`(合成與自錄音檔)、`assets/`(素材)、`tmp/`(worker 輸入檔,用完即刪)、`.lock`(專案層級鎖);`.trash/<名稱>-<時間戳>-<4 碼>/` 為刪除的專案(30 天後啟動時清除) | `.gitignore`(使用者資料);只經 `project.py` 存取;不經 `/files/*` 提供,音檔與素材只經 `/api/projects/{p}/media/{id}` 送出 | 〔觀察〕 |
 | 根目錄 CHG-20261022-04 模組 | `safe_fs.py`(安全路徑工具,只用標準庫,不 import repo 內其他模組;`project`、`studio_server`、`nodes`、`media`、`tts_service`、`heavy_lock`、`settings` 共用,DIR-5 修正 4)、`names.py`(名稱白名單,`studio_server.py` 與 `project.py` 共用)、`project.py`(資料模型)、`timeline.py`(純函式 `layout()`)、`tts_service.py`(合成服務)、`breezy_worker.py`(以 BreezyVoice venv 執行、只用標準庫與 BreezyVoice 模組,不 import repo 內其他模組) | 相依方向見 `logical.md` | 〔觀察〕 |
@@ -130,7 +151,7 @@ podcast-studio/
 | `.claude/` | Claude 桌面 app 設定(追蹤檔為 `launch.json` 與 `agents/review-seat-opus.md`) | `launch.json` 用 `uv` 絕對路徑,參數 `run --script studio_server.py`(不帶設定檔路徑);`.claude/worktrees/` 是 Claude 桌面 app 為派發施工建立的 agent worktree,列入 `.gitignore`,避免主工作副本被判為不乾淨而讓 `scripts/deploy_local.sh` 中止(CHG-20261022-03 T9) | 〔觀察〕 |
 | `.claude/agents/` | Claude Code 專案子代理定義(CHG-20261101-02) | `review-seat-opus.md` 為本機審議 Opus 意見席(DIR-1 第 13 條):frontmatter `model: opus`、`effort: medium`、`tools: Write`,本文只有固定約束(只依 prompt 內資料判斷、唯一動作是寫答案檔);派發者一律以 subagent_type `review-seat-opus` 派 Opus 席;目前不在治理基礎設施清單(CHG-20261101-02 代決 26,列入後續改善) | 〔觀察〕 |
 | `docs/knowledge/` | 使用者教過的規則:`INDEX.md`、`directives.md`(DIR-n)、`patterns.md`、`vocabulary.json` | 只改本目錄的 commit 免引用 CHG 編號(CHG-20261022-03) | 〔觀察〕 |
-| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03(「統整席判定需修正」場景由 CHG-20261028-02 改寫);`local_review_codex.feature` 屬 CHG-20261028-01;`review_decision.feature` 屬 CHG-20261028-02;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04(對應功能隨該筆合併 PR 進 main);`mcp_registry` 屬 CHG-20261022-02;`local_review_opus` 屬 CHG-20261101-02 | 〔觀察〕 |
+| `features/` | 行為規格(Gherkin `.feature`),由各 CHG 的「Behaviour spec」引用 | `ci.feature` 屬 CHG-20261022-03(「統整席判定需修正」場景由 CHG-20261028-02 改寫;「Rust 三平台任一失敗讓 rust 檢查變紅」場景由 CHG-20261123-01 T3 新增);`local_review_codex.feature` 屬 CHG-20261028-01;`review_decision.feature` 屬 CHG-20261028-02;`canvas`、`file_dnd`、`heavy_lock`、`settings` 屬 CHG-20261022-01;`pause_tone`、`timeline_editor`、`wizard_speed` 屬 CHG-20261022-04(對應功能隨該筆合併 PR 進 main);`mcp_registry` 屬 CHG-20261022-02;`local_review_opus` 屬 CHG-20261101-02;`parity` 屬 CHG-20261123-01 | 〔觀察〕 |
 | `scripts/ci/` | CI 治理檢查:`commit_check.py`、`plan_check_changed.py`、`review_gate.py`(驗意見留言與統整判定)、`secret_scan.py`、`secret_allowlist.txt`;`gitutil.py`(`GitError`、git 執行、`--range` 解析,`commit_check`、`plan_check_changed`、`secret_scan` 共用;CI 從 trusted 副本同目錄載入,CHG-20261103-01) | 只用 Python 標準函式庫;CI 一律從 base 分支的 trusted/ 副本(CI 執行期目錄,不在 repo 內)執行 | 〔觀察〕 |
 | `scripts/local_review.py` | 本機審議會(DIR-1 六席,各席獨立作答一次),以 `gh pr comment` 貼出各席意見(建議等級不具否決效力,DIR-6) | 只讀 PR 資料、主工作副本不 checkout;拒絕 fork 與非擁有者 PR;diff 經過濾後超過 30000 字時,以 head sha 在 `.review/pr-<編號>-<sha12>/` 建 `--no-checkout` 的 detached worktree(不寫出追蹤檔、停用 hook)供 Codex 席以 `git show` / `git diff --no-textconv --no-ext-diff` 唯讀讀取完整程式,審完(含例外)以 `safe_remove_view()` 移除——本次與舊檢視共用,只在目錄內僅有 `.git` 時刪該指標檔與空目錄並 `git worktree prune`(不用 git 的強制移除、不遞迴刪除),否則留下目錄並警告;同名舊目錄另須是登記的 worktree,否則拒絕、不刪;Ollama 席仍依 `num_ctx` 截短(CHG-20261028-01);非 think 的 Ollama 席在 diff 截到 0 仍放不進時截短 CHG 並記注意行(CHG-20261028-02);互讀階段已移除;compliance 席參考資料去除 directive「歷史」區塊、上限 24000 字(CHG-20261028-02 DIR-5 修正;CHG-20261101-02 修訂 1 提高);opus 引擎(CHG-20261101-02):risk、consistency 預設由 Opus 子代理擔任,跑到 Opus 席時在 `outputs/.tmp/local_review/opus/` 寫請求檔(`<stem>.prompt.md`、`<stem>.request.json`)、輪詢答案檔 `<stem>.answer.json`(上限 256 KB、本機嚴格 schema 檢查,每次 15 分鐘、重派一次換新 stem),每次嘗試結束刪除該 stem 的檔、目錄空了以非遞迴 rmdir 移除;每份請求 prompt 上限 20000 字,超過時 CHG 依章節、diff 依函式關聯分組(每席 CHG、diff 各至多 2 組,超出不送審),每組一份請求檔(stem 含 `g<組>`)、逐份交接,各組判決合成單席(CHG-20261101-02 修訂 1);不新增網路呼叫;`--opus-seats` 覆寫,與 `--codex-seats` 重疊 exit 2 | 〔觀察〕 |
 | `scripts/review_decision.py` | 驗證統整席子代理寫出的判定 JSON,以 `gh pr comment` 貼出帶 `review-decision` 標記的判定留言(DIR-6) | 治理基礎設施(需 `infra-approved`);不呼叫模型、不寫檔;拒絕 fork、非擁有者 PR、不在 main 執行;需目前 head 的六席意見留言;`model`、`effort` 只取自參數;JSON 文字經 `sanitize()` 放在程式碼區塊內(CHG-20261028-02) | 〔觀察〕 |
@@ -146,7 +167,7 @@ podcast-studio/
 | `docs/changes/screens/` | 給統整席核對的畫面截圖(`<CHG-ID>/<task>-<原檔名>`,由派發者自 `outputs/ui_check/` 複製並 commit 進該 PR,DIR-6 第 11 條) | 檔名不符 `CHG-*.md`,不受 `doc_integrity_check` 的 CHG 欄位檢查與 `plan_check_changed.py` 檢查;`docs/` 下非 `*.py`、`*.sh`,屬 `review_gate.py` 免審議路徑;截圖隨 repo 公開(CHG-20261030-02) | 〔推論〕(本筆不建目錄,第一個使用者建立) |
 | `tests/ci/` | `scripts/` 的單元測試 | `python3 -m unittest discover -s tests/ci -v`(`./scripts/check.sh` 也會一併收集) | 〔觀察〕 |
 | `.ai-sdlc/` | vendored ai-sdlc v1.66.0:`skills/ai-sdlc-autopilot/{scripts,assets}`、`SHA256SUMS`、`README.md` | 內容一律不修改;版本與來源記在 `.ai-sdlc/README.md` | 〔觀察〕 |
-| `.github/workflows/ci.yml` | GitHub Actions CI:`document`、`chg`、`program`、`review` 四個 job | main ruleset 要求四項全過 | 〔觀察〕 |
+| `.github/workflows/ci.yml` | GitHub Actions CI:`document`、`chg`、`program`、`review`、`rust-platform`(Rust 三平台矩陣:ubuntu、macos、windows)、`rust`(彙總)六個 job | main ruleset 要求五項全過(`document`、`chg`、`program`、`review`、`rust`;現為四項,`rust` 於 CHG-20261123-01 合併 PR 合入 main 後由使用者加入 ruleset,執行計畫第 8 步;ACC observe (4) 以唯讀讀取 ruleset 確認);`rust-platform` 各格的檢查名稱不列入 ruleset | 〔觀察〕;CHG-20261123-01 T3 |
 
 ## 命名與放置規則
 

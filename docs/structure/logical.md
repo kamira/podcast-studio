@@ -12,6 +12,7 @@
 > 2026-11-01 依 CHG-20261101-02 結構文件更新:本機審議 risk、consistency 席改由 Opus 子代理擔任(DIR-1 第 13 條);架構圖補 Opus 子代理節點與 `outputs/.tmp/local_review/opus/` 交接,Codex 節點改為 security / compliance 席;DIR-1 說明與「一個 PR 的流程」第 2 步補 Opus 席交接。
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:「一個 PR 的流程」第 2 步 Opus 席改為每份 prompt 上限 20000 字、超過時分組逐份交接。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):`project`、`settings` 新增相依 `value_checks`(共用 `is_int`);相依方向補記 `settings` → `safe_fs`;DIR-5 一次修正時,分層表 `settings.py` 依賴欄補 `safe_fs`、「單向、無循環」段改寫 `settings` 的相依說法,三處同步。
+> 2026-11-23 依 CHG-20261123-01 結構文件更新(T3):開發流程節的架構圖加 `rust-platform`(三平台矩陣)、`rust`(彙總)與 ruleset 五項;checkout 說明改為四個治理相關 job 取 `pr/` 與 `trusted/`、`rust-platform` 只取 PR head;ruleset 列改五項;「CI 四項」改「CI 五項」並補 `rust` 說明。
 
 ## 分層 / 模組
 
@@ -336,13 +337,15 @@ flowchart LR
   subgraph GH["GitHub kamira/podcast-studio(public)"]
     PR["Pull Request"]
     CMT["PR 留言<br/>local-review 意見 / review-decision 判定 / infra-approved"]
-    subgraph CI[".github/workflows/ci.yml(代管 ubuntu)"]
+    subgraph CI[".github/workflows/ci.yml(代管 ubuntu;rust-platform 另用 macos、windows)"]
       J1["document<br/>doc_integrity_check · secret_scan"]
       J2["chg<br/>commit 引用 + plan-check"]
       J3["program<br/>py_compile · ruff E9,F · unittest"]
       J4["review<br/>驗意見留言 + 統整判定"]
+      J5["rust-platform 矩陣<br/>ubuntu / macos / windows<br/>fmt · clippy · test · release build · parity 示範<br/>ubuntu 另跑 cargo-deny"]
+      J6["rust(彙總)<br/>任一格非 success 即失敗"]
     end
-    MAIN["main(ruleset:四項 check 必過<br/>只經 PR、只允許 squash)"]
+    MAIN["main(ruleset:五項 check 必過<br/>document · chg · program · review · rust<br/>只經 PR、只允許 squash)"]
   end
   VEN[".ai-sdlc/(vendored v1.66.0)"]
   DISP -- push 分支 --> PR
@@ -353,15 +356,16 @@ flowchart LR
   DISP -. prompt 原樣交付 .-> OPUS
   OPUS -- 只寫答案檔 --> OTMP
   CMT --> SUB --> RD -- gh pr comment --> CMT
-  PR --> J1 & J2 & J3 & J4
+  PR --> J1 & J2 & J3 & J4 & J5
+  J5 --> J6
   J1 & J2 --> VEN
   J4 --> CMT
-  J1 & J2 & J3 & J4 -- 全綠 + 使用者核准 --> MAIN
+  J1 & J2 & J3 & J4 & J6 -- 全綠 + 使用者核准 --> MAIN
   MAIN -- merge 後 --> DEP --> APP
 ```
 
-- 〔觀察〕四個 job 都先把 PR head 取到 `pr/`、base 取到 `trusted/`,治理檢查一律執行 `trusted/` 的腳本,PR 內容只當資料讀取(`.github/workflows/ci.yml` 檔頭註解)。
-- 〔觀察〕main 的 ruleset 要求 `document`、`chg`、`program`、`review` 四項通過,禁止直接 push 與 force push,合併只允許 squash(CHG-20261022-03 派發記錄 T7)。
+- 〔觀察〕`document`、`chg`、`program`、`review` 四個治理相關 job 都先把 PR head 取到 `pr/`、base 取到 `trusted/`,治理檢查一律執行 `trusted/` 的腳本,PR 內容只當資料讀取;`rust-platform` 只取 PR head 到 `pr/`、不取 `trusted/`(本質是建置並執行 PR 的 Rust 程式,與 `program` 同屬已接受的殘留風險),`rust` 不取任何程式碼(`.github/workflows/ci.yml` 檔頭註解;CHG-20261123-01)。
+- 〔觀察〕main 的 ruleset 要求 `document`、`chg`、`program`、`review`、`rust` 五項通過,禁止直接 push 與 force push,合併只允許 squash(CHG-20261022-03 派發記錄 T7;現為四項,`rust` 於 CHG-20261123-01 合併 PR 合入 main 後由使用者加入 ruleset,執行計畫第 8 步;ACC observe (4) 以唯讀讀取 ruleset 確認)。
 - 〔觀察〕DIR-1 第 9 條:security、compliance 席由 Codex 擔任;第 13 條:risk、consistency 席不分風險分級常設由 Opus 子代理(`.claude/agents/review-seat-opus.md`,Opus、effort medium,只有 Write 工具)擔任;第 10 條暫停 27B。執行方式為預設參數 `python3 scripts/local_review.py --pr <N>`(risk、consistency 由 Opus,security、compliance 由 Codex,impact、drift 由本機 Ollama,不會選到 27B);`--opus-seats` 覆寫 Opus 席,與 `--codex-seats` 重疊時 exit 2(照舊帶 `--codex-seats risk,security,compliance` 也會 exit 2,CHG-20261101-02 代決 12)。
 - 〔觀察〕`program` job 在 `scripts/check.sh` 不存在時跳過該步;該檔已由 CHG-20261022-01 T1 建立,現在每個 PR 都會執行產品 pytest。
 
@@ -369,7 +373,7 @@ flowchart LR
 
 1. **開 PR**:每個步驟開自己的分支(`chg/<CHG 編號>-<task>` 或 `docs/<主題>`),commit message 帶 CHG 編號(只改 `docs/knowledge/` 者除外),push 後開 PR(DIR-2 第 1 條)。
 2. **本機審議(意見 → 統整席判定)**:CHG 風險為中 / 高,或 PR 改到程式路徑時,主 agent 從 main 的工作副本執行 `scripts/local_review.py`,六席各自獨立作答一次(不互讀,CHG-20261028-02 DIR-5 修正)後以 `gh pr comment` 貼出各席意見(建議等級不具否決效力),留言帶 `<!-- local-review CHG-… sha=<head sha> -->` 標記。只處理本 repo 分支且作者為擁有者的 PR。Codex 席不套 Ollama 的 `num_ctx` 截短:diff 經過濾後 ≤ 30000 字時完整內嵌,超過時以 head sha 在 `.review/` 建 PR head 的 `--no-checkout` detached worktree(不寫出追蹤檔),Codex 以 `-C` 指向它,以 `git show`、`git diff --no-textconv --no-ext-diff` 自行讀完整 diff 與檔案,審完移除(CHG-20261028-01)。Opus 席(CHG-20261101-02):主 agent 以背景方式執行腳本,腳本跑到 Opus 席時在 `outputs/.tmp/local_review/opus/` 寫出請求檔並在 stderr 提示;主 agent 讀出 `<stem>.prompt.md` 原樣交給以 subagent_type `review-seat-opus` 派出的全新子代理(送審資料全部內嵌,每份 prompt 上限 20000 字,超過時 CHG 依章節、diff 依函式關聯分組(每席各至多 2 組),每組一份請求檔、逐份交接,答案檔路徑只在最末段),子代理只寫 `<stem>.answer.json`;腳本輪詢答案檔、以本機嚴格 schema 檢查,15 分鐘沒有合格答案就換新 stem 重派一次,每次嘗試結束刪除請求檔與答案檔;不建唯讀檢視、不 fetch。非 think 的 Ollama 席在 diff 截到 0 仍放不進 `num_ctx` 時截短 CHG 並記注意行。意見留言貼出後,主 agent 派一個獨立 Claude subagent(預設 Opus、effort medium,非該 PR 施工者)擔任統整席,讀意見、CHG 全文與完整程式(可依 DIR-6 第 12 條在 repo 外的暫存目錄匯出 head 副本,離線執行 repo 內既有測試),寫判定 JSON(`merge` / `fix`,含逐席意見、未回答席位、修法、需使用者決定事項);主 agent 以 `scripts/review_decision.py` 驗證後貼出帶 `<!-- review-decision CHG-… sha=<head sha> decision=… model=… effort=… -->` 標記的判定留言(DIR-6,CHG-20261028-02)。
-3. **CI 四項**:`document`(doc_integrity_check、全 repo 與 commit 範圍秘密掃描、vendored 完整性)、`chg`(commit 引用 CHG 編號、PR 改到的 CHG 做 plan-check)、`program`(`py_compile`、`ruff check --select E9,F`、`python3 -m unittest discover -s tests/ci`)、`review`(只採信擁有者留言;標記 sha 須為目前 head;意見標記須含六席,`fail`、`no-answer` 不單獨擋下;其後須有同 CHG 的統整判定且為 `merge`;改到治理基礎設施路徑另需 `<!-- infra-approved sha=<head> -->`)。
+3. **CI 五項**:`document`(doc_integrity_check、全 repo 與 commit 範圍秘密掃描、vendored 完整性)、`chg`(commit 引用 CHG 編號、PR 改到的 CHG 做 plan-check)、`program`(`py_compile`、`ruff check --select E9,F`、`python3 -m unittest discover -s tests/ci`)、`review`(只採信擁有者留言;標記 sha 須為目前 head;意見標記須含六席,`fail`、`no-answer` 不單獨擋下;其後須有同 CHG 的統整判定且為 `merge`;改到治理基礎設施路徑另需 `<!-- infra-approved sha=<head> -->`)、`rust`(`rust-platform` 矩陣在 ubuntu、macos、windows 各跑 `cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`、`cargo build --workspace --release --locked` 與比對工具兩個示範,ubuntu 一格另跑 `cargo deny --locked check`;彙總 job `rust` 在任一格不是 success 時失敗;CHG-20261123-01)。
 4. **使用者核准**:CI 全綠後,只改 `docs/`、`features/` 的 PR 可自動 merge;改到任何程式路徑的 PR 不論分級,一律停下等使用者核准(DIR-2 第 3 條);已過確認閘的 CHG 依 DIR-4 預授權,以統整席判定 `merge` 且 CI 全綠為條件由派發者 merge。審議留言只是完整性檢查,授權只有使用者核准(CHG-20261022-03 安全影響 (n))。
 5. **squash merge**:main 只接受 squash merge,標題帶 CHG 編號。
 6. **本機部署**:有程式變更時,在乾淨的 main 上執行 `scripts/deploy_local.sh`:`git pull --ff-only` → 跑 `scripts/check.sh`(存在時)→ 重啟 7860 網頁伺服器 → 驗證本專案行程的全部 LISTEN socket 只綁 `127.0.0.1` / `[::1]`,否則停止伺服器並 exit 1。MCP 伺服器由 client 啟動,腳本只印出重新啟動提醒。
