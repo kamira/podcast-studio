@@ -3,9 +3,11 @@ name = "studio-core"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "podcast-studio 的 Rust 產品核心(空骨架;路線圖第 2 筆起逐模組加入)"
+description = "podcast-studio 的 Rust 產品核心(路線圖第 2 筆起逐模組加入;目前有 value_checks)"
 # 不發佈;授權宣告與路線圖第 24 筆一併決定。cargo-deny 的 [licenses.private] 依此略過本 crate(CHG-20261123-01 T3)
 publish = false
 
-# 沒有任何相依(CHG-20261123-01 代決 4)。
+# 相依只有 serde_json(CHG-20261124-01 代決 4):版本與 Cargo.lock 已鎖定的 1.0.154 相同,
+# 只用預設 feature(不開 arbitrary_precision,見代決 5);用途為 `value_checks::is_int` 的輸入型別。
 [dependencies]
+serde_json = "1.0.154"

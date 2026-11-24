@@ -1,0 +1,24 @@
+{
+  "unit": "value_checks.is_int",
+  "cases": [
+    {"id": "int_zero", "input": 0},
+    {"id": "int_one", "input": 1},
+    {"id": "int_negative", "input": -3},
+    {"id": "int_i64_max", "input": 9223372036854775807},
+    {"id": "int_i64_min", "input": -9223372036854775808},
+    {"id": "int_u64_max", "input": 18446744073709551615},
+    {"id": "bool_true", "input": true},
+    {"id": "bool_false", "input": false},
+    {"id": "float_one", "input": 1.0},
+    {"id": "float_zero", "input": 0.0},
+    {"id": "float_negative_zero", "input": -0.0},
+    {"id": "float_exponent", "input": 1e2},
+    {"id": "float_fraction", "input": 2.5},
+    {"id": "string_digit", "input": "1"},
+    {"id": "string_empty", "input": ""},
+    {"id": "null", "input": null},
+    {"id": "array_of_int", "input": [1]},
+    {"id": "array_empty", "input": []},
+    {"id": "object", "input": {"a": 1}}
+  ]
+}

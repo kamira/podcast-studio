@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""並行比對工具 Python 轉接器的測試(CHG-20261123-01 T2)。
+"""並行比對工具 Python 轉接器的測試(CHG-20261123-01 T2;CHG-20261124-01 T1 擴充)。
 
-L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Python 端期望結果(上限都是 1000)。
+L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Python 端期望結果(上限都是 1000);
+產品模組單元 `value_checks.is_int` 各案例的 Python 端期望結果(CHG-20261124-01 代決 6)。
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
-三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄。
-約束:轉接器只用標準函式庫(本筆不 import 任何產品模組)。
+三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
+轉接器 import 的 `value_checks` 是 repo 根目錄的產品模組。
+約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks}`(CHG-20261124-01 代決 13)。
 
 轉接器以子程序執行(與 `parity` 比對器相同的呼叫方式),不 import 進測試行程。
 """
@@ -169,10 +171,89 @@ def test_sleep_單元只在環境變數開啟時登錄():
     assert strip(got[0]) == ok(None)
 
 
-# ---------- 約束:只用標準函式庫 ----------
+# ---------- L1:產品模組單元 value_checks.is_int(CHG-20261124-01 T1) ----------
 
-def test_轉接器只_import_標準函式庫():
-    tree = ast.parse(ADAPTER.read_text(encoding="utf-8"))
+VALUE_CHECKS_FIXTURE = ROOT / "crates" / "parity" / "fixtures" / "value_checks" / "is_int.json"
+
+# Python `value_checks.is_int` 的期望結果:int(非 bool)為 True,其餘為 False。
+IS_INT_EXPECTED = {
+    "int_zero": True,
+    "int_one": True,
+    "int_negative": True,
+    "int_i64_max": True,
+    "int_i64_min": True,
+    "int_u64_max": True,
+    "bool_true": False,
+    "bool_false": False,
+    "float_one": False,
+    "float_zero": False,
+    "float_negative_zero": False,
+    "float_exponent": False,
+    "float_fraction": False,
+    "string_digit": False,
+    "string_empty": False,
+    "null": False,
+    "array_of_int": False,
+    "array_empty": False,
+    "object": False,
+}
+
+
+def test_value_checks_is_int_各案例():
+    fixture = json.loads(VALUE_CHECKS_FIXTURE.read_text(encoding="utf-8"))
+    assert fixture["unit"] == "value_checks.is_int"
+    assert sorted(c["id"] for c in fixture["cases"]) == sorted(IS_INT_EXPECTED)
+    got = responses(run_adapter("value_checks.is_int", fixture["cases"]))
+    assert [r["id"] for r in got] == [c["id"] for c in fixture["cases"]]
+    for case, resp in zip(fixture["cases"], got):
+        assert strip(resp) == ok(IS_INT_EXPECTED[case["id"]]), case["id"]
+
+
+def test_value_checks_is_int_JSON_原文的負零與大整數在_Python_端為整數():
+    # 行為差異清單 D-5、D-6 的 Python 端:json.loads 對 -0 與超出 u64 / 低於 i64 的整數給 int。
+    # Rust 端(serde_json)得浮點,由 crates/studio-core/tests/value_checks.rs 鎖住;不進比對 fixture。
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
+    env.pop("PARITY_TEST_SLEEP", None)
+    proc = subprocess.run(
+        [sys.executable, str(ADAPTER), "--unit", "value_checks.is_int"],
+        input=(b'{"id": "neg_zero", "input": -0}\n'
+               b'{"id": "over_u64", "input": 18446744073709551616}\n'
+               b'{"id": "under_i64", "input": -9223372036854775809}\n'),
+        capture_output=True, env=env, timeout=30, check=False,
+    )
+    got = responses(proc)
+    assert [r["id"] for r in got] == ["neg_zero", "over_u64", "under_i64"]
+    assert [strip(r) for r in got] == [ok(True)] * 3
+
+
+def test_轉接器_import_的是_repo_根目錄的產品模組():
+    # 以子程序載入轉接器(run_name 不是 __main__,不會進入 main),取出它 import 的模組;
+    # 工作目錄設在轉接器目錄,確認不是靠呼叫端的工作目錄找到產品模組。
+    probe = (
+        "import runpy, sys\n"
+        "g = runpy.run_path(sys.argv[1], run_name='adapter_probe')\n"
+        "print(g['value_checks'].__file__)\n"
+        "print(g['names'].__file__)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe, str(ADAPTER)],
+        capture_output=True, timeout=30, check=False, cwd=str(ADAPTER.parent),
+        env=dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1"),
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    files = [Path(line).resolve() for line in proc.stdout.decode("utf-8").splitlines()]
+    assert files == [ROOT / "value_checks.py", ROOT / "names.py"]
+
+
+# ---------- 約束:只 import 標準函式庫與明列的產品模組 ----------
+
+# 轉接器可 import 的產品模組(CHG-20261124-01 代決 13;只放三平台都能載入、不依賴 fcntl 等的模組)。
+ALLOWED_PRODUCT_MODULES = frozenset({"names", "value_checks"})
+
+
+def imports_outside_allowed(source):
+    """回傳轉接器原始碼中,標準函式庫與明列產品模組以外的 import(排序後的頂層模組名)。"""
+    tree = ast.parse(source)
     names = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -182,5 +263,16 @@ def test_轉接器只_import_標準函式庫():
             names.add(node.module.split(".")[0])
     names.discard("__future__")
     assert names, "應至少 import 標準函式庫模組"
-    outside = sorted(n for n in names if n not in sys.stdlib_module_names)
-    assert outside == [], f"轉接器只能用標準函式庫:{outside}"
+    return sorted(n for n in names
+                  if n not in sys.stdlib_module_names and n not in ALLOWED_PRODUCT_MODULES)
+
+
+def test_轉接器只_import_標準函式庫與明列的產品模組():
+    outside = imports_outside_allowed(ADAPTER.read_text(encoding="utf-8"))
+    assert outside == [], f"轉接器只能 import 標準函式庫與 {sorted(ALLOWED_PRODUCT_MODULES)}:{outside}"
+
+
+def test_明列集合以外的_import_仍會被擋():
+    # 反向確認:在轉接器原始碼的暫存副本(只在記憶體中,不寫檔)加一行 import requests,斷言會被找出。
+    source = ADAPTER.read_text(encoding="utf-8") + "\nimport requests\n"
+    assert imports_outside_allowed(source) == ["requests"]
