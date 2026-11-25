@@ -14,13 +14,15 @@
 //! Windows 上 cap-std 的開啟以 `NtCreateFile` 相對目錄 handle 進行(不經 DOS 路徑轉換),
 //! 但建立目錄等變更類操作由 handle 取回完整路徑後串接名稱再呼叫標準函式庫(開工閘紀錄見本 CHG 派發記錄)。
 //!
-//! 介面(T1):[`check_name`]、[`open_dir`]、[`open_path`]、[`SafeDir::open_child`]、[`SafeDir::open_file`]。
+//! 介面(T1):[`check_name`]、[`open_dir`]、[`open_path`]、[`SafeDir::open_child`]、[`SafeDir::open_file`]、
+//! [`SafeDir::entry_names`];比對工具與測試用的 [`support`]。
 #![forbid(unsafe_code)]
 
 mod error;
 mod name;
+pub mod support;
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io;
@@ -172,6 +174,17 @@ impl SafeDir {
                 },
             )),
         }
+    }
+
+    /// 列舉本目錄的名稱(不含 `.`、`..`),依碼位排序(與 Python `sorted(os.listdir(fd))` 相同)。
+    /// T2 的 `entries` 在此之上加不跟隨連結的中繼資料。
+    pub fn entry_names(&self) -> Result<Vec<OsString>> {
+        let mut names = Vec::new();
+        for entry in self.dir.entries().map_err(error::from_io)? {
+            names.push(entry.map_err(error::from_io)?.file_name());
+        }
+        names.sort();
+        Ok(names)
     }
 
     fn open_subdir(&self, name: &OsStr) -> Result<SafeDir> {

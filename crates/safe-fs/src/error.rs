@@ -70,6 +70,18 @@ impl Error {
     pub fn raw_os_error(&self) -> Option<i32> {
         self.source.as_ref().and_then(io::Error::raw_os_error)
     }
+
+    /// `Other` 類錯誤的名稱(比對輸出 `error os_<名稱>` 用;Python 端為 `errno.errorcode`):
+    /// Unix 為 errno 名稱(表內沒有者 `errno<數值>`)、Windows 為 `win<錯誤碼>`,沒有錯誤碼為 `unknown`。
+    pub fn os_error_name(&self) -> String {
+        match self.raw_os_error() {
+            None => "unknown".to_string(),
+            Some(code) if cfg!(unix) => {
+                errno_name(code).map_or_else(|| format!("errno{code}"), str::to_string)
+            }
+            Some(code) => format!("win{code}"),
+        }
+    }
 }
 
 impl fmt::Display for Error {

@@ -91,7 +91,7 @@ fn module_fixtures_include_value_checks_is_int() {
     );
     for name in SAFE_FS_FIXTURES.map(|(_, f)| format!("safe_fs/{f}")) {
         assert_eq!(
-            found.iter().any(|p| *p == name),
+            found.contains(&name),
             !cfg!(windows),
             "{name}(Windows 上略過、其他平台納入):{found:?}"
         );
