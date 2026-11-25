@@ -78,7 +78,9 @@ fn name_char_ok_rejects_other_ascii() {
         let c = ch(cp);
         assert_eq!(name_char_ok(c), NAME_ASCII.contains(c), "U+{cp:04X}");
     }
-    for c in [' ', '.', '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0', '\n', '\u{7F}'] {
+    for c in [
+        ' ', '.', '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0', '\n', '\u{7F}',
+    ] {
         assert!(!name_char_ok(c), "{c:?}");
     }
 }
@@ -230,18 +232,18 @@ fn normalize_name_rejects_python_bad_names() {
 fn fold_name_matches_python_examples() {
     // 事實 B 列的每個實例(Python str.casefold)。
     let cases: &[(&str, &str)] = &[
-        ("\u{00DF}", "ss"),               // ß
-        ("\u{1E9E}", "ss"),               // ẞ
-        ("\u{212A}", "k"),                // KELVIN SIGN
-        ("\u{017F}", "s"),                // ſ
-        ("\u{FB00}", "ff"),               // ﬀ
-        ("\u{FB06}", "st"),               // ﬆ
-        ("\u{0130}", "i\u{0307}"),        // İ
-        ("\u{03A3}", "\u{03C3}"),         // Σ → σ
-        ("\u{03C2}", "\u{03C3}"),         // ς → σ
-        ("\u{AB70}", "\u{13A0}"),         // 切羅基文摺疊到大寫
-        ("\u{FF21}", "\u{FF41}"),         // Ａ → ａ
-        ("\u{0149}", "\u{02BC}n"),        // ŉ
+        ("\u{00DF}", "ss"),        // ß
+        ("\u{1E9E}", "ss"),        // ẞ
+        ("\u{212A}", "k"),         // KELVIN SIGN
+        ("\u{017F}", "s"),         // ſ
+        ("\u{FB00}", "ff"),        // ﬀ
+        ("\u{FB06}", "st"),        // ﬆ
+        ("\u{0130}", "i\u{0307}"), // İ
+        ("\u{03A3}", "\u{03C3}"),  // Σ → σ
+        ("\u{03C2}", "\u{03C3}"),  // ς → σ
+        ("\u{AB70}", "\u{13A0}"),  // 切羅基文摺疊到大寫
+        ("\u{FF21}", "\u{FF41}"),  // Ａ → ａ
+        ("\u{0149}", "\u{02BC}n"), // ŉ
         ("STRASSE", "strasse"),
         ("stra\u{00DF}e", "strasse"),
         ("ABCxyz-_09", "abcxyz-_09"),

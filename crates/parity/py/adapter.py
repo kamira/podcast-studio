@@ -21,7 +21,8 @@ import 的範圍:標準函式庫,加上明列的產品模組 `names`、`value_ch
 `tests/test_parity_adapter.py` 以 AST 斷言集合以外的 import 會失敗)。產品模組以 repo 根目錄
 (本檔往上三層)插入 `sys.path[0]` 後 import,執行的是 repo 內受版本控制的程式;
 只 import 只用標準函式庫、不依賴 `fcntl` 等平台模組者,三平台都能載入。
-`names` 的比對單元由 CHG-20261124-01 T2 登錄。
+產品模組單元:`value_checks.is_int`(CHG-20261124-01 T1)、`names.name_char_ok`、`names.normalize_name`、
+`names.fold_name`、`names.constants`(T2);拒絕代碼 `invalid`、錯誤類別 `type`(代決 6)。
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ from pathlib import Path
 # 先 import 完標準函式庫,再把 repo 根目錄放到 sys.path 最前面,確保 import 到的是根目錄的產品模組。
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-import names  # noqa: E402,F401 — 比對單元由 CHG-20261124-01 T2 登錄
+import names  # noqa: E402
 import value_checks  # noqa: E402
 
 
@@ -95,6 +96,44 @@ def value_checks_is_int(value):
     return value_checks.is_int(value)
 
 
+# 拒絕代碼與錯誤類別(與 crates/parity/src/units.rs 的 REJECT_INVALID、ERROR_TYPE 相同)
+REJECT_INVALID = "invalid"
+ERROR_TYPE = "type"
+
+
+def names_name_char_ok(value):
+    """names.name_char_ok:輸入不是恰好一個碼位的字串時,`names.name_char_ok` 丟 TypeError → error type。"""
+    try:
+        return names.name_char_ok(value)
+    except TypeError:
+        raise UnitError(ERROR_TYPE) from None
+
+
+def names_normalize_name(value):
+    """names.normalize_name:合格回原字串;`None`(不合格或非字串)→ reject invalid。"""
+    result = names.normalize_name(value)
+    if result is None:
+        raise Reject(REJECT_INVALID)
+    return result
+
+
+def names_fold_name(value):
+    """names.fold_name:回 `str.casefold` 的結果;非字串輸入丟 AttributeError / TypeError → error type。"""
+    try:
+        return names.fold_name(value)
+    except (AttributeError, TypeError):
+        raise UnitError(ERROR_TYPE) from None
+
+
+def names_constants(_value):
+    """names.constants:忽略輸入;回 MAX_NAME、依碼位排序的 NAME_ASCII、原順序的 NAME_RANGES。"""
+    return {
+        "max_name": names.MAX_NAME,
+        "ascii": "".join(sorted(names.NAME_ASCII)),
+        "ranges": [[lo, hi] for lo, hi in names.NAME_RANGES],
+    }
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -102,6 +141,10 @@ def build_units(environ=None):
         "demo.parse_count": demo_parse_count,
         "demo.parse_count_drift": demo_parse_count_drift,
         "value_checks.is_int": value_checks_is_int,
+        "names.name_char_ok": names_name_char_ok,
+        "names.normalize_name": names_normalize_name,
+        "names.fold_name": names_fold_name,
+        "names.constants": names_constants,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep

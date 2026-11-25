@@ -260,7 +260,8 @@ fn integer_literals(text: &str) -> Vec<String> {
 
 #[test]
 fn integer_literal_scanner_finds_integers_outside_strings() {
-    let found = integer_literals(r#"{"a": "-0 99 \" 7", "b": [18446744073709551616, -3, 1.5, 2e3]}"#);
+    let found =
+        integer_literals(r#"{"a": "-0 99 \" 7", "b": [18446744073709551616, -3, 1.5, 2e3]}"#);
     assert_eq!(found, ["18446744073709551616", "-3"]);
 }
 

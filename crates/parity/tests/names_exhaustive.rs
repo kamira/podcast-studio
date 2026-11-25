@@ -24,7 +24,7 @@ use serde_json::Value;
 use studio_core::names::CASEFOLD_UNICODE_VERSION;
 
 /// `name_char_ok` 每次啟動轉接器送出的碼位範圍大小(一個請求一個碼位)。
-/// 本機 Windows 實測一批約 1~2 秒,與 60 秒逾時相距甚遠。
+/// 本機 Windows(Python 3.11、debug 建置)實測一批約 2.2~2.5 秒,與 60 秒逾時相距甚遠。
 const CHAR_BATCH_SPAN: u32 = 0x2_0000;
 
 /// `fold_name` 每個請求串接的碼位數;全部碼位一次啟動轉接器送完。
@@ -102,7 +102,8 @@ fn describe(mismatches: &[(String, Outcome, Outcome)]) -> String {
     if mismatches.len() > MAX_LISTED {
         s.push(format!("  …另有 {} 個", mismatches.len() - MAX_LISTED));
     }
-    s.join("\n")
+    // 每行前加換行;沒有不一致時為空字串。
+    s.iter().map(|line| format!("\n{line}")).collect()
 }
 
 /// 執行中 Python 的 `unicodedata.unidata_version`。
@@ -138,7 +139,11 @@ enum FoldVerdict {
 }
 
 /// 依執行中 Python 的 Unicode 版本、摺疊表表頭版本與環境變數 `GITHUB_ACTIONS` 決定判定方式。
-fn fold_verdict(python_version: &str, table_version: &str, github_actions: Option<&str>) -> FoldVerdict {
+fn fold_verdict(
+    python_version: &str,
+    table_version: &str,
+    github_actions: Option<&str>,
+) -> FoldVerdict {
     if python_version == table_version {
         FoldVerdict::Compare
     } else if github_actions == Some("true") {
@@ -213,7 +218,7 @@ fn name_char_ok_matches_python_for_every_scalar_value() {
     assert_eq!(total, 0x11_0000 - 0x800);
     assert!(
         mismatches.is_empty(),
-        "names.name_char_ok 有 {} 個碼位兩邊不一致:\n{}",
+        "names.name_char_ok 有 {} 個碼位兩邊不一致:{}",
         mismatches.len(),
         describe(&mismatches)
     );
@@ -236,7 +241,11 @@ fn fold_name_matches_python_for_every_scalar_value() {
     let cases: Vec<Case> = chunks
         .iter()
         .map(|chunk| Case {
-            id: format!("{}~{}", cp_label(chunk[0]), cp_label(chunk[chunk.len() - 1])),
+            id: format!(
+                "{}~{}",
+                cp_label(chunk[0]),
+                cp_label(chunk[chunk.len() - 1])
+            ),
             input: Value::String(chunk.iter().collect()),
         })
         .collect();
@@ -272,19 +281,19 @@ fn fold_name_matches_python_for_every_scalar_value() {
     match verdict {
         FoldVerdict::Compare => assert!(
             mismatches.is_empty(),
-            "names.fold_name 有 {} 個碼位兩邊不一致:\n{}",
+            "names.fold_name 有 {} 個碼位兩邊不一致:{}",
             mismatches.len(),
             describe(&mismatches)
         ),
         FoldVerdict::FailInCi => panic!(
             "CI 的 Python Unicode 版本 {python_version} 與摺疊表 {CASEFOLD_UNICODE_VERSION} 不同\
-             (差異碼位 {} 個);CI 不得略過全碼位比對:\n{}",
+             (差異碼位 {} 個);CI 不得略過全碼位比對{}",
             mismatches.len(),
             describe(&mismatches)
         ),
         FoldVerdict::SkipLocally => println!(
             "略過:Python Unicode 版本 {python_version} 與摺疊表 {CASEFOLD_UNICODE_VERSION} 不同,\
-             差異碼位 {} 個(不判失敗;以 PARITY_PYTHON 指向 Python 3.11 才會比對)\n{}",
+             差異碼位 {} 個(不判失敗;以 PARITY_PYTHON 指向 Python 3.11 才會比對){}",
             mismatches.len(),
             describe(&mismatches)
         ),
