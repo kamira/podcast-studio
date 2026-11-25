@@ -181,3 +181,21 @@ pub fn verbatim(p: &Path) -> PathBuf {
         PathBuf::from(format!(r"\\?\{s}"))
     }
 }
+
+/// `studio_core::names::fold_name` 所用的摺疊表(W-6 測試用;以 `#[path]` 直接讀同一份原始檔,
+/// 不新增 dev-dependency——新增相依會改動 `Cargo.lock`)。表內容與產生方式見該檔檔頭。
+#[path = "../../../studio-core/src/names/casefold_table.rs"]
+mod casefold_table;
+
+/// 與 `studio_core::names::fold_name` 相同:逐字查摺疊表(Unicode 完整大小寫摺疊,等於 Python
+/// `str.casefold`),不在表內的字元摺疊後等於自己(W-6)。
+pub fn fold_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match casefold_table::TABLE.binary_search_by_key(&ch, |&(key, _)| key) {
+            Ok(i) => out.push_str(casefold_table::TABLE[i].1),
+            Err(_) => out.push(ch),
+        }
+    }
+    out
+}

@@ -51,9 +51,13 @@ const WINDOWS_CASES: &[(&str, &str, &str)] = &[
 /// `windows` 欄的筆數(與 `WINDOWS_CASES` 相同;改動差異清單時兩者一起改)。
 const WINDOWS_ENTRY_COUNT: usize = 18;
 
-/// 差異清單中屬 Windows 機制的編號(代決 12)。
+/// 依差異編號分的 `windows` 欄筆數(T3:與「### 行為差異清單」D-3、D-4、D-7 記載的筆數一致;
+/// 合計等於 `WINDOWS_ENTRY_COUNT`)。
+const WINDOWS_COUNT_BY_DIFF: &[(&str, usize)] = &[("D-3", 4), ("D-4", 13), ("D-7", 1)];
+
+/// 差異清單中屬 Windows 機制的編號(代決 12、代決事項 12:D-3~D-12;D-12 為 T2 補列的記錄項)。
 const WINDOWS_DIFF_IDS: &[&str] = &[
-    "D-3", "D-4", "D-5", "D-6", "D-7", "D-8", "D-9", "D-10", "D-11",
+    "D-3", "D-4", "D-5", "D-6", "D-7", "D-8", "D-9", "D-10", "D-11", "D-12",
 ];
 
 /// 工作目錄名稱前綴(Rust 單元 `parity-safe-fs-rs-`、Python 轉接器 `parity-safe-fs-py-`)。
@@ -184,6 +188,29 @@ fn every_case_has_an_expectation_and_windows_column_is_limited() {
             "{diff} 不是 Windows 機制差異"
         );
     }
+}
+
+/// T3:`windows` 欄依差異編號的筆數與差異清單一致,合計為 `WINDOWS_ENTRY_COUNT`。
+#[test]
+fn windows_column_counts_match_difference_list() {
+    let _g = lock();
+    let mut by_diff: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, _, diff) in WINDOWS_CASES {
+        *by_diff.entry(diff).or_default() += 1;
+    }
+    let want: BTreeMap<&str, usize> = WINDOWS_COUNT_BY_DIFF.iter().copied().collect();
+    assert_eq!(by_diff, want, "windows 欄依差異編號的筆數與差異清單不一致");
+    assert_eq!(want.values().sum::<usize>(), WINDOWS_ENTRY_COUNT);
+}
+
+/// T3:屬 Windows 機制的差異編號為 D-3~D-12(代決事項 12;D-12 為 T2 補列的記錄項)。
+#[test]
+fn windows_diff_ids_are_d3_to_d12() {
+    let want: Vec<String> = (3..=12).map(|n| format!("D-{n}")).collect();
+    assert_eq!(
+        WINDOWS_DIFF_IDS, want,
+        "Windows 機制差異的編號與差異清單不一致"
+    );
 }
 
 #[test]

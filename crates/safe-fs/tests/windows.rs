@@ -15,6 +15,15 @@
 //! - C-2:取得目錄 handle 後原路徑改名並換成 junction 的實際結果,之後的建立與刪除仍落在原目錄;
 //! - C-4 / D-3:硬連結的來源是 junction 時回 `Unsafe`;
 //! - D-7 / D-9:變更類錯誤類別與開啟中 handle 對改名的影響;junction 對應 fixture 的符號連結案例。
+//!
+//! T3 另加(逐項以「T3」開頭印出實測結果;T2 印出的 D-9 三項、一般檔改名到 junction、K-2 的錯誤類別
+//! 改以斷言鎖住,T3-2):
+//! - H-1 / D-5:以 `\?\` 預先建立的 `con` 目錄、`nul` 一般檔、`COM1` 目錄,在 `open_dir`、`open_file`、
+//!   `lstat`、`entries`、`rmtree` 逐項印出「開到目錄項」或 `ReservedDevice`;`create_excl` 不開到裝置;
+//!   `rmtree` 中途失敗時已刪的項目不還原;
+//! - C-1:`CONIN$`、`CONOUT$`、`CLOCK$` 在建立、改名、硬連結、刪除各函式都是磁碟上的目錄項;
+//! - D-6:只差大小寫的名稱開到同一項目;D-10:開著 handle 就刪除或搬移;D-11:8.3 短檔名別名;
+//! - W-6:NTFS 大小寫對照與 `fold_name` 的定點比較(CI 與本機都跑)與全碼位(BMP)查證(`#[ignore]`)。
 #![cfg(windows)]
 
 mod common;
@@ -629,32 +638,28 @@ fn k2_ancestor_rename_while_child_handle_is_open() {
     std::fs::create_dir_all(top.join("p").join("c")).unwrap();
     std::fs::write(top.join("p").join("c").join("f"), "child").unwrap();
     let child = open_dir(&top, &["p", "c"], DirOptions::default()).unwrap();
-    match std::fs::rename(top.join("p"), top.join("p2")) {
-        Ok(()) => {
-            assert_eq!(
-                read_all(child.open_file("f", FileAccess::Read).unwrap()),
-                "child"
-            );
-            drop(child.create_excl("g", W, 0o600).unwrap());
-            assert!(top.join("p2").join("c").join("g").is_file());
-            println!(
-                "T2 K-2 子目錄 handle 開著時改名上層目錄:成功(不是共用違規);handle 仍指向原目錄,建立落在改名後的位置"
-            );
-            std::fs::rename(top.join("p2"), top.join("p")).unwrap();
-        }
-        Err(e) => {
-            let code = e.raw_os_error();
-            assert!(matches!(code, Some(5 | 32)), "改名上層失敗的原因:{e}");
-            println!("T2 K-2 子目錄 handle 開著時改名上層目錄:失敗(錯誤碼 {code:?})");
-        }
-    }
-    // 外部持有子目錄 handle 時 rmtree 上層:刪不掉該子目錄
+    // T3(T3-2)鎖住實測結果:子目錄 handle 開著時改名上層目錄失敗,錯誤碼 5(拒絕存取)
+    let e = std::fs::rename(top.join("p"), top.join("p2")).unwrap_err();
+    assert_eq!(e.raw_os_error(), Some(5), "改名上層失敗的原因:{e}");
+    println!("T2 K-2 子目錄 handle 開著時改名上層目錄:失敗(錯誤碼 5)");
+    assert_eq!(
+        read_all(child.open_file("f", FileAccess::Read).unwrap()),
+        "child"
+    );
+    // 外部持有子目錄 handle 時 rmtree 上層:刪不掉該子目錄。T3(T3-2)鎖住:Other,原始錯誤碼 32(共用違規);
+    // 子目錄內的 f 已先刪除、不還原(rmtree 中途失敗時已刪的項目不還原,與 Python 相同)
     let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
     let e = d.rmtree("p", false).unwrap_err();
     println!(
         "T2 K-2 外部持有子目錄 handle 時 rmtree 上層:失敗 {:?}(錯誤碼 {:?})",
         e.kind(),
         e.raw_os_error()
+    );
+    assert_eq!(e.kind(), ErrorKind::Other(Some(32)));
+    assert_eq!(e.raw_os_error(), Some(32));
+    assert!(
+        !top.join("p").join("c").join("f").exists(),
+        "已刪的 f 不還原"
     );
     assert!(top.join("p").join("c").is_dir());
     drop(child);
@@ -751,22 +756,17 @@ fn junctions_in_mutating_functions_behave_like_symlinks_on_linux() {
     // 改名 junction:只改名連結本身
     d.rename("out", &a, "out2").unwrap();
     assert_eq!(a.lstat("out2").unwrap().unwrap().kind, EntryKind::Symlink);
-    // 一般檔改名到 junction 上:實測結果印出(Linux:取代連結本身)
-    let over = match d.rename("top.txt", &a, "out2") {
-        Ok(()) => {
-            let k = a.lstat("out2").unwrap().unwrap().kind;
-            format!("成功,目標變成 {k:?}")
-        }
-        Err(e) => format!("失敗 {:?}(錯誤碼 {:?})", e.kind(), e.raw_os_error()),
-    };
-    println!("T2 D-9 一般檔改名到既有 junction(目錄連結)上:{over}");
-    // unlink / rmtree junction:只刪連結本身
-    if a.lstat("out2")
-        .unwrap()
-        .is_some_and(|m| m.kind == EntryKind::Symlink)
-    {
-        a.unlink("out2", false).unwrap();
-    }
+    // 一般檔改名到 junction 上(Linux:取代連結本身)。T3(T3-2)鎖住實測結果:成功,目標變成一般檔,
+    // 連結目標(outside/d)不受影響
+    d.rename("top.txt", &a, "out2").unwrap();
+    let k = a.lstat("out2").unwrap().unwrap().kind;
+    assert_eq!(k, EntryKind::File);
+    assert_eq!(
+        read_all(a.open_file("out2", FileAccess::Read).unwrap()),
+        "top"
+    );
+    println!("T2 D-9 一般檔改名到既有 junction(目錄連結)上:成功,目標變成 {k:?}");
+    a.unlink("out2", false).unwrap();
     d.rmtree("dang", false).unwrap();
     a.unlink("in", false).unwrap();
     assert!(top.join("a").join("b").join("f.txt").is_file());
@@ -875,7 +875,7 @@ fn d9_rename_with_open_handles() {
     let w = WorkDir::new();
     let top = w.top();
     let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
-    let report = |what: &str, r: safe_fs::Result<()>| match r {
+    let report = |what: &str, r: &safe_fs::Result<()>| match r {
         Ok(()) => println!("T2 D-9 {what}:成功"),
         Err(e) => println!(
             "T2 D-9 {what}:失敗 {:?}(錯誤碼 {:?})",
@@ -883,29 +883,544 @@ fn d9_rename_with_open_handles() {
             e.raw_os_error()
         ),
     };
+    // T3(T3-2):三項實測結果皆為成功,以斷言鎖住(不是共用違規)
     std::fs::write(top.join("src"), "new").unwrap();
     std::fs::write(top.join("dst"), "old").unwrap();
     // 目標開啟中(safe-fs 開的檔案 handle)
     let held = d.open_file("dst", FileAccess::Read).unwrap();
     let r = d.replace("src", &d, "dst");
-    let ok_dst = r.is_ok();
-    report("取代既有目標(目標的檔案 handle 開啟中)", r);
-    drop(held);
-    if ok_dst {
-        assert_eq!(std::fs::read_to_string(top.join("dst")).unwrap(), "new");
-    } else {
-        d.replace("src", &d, "dst").unwrap();
-    }
+    report("取代既有目標(目標的檔案 handle 開啟中)", &r);
+    r.unwrap();
+    // 開著的 handle 仍讀到被取代前的內容
+    assert_eq!(read_all(held), "old");
+    assert_eq!(std::fs::read_to_string(top.join("dst")).unwrap(), "new");
     // 來源開啟中
     std::fs::write(top.join("src2"), "new2").unwrap();
     let held = d.open_file("src2", FileAccess::Read).unwrap();
     let r = d.rename("src2", &d, "dst");
-    report("改名來源(來源的檔案 handle 開啟中)", r);
-    drop(held);
+    report("改名來源(來源的檔案 handle 開啟中)", &r);
+    r.unwrap();
+    assert_eq!(read_all(held), "new2");
+    assert!(d.lstat("src2").unwrap().is_none());
     // 以寫入方式開啟中的目標
     std::fs::write(top.join("src3"), "new3").unwrap();
     let held = d.open_file("dst", RW).unwrap();
     let r = d.rename("src3", &d, "dst");
-    report("取代既有目標(目標以讀寫開啟中)", r);
+    report("取代既有目標(目標以讀寫開啟中)", &r);
+    r.unwrap();
     drop(held);
+    assert_eq!(std::fs::read_to_string(top.join("dst")).unwrap(), "new3");
+}
+
+// ---------------------------------------------------------------------------------------------
+// T3(CHG-20261125-01):保留裝置名、主控台名稱、大小寫、開著 handle 的刪除與搬移、8.3 短檔名、W-6
+// ---------------------------------------------------------------------------------------------
+
+/// 結果印成「開到目錄項」或 `ReservedDevice`;其他結果(開到裝置、別的錯誤)判失敗。
+fn h1_outcome<T>(what: &str, r: safe_fs::Result<T>, check: impl FnOnce(T)) -> &'static str {
+    match r {
+        Ok(v) => {
+            check(v);
+            "開到目錄項"
+        }
+        Err(e) => {
+            assert_eq!(e.kind(), ErrorKind::ReservedDevice, "{what}");
+            "ReservedDevice"
+        }
+    }
+}
+
+/// H-1 / 代決 9(列入 Acceptance operation):以 `\\?\` 預先建立 `con` 目錄(內含標記檔)、`nul` 一般檔、
+/// `COM1` 目錄,再以 `open_dir`、`open_file`、`lstat`、`entries`、`rmtree` 操作;每一項斷言「開到該目錄項
+/// (讀到標記)」或 `ReservedDevice` 兩者之一,逐項印出是哪一種;回 `ReservedDevice` 時磁碟不變。
+/// 另斷言 `create_excl(d, "con")` 不開到裝置,以及 `rmtree` 中途失敗時已刪的項目不還原。
+#[test]
+fn h1_reserved_names_in_every_function() {
+    let w = WorkDir::new();
+    let top = w.top();
+    let r = verbatim(&top.join("r"));
+    std::fs::create_dir(&r).unwrap();
+    let items: [(&str, bool); 3] = [("con", true), ("nul", false), ("COM1", true)];
+    for (name, is_dir) in items {
+        let p = r.join(name);
+        if is_dir {
+            std::fs::create_dir(&p).unwrap();
+            std::fs::write(p.join("marker.txt"), format!("marker-{name}")).unwrap();
+        } else {
+            std::fs::write(&p, format!("marker-{name}")).unwrap();
+        }
+    }
+    let before = vsnap(&top);
+    let d = open_dir(&top, &["r"], DirOptions::default()).unwrap();
+    let mut refused = 0;
+    let mut opened = 0;
+    let mut tally = |o: &str| {
+        if o == "ReservedDevice" {
+            refused += 1;
+        } else {
+            opened += 1;
+        }
+    };
+    for (name, is_dir) in items {
+        let marker = format!("marker-{name}");
+        let kind = if is_dir { "目錄" } else { "一般檔" };
+        // open_dir(目錄)或 open_file(一般檔):開到者須讀到標記
+        let (what, o) = if is_dir {
+            (
+                "open_dir",
+                h1_outcome(
+                    name,
+                    open_dir(&top, &["r", name], DirOptions::default()),
+                    |sub| {
+                        assert_eq!(
+                            read_all(sub.open_file("marker.txt", FileAccess::Read).unwrap()),
+                            marker
+                        );
+                    },
+                ),
+            )
+        } else {
+            (
+                "open_file",
+                h1_outcome(name, d.open_file(name, FileAccess::Read), |f| {
+                    assert!(f.metadata().unwrap().is_file());
+                    assert_eq!(read_all(f), marker);
+                }),
+            )
+        };
+        tally(o);
+        println!("T3 H-1 {what} {name}({kind}):{o}");
+        let o = h1_outcome(name, d.lstat(name), |m| {
+            let m = m.expect("lstat 開到目錄項時應存在");
+            let want = if is_dir {
+                EntryKind::Dir
+            } else {
+                EntryKind::File
+            };
+            assert_eq!(m.kind, want);
+        });
+        tally(o);
+        println!("T3 H-1 lstat {name}({kind}):{o}");
+    }
+    // entries:列舉 r 本身(含三個保留名稱項目)
+    let o = h1_outcome("entries", d.entries(), |list| {
+        let names: Vec<String> = list
+            .iter()
+            .map(|(n, _)| n.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, ["COM1", "con", "nul"]);
+    });
+    tally(o);
+    println!("T3 H-1 entries(r 內含 con、nul、COM1):{o}");
+    assert_eq!(
+        vsnap(&top),
+        before,
+        "回 ReservedDevice 時磁碟不得有任何變動"
+    );
+    // rmtree:開到者須刪掉該目錄項本身
+    for (name, is_dir) in items {
+        let kind = if is_dir { "目錄" } else { "一般檔" };
+        let o = h1_outcome(name, d.rmtree(name, false), |()| {
+            assert!(std::fs::symlink_metadata(r.join(name)).is_err());
+        });
+        tally(o);
+        if o == "ReservedDevice" {
+            assert!(
+                std::fs::symlink_metadata(r.join(name)).is_ok(),
+                "{name} 回 ReservedDevice 時不得刪除"
+            );
+        }
+        println!("T3 H-1 rmtree {name}({kind}):{o}");
+    }
+    // create_excl:不得開到裝置(建立出磁碟上的檔案,或 ReservedDevice 且沒有建立任何東西)
+    std::fs::create_dir(top.join("c")).unwrap();
+    let c = open_dir(&top, &["c"], DirOptions::default()).unwrap();
+    for name in ["con", "CON.txt", "nul"] {
+        let o = h1_outcome(name, c.create_excl(name, W, 0o600), |f| {
+            assert!(f.metadata().unwrap().is_file());
+            assert!(
+                std::fs::symlink_metadata(verbatim(&top.join("c").join(name)))
+                    .unwrap()
+                    .is_file()
+            );
+        });
+        tally(o);
+        println!("T3 H-1 create_excl {name}:{o}");
+    }
+    println!("T3 H-1 合計:開到目錄項 {opened}、ReservedDevice {refused}");
+
+    // rmtree 中途失敗:子項依碼位順序處理,a.txt 先刪除,遇到 con 以 ReservedDevice 失敗,z.txt 留下;
+    // 已刪的 a.txt 不還原(Python 的 rmtree 中途失敗同樣不還原)
+    let p = verbatim(&top.join("p"));
+    std::fs::create_dir(&p).unwrap();
+    std::fs::write(p.join("a.txt"), "a").unwrap();
+    std::fs::create_dir(p.join("con")).unwrap();
+    std::fs::write(p.join("z.txt"), "z").unwrap();
+    let t = open_dir(&top, NONE, DirOptions::default()).unwrap();
+    let e = t.rmtree("p", false).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::ReservedDevice);
+    assert!(
+        std::fs::symlink_metadata(p.join("a.txt")).is_err(),
+        "a.txt 已刪除、不還原"
+    );
+    assert!(std::fs::symlink_metadata(p.join("con")).unwrap().is_dir());
+    assert!(
+        std::fs::symlink_metadata(p.join("z.txt"))
+            .unwrap()
+            .is_file()
+    );
+    println!(
+        "T3 H-1 rmtree 中途遇到 con:ReservedDevice;先處理的 a.txt 已刪除、不還原,con 與 z.txt 留下"
+    );
+}
+
+/// C-1:`CONIN$`、`CONOUT$`、`CLOCK$`(cap-std 不擋、`reserved_device` 也不擋)在建立、查詢、改名、硬連結、
+/// 刪除各函式都對應磁碟上的目錄項,不會開到主控台裝置。CI `windows-latest` 再確認一次。
+#[test]
+fn c1_console_names_are_disk_entries_in_every_function() {
+    let w = WorkDir::new();
+    let top = w.top();
+    let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
+    for name in ["CONIN$", "CONOUT$", "CLOCK$", "conin$.txt"] {
+        let on_disk = || std::fs::symlink_metadata(verbatim(&top.join(name)));
+        {
+            let mut f = d.create_excl(name, RW, 0o600).unwrap();
+            assert!(f.metadata().unwrap().is_file());
+            f.write_all(b"console-name").unwrap();
+        }
+        assert!(on_disk().unwrap().is_file(), "{name} 未建立出磁碟上的檔案");
+        assert_eq!(d.lstat(name).unwrap().unwrap().kind, EntryKind::File);
+        assert_eq!(
+            read_all(d.open_file(name, FileAccess::Read).unwrap()),
+            "console-name"
+        );
+        d.rename(name, &d, "renamed").unwrap();
+        assert!(on_disk().is_err());
+        d.rename("renamed", &d, name).unwrap();
+        assert!(on_disk().unwrap().is_file());
+        d.hard_link(name, &d, "hl").unwrap();
+        assert_eq!(
+            read_all(d.open_file("hl", FileAccess::Read).unwrap()),
+            "console-name"
+        );
+        d.unlink("hl", false).unwrap();
+        d.unlink(name, false).unwrap();
+        assert!(on_disk().is_err(), "{name} unlink 後磁碟上應已刪除");
+        drop(
+            d.open_child(
+                name,
+                DirOptions {
+                    create: true,
+                    ..DirOptions::default()
+                },
+            )
+            .unwrap(),
+        );
+        assert!(on_disk().unwrap().is_dir(), "{name} 未建立出磁碟上的目錄");
+        d.rmtree(name, false).unwrap();
+        assert!(on_disk().is_err(), "{name} rmtree 後磁碟上應已刪除");
+        println!(
+            "T3 C-1 {name}:create_excl、lstat、open_file、rename、hard_link、unlink、open_child(建立)、rmtree 皆對應磁碟上的目錄項"
+        );
+    }
+    assert!(vsnap(&top).is_empty());
+}
+
+/// D-6:NTFS 不分大小寫——只差大小寫的名稱開到同一項目(Linux 找不到;macOS APFS 預設與此相同)。
+#[test]
+fn d6_case_only_names_open_the_same_entry() {
+    let w = WorkDir::new();
+    let top = w.top();
+    let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
+    drop(d.create_excl("Abc.txt", W, 0o600).unwrap());
+    std::fs::write(top.join("Abc.txt"), "abc").unwrap();
+    assert_eq!(
+        read_all(d.open_file("aBC.TXT", FileAccess::Read).unwrap()),
+        "abc"
+    );
+    assert_eq!(
+        d.lstat("ABC.TXT").unwrap().unwrap().identity,
+        d.lstat("Abc.txt").unwrap().unwrap().identity
+    );
+    assert_eq!(
+        d.create_excl("ABC.TXT", W, 0o600).unwrap_err().kind(),
+        ErrorKind::AlreadyExists
+    );
+    assert_eq!(d.entry_names().unwrap(), ["Abc.txt"]);
+    println!("T3 D-6 只差大小寫的名稱:開到同一項目(identity 相同),排他建立回 AlreadyExists");
+}
+
+/// D-10:開著 handle 就刪除或搬移(`studio_server.py:1064-1065`、`tts_service.py:254-256`、`project.py:1403`)。
+/// 實測結果以斷言鎖住:檔案 handle 開著時 `unlink` 成功、名稱立即消失(NTFS POSIX 刪除語意)、handle 照常
+/// 可讀寫、同名可再建立;檔案改名到其他目錄成功,之後的寫入落在新位置;持有目錄 handle 時改名該目錄為
+/// 共用違規(`Other`,32);只持有目錄內檔案的 handle 時改名該目錄為拒絕存取(`PermissionDenied`,5)。
+#[test]
+fn d10_unlink_and_rename_while_handle_is_open() {
+    use std::io::Seek;
+    let w = WorkDir::new();
+    let top = w.top();
+    let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
+    // 匿名暫存檔手法:create_excl 後立刻 unlink,繼續用 handle
+    let mut f = d.create_excl("tmp", RW, 0o600).unwrap();
+    f.write_all(b"abc").unwrap();
+    d.unlink("tmp", false).unwrap();
+    assert!(d.lstat("tmp").unwrap().is_none(), "unlink 後名稱應立即消失");
+    assert!(d.entry_names().unwrap().is_empty());
+    f.seek(std::io::SeekFrom::Start(0)).unwrap();
+    let mut s = String::new();
+    f.read_to_string(&mut s).unwrap();
+    assert_eq!(s, "abc");
+    f.write_all(b"def").unwrap();
+    drop(d.create_excl("tmp", W, 0o600).unwrap());
+    assert_eq!(
+        d.lstat("tmp").unwrap().unwrap().len,
+        0,
+        "同名再建立的是新檔"
+    );
+    drop(f);
+    println!("T3 D-10 檔案 handle 開著時 unlink:成功,名稱立即消失,handle 照常讀寫,同名可再建立");
+    // 開著的檔案改名到其他目錄
+    std::fs::create_dir(top.join("trash")).unwrap();
+    let t = open_dir(&top, &["trash"], DirOptions::default()).unwrap();
+    let mut g = d.create_excl("g", RW, 0o600).unwrap();
+    g.write_all(b"g").unwrap();
+    d.rename("g", &t, "g2").unwrap();
+    g.write_all(b"2").unwrap();
+    drop(g);
+    assert_eq!(read_all(t.open_file("g2", FileAccess::Read).unwrap()), "g2");
+    println!("T3 D-10 檔案 handle 開著時改名到其他目錄:成功,之後的寫入落在新位置");
+    // project.py:1403:持有專案目錄 handle 與其內鎖檔時把專案目錄搬到 .trash/
+    std::fs::create_dir(top.join("proj")).unwrap();
+    let p = open_dir(&top, &["proj"], DirOptions::default()).unwrap();
+    let lock = p.open_or_create(".lock", RW, 0o600).unwrap();
+    let e = d.rename("proj", &t, "proj").unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Other(Some(32)));
+    println!(
+        "T3 D-10 持有目錄 handle 時改名該目錄:失敗 {:?}(錯誤碼 32,共用違規)",
+        e.kind()
+    );
+    drop(p);
+    let e = d.rename("proj", &t, "proj").unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(e.raw_os_error(), Some(5));
+    println!(
+        "T3 D-10 只持有目錄內檔案的 handle 時改名該目錄:失敗 {:?}(錯誤碼 5,拒絕存取)",
+        e.kind()
+    );
+    drop(lock);
+    d.rename("proj", &t, "proj").unwrap();
+    assert!(t.lstat("proj").unwrap().unwrap().kind == EntryKind::Dir);
+    println!("T3 D-10 關閉全部 handle 後改名該目錄:成功");
+}
+
+/// D-11:8.3 短檔名別名。磁碟區保留短檔名時,別名開到同一項目(identity 相同),且型別檢查照常——
+/// junction 的別名同樣是 `Symlink`,開啟回 `Unsafe`,所以別名無法繞過連結拒絕。磁碟區不保留短檔名
+/// (例:CI 的磁碟區可能停用)時印出並略過斷言。
+#[test]
+fn d11_short_name_alias_opens_the_same_entry_and_type_check_applies() {
+    let w = WorkDir::new();
+    let top = w.top();
+    std::fs::write(top.join("longfilename-abc.txt"), "long").unwrap();
+    junction(&top.join("longjunctionname"), &w.outside());
+    let before = snapshot(&w.outside());
+    let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
+    let long = d.lstat("longfilename-abc.txt").unwrap().unwrap();
+    let alias = d.lstat("LONGFI~1.TXT").unwrap();
+    let Some(alias) = alias.filter(|m| m.identity == long.identity) else {
+        println!("T3 D-11 本磁碟區不保留 8.3 短檔名(LONGFI~1.TXT 不存在):略過斷言");
+        return;
+    };
+    assert_eq!(alias.kind, EntryKind::File);
+    assert_eq!(
+        read_all(d.open_file("LONGFI~1.TXT", FileAccess::Read).unwrap()),
+        "long"
+    );
+    assert_eq!(
+        d.lstat("LONGJU~1").unwrap().unwrap().kind,
+        EntryKind::Symlink
+    );
+    assert_eq!(
+        d.open_child("LONGJU~1", DirOptions::default())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsafe
+    );
+    assert_eq!(
+        d.open_file("LONGJU~1", FileAccess::Read)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsafe
+    );
+    assert_eq!(
+        open_path(&top, &["LONGJU~1", "marker.txt"], FileAccess::Read)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsafe
+    );
+    // 變更類(完整路徑經 Win32)以別名刪除的是原檔
+    d.unlink("LONGFI~1.TXT", false).unwrap();
+    assert!(d.lstat("longfilename-abc.txt").unwrap().is_none());
+    assert_eq!(snapshot(&w.outside()), before, "outside/ 不得有任何變動");
+    println!(
+        "T3 D-11 8.3 別名:LONGFI~1.TXT 開到原檔(identity 相同)、以別名 unlink 刪除原檔;junction 別名 LONGJU~1 為 Symlink、開啟回 Unsafe"
+    );
+}
+
+/// W-6 定點(代決 14;CI 與本機都跑):在空目錄建立第一個名稱的目錄,再以 `lstat` 查第二個名稱;
+/// 印出「NTFS 是否視為同名」與「`fold_name` 是否相等」。NTFS 結果依磁碟區的 `$UpCase` 表而定,只印出、
+/// 不斷言;`fold_name` 的結果固定,斷言之。
+#[test]
+fn w6_ntfs_case_mapping_targeted() {
+    let w = WorkDir::new();
+    let top = w.top();
+    let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
+    let create = DirOptions {
+        create: true,
+        ..DirOptions::default()
+    };
+    // (建立的名稱, 查的名稱, fold_name 是否相等)
+    let pairs: [(&str, &str, bool); 6] = [
+        ("\u{131}", "I", false),
+        ("\u{131}", "i", false),
+        ("I", "\u{131}", false),
+        ("\u{df}", "ss", true),
+        ("\u{212a}", "k", true),
+        ("\u{17f}", "s", true),
+    ];
+    for (i, (made, query, fold_eq)) in pairs.into_iter().enumerate() {
+        let sub = d.open_child(format!("w{i}"), create).unwrap();
+        drop(sub.open_child(made, create).unwrap());
+        let same = sub.lstat(query).unwrap().is_some();
+        let folded = common::fold_name(made) == common::fold_name(query);
+        assert_eq!(
+            folded, fold_eq,
+            "fold_name({made:?}) 與 fold_name({query:?})"
+        );
+        println!(
+            "T3 W-6 定點 {made}(U+{:04X})/ {query}:NTFS 視為同名 {}、fold_name 相等 {}",
+            u32::from(made.chars().next().unwrap()),
+            if same { "是" } else { "否" },
+            if folded { "是" } else { "否" }
+        );
+    }
+}
+
+/// W-6 全面查證(`#[ignore]`;T3 與 Acceptance operation 以 `--ignored` 在 Windows 開發機執行):
+/// U+0000~U+FFFF 中可作為 Windows 檔名的每個字元(`check_name` 合格、不是保留裝置名、不是代理單位),
+/// 依碼位順序在空目錄內以 `create_excl` 排他建立單字元檔名(內容為碼位);`AlreadyExists` 即表示 NTFS 視它
+/// 與先前某字元同名,讀回既有檔案的內容得到配對。最後印出「NTFS 同名但 `fold_name` 不同」與
+/// 「`fold_name` 相同但 NTFS 不同名」兩組的數量與前 50 筆,以及耗時。只記錄、不以常數鎖住(`$UpCase` 依磁碟區)。
+#[test]
+#[ignore = "W-6 全面查證:建立約 6 萬個檔案,只在 Windows 開發機以 --ignored 執行"]
+fn w6_ntfs_case_mapping_full_bmp() {
+    use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+    let started = std::time::Instant::now();
+    let w = WorkDir::new();
+    let top = w.top();
+    let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
+    // class[c]:c 所屬 NTFS 同名類的代表字元(最先建立成功的那一個)
+    let mut class: BTreeMap<char, char> = BTreeMap::new();
+    let mut skipped = 0usize;
+    let mut failed: Vec<(char, String)> = Vec::new();
+    for cp in 0u32..=0xFFFF {
+        let Some(ch) = char::from_u32(cp) else {
+            continue; // 代理單位
+        };
+        let name = ch.to_string();
+        let os = OsStr::new(&name);
+        if safe_fs::check_name(os).is_err() || safe_fs::reserved_device(os) {
+            skipped += 1;
+            continue;
+        }
+        match d.create_excl(&name, W, 0o600) {
+            Ok(mut f) => {
+                f.write_all(format!("{cp:04X}").as_bytes()).unwrap();
+                class.insert(ch, ch);
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                let hex = read_all(d.open_file(&name, FileAccess::Read).unwrap());
+                let partner = char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap();
+                let rep = class[&partner];
+                class.insert(ch, rep);
+            }
+            Err(e) => failed.push((ch, format!("{:?}", e.kind()))),
+        }
+    }
+    let created = class.iter().filter(|(c, r)| c == r).count();
+    let probe_secs = started.elapsed().as_secs_f64();
+    let show = |c: char| format!("U+{:04X}", u32::from(c));
+    // 第一組:NTFS 同名但 fold_name 不同
+    let mut members: BTreeMap<char, Vec<char>> = BTreeMap::new();
+    for (&c, &r) in &class {
+        members.entry(r).or_default().push(c);
+    }
+    let mut ntfs_only = Vec::new();
+    for group in members.values() {
+        for (i, &a) in group.iter().enumerate() {
+            for &b in &group[i + 1..] {
+                if common::fold_name(&a.to_string()) != common::fold_name(&b.to_string()) {
+                    ntfs_only.push((a, b));
+                }
+            }
+        }
+    }
+    // 第二組:fold_name 相同但 NTFS 不同名
+    let mut by_fold: BTreeMap<String, Vec<char>> = BTreeMap::new();
+    for &c in class.keys() {
+        by_fold
+            .entry(common::fold_name(&c.to_string()))
+            .or_default()
+            .push(c);
+    }
+    let mut fold_only = Vec::new();
+    for group in by_fold.values() {
+        for (i, &a) in group.iter().enumerate() {
+            for &b in &group[i + 1..] {
+                if class[&a] != class[&b] {
+                    fold_only.push((a, b));
+                }
+            }
+        }
+    }
+    println!(
+        "T3 W-6 全面查證:檢查 {} 個字元(略過 {skipped} 個不合格或保留名稱、代理單位另計),建立 {created} 個,NTFS 同名 {} 個,其他錯誤 {}",
+        class.len() + failed.len(),
+        class.len() - created,
+        failed.len()
+    );
+    for (c, k) in failed.iter().take(10) {
+        println!("T3 W-6 其他錯誤:{} {k}", show(*c));
+    }
+    println!(
+        "T3 W-6 第一組(NTFS 同名但 fold_name 不同):{} 組",
+        ntfs_only.len()
+    );
+    for (a, b) in ntfs_only.iter().take(50) {
+        println!(
+            "T3 W-6   {} {a} ~ {} {b}(fold:{:?} / {:?})",
+            show(*a),
+            show(*b),
+            common::fold_name(&a.to_string()),
+            common::fold_name(&b.to_string())
+        );
+    }
+    println!(
+        "T3 W-6 第二組(fold_name 相同但 NTFS 不同名):{} 組",
+        fold_only.len()
+    );
+    for (a, b) in fold_only.iter().take(50) {
+        println!(
+            "T3 W-6   {} {a} / {} {b}(fold:{:?})",
+            show(*a),
+            show(*b),
+            common::fold_name(&a.to_string())
+        );
+    }
+    drop(d);
+    drop(w);
+    println!(
+        "T3 W-6 耗時:建立與查證 {probe_secs:.1} 秒,含清理 {:.1} 秒",
+        started.elapsed().as_secs_f64()
+    );
 }
