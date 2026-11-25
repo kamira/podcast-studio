@@ -72,14 +72,16 @@ impl Error {
     }
 
     /// `Other` 類錯誤的名稱(比對輸出 `error os_<名稱>` 用;Python 端為 `errno.errorcode`):
-    /// Unix 為 errno 名稱(表內沒有者 `errno<數值>`)、Windows 為 `win<錯誤碼>`,沒有錯誤碼為 `unknown`。
+    /// Unix 為 errno 名稱(表內沒有者 `errno<數值>`);Windows 上與 errno 意義相同的錯誤碼回該 errno 名稱
+    /// (`ERROR_DIR_NOT_EMPTY` → `ENOTEMPTY`、`ERROR_NOT_SAME_DEVICE` → `EXDEV`,D-7),其餘為 `win<錯誤碼>`;
+    /// 沒有錯誤碼為 `unknown`。
     pub fn os_error_name(&self) -> String {
         match self.raw_os_error() {
             None => "unknown".to_string(),
             Some(code) if cfg!(unix) => {
                 errno_name(code).map_or_else(|| format!("errno{code}"), str::to_string)
             }
-            Some(code) => format!("win{code}"),
+            Some(code) => win_error_name(code).map_or_else(|| format!("win{code}"), str::to_string),
         }
     }
 }
@@ -154,6 +156,17 @@ pub(crate) fn from_io(e: io::Error) -> Error {
     Error::with_source(kind, e)
 }
 
+/// Windows 錯誤碼中與 errno 意義相同者的 errno 名稱(D-7:與 Linux 的比對結果相同)。
+fn win_error_name(code: i32) -> Option<&'static str> {
+    match code {
+        // ERROR_DIR_NOT_EMPTY
+        145 => Some("ENOTEMPTY"),
+        // ERROR_NOT_SAME_DEVICE
+        17 => Some("EXDEV"),
+        _ => None,
+    }
+}
+
 /// errno 名稱(比對輸出 `error os_<名稱>` 用;Python 端為 `errno.errorcode`)。
 /// 只列 `safe_fs` 操作可能遇到的值;查不到回 `None`。
 pub fn errno_name(code: i32) -> Option<&'static str> {
@@ -169,6 +182,7 @@ mod errno {
     pub const EPERM: i32 = 1;
     pub const ENOENT: i32 = 2;
     pub const EIO: i32 = 5;
+    pub const ENXIO: i32 = 6;
     pub const EBADF: i32 = 9;
     pub const EACCES: i32 = 13;
     pub const EBUSY: i32 = 16;
@@ -202,6 +216,7 @@ mod errno {
         (EPERM, "EPERM"),
         (ENOENT, "ENOENT"),
         (EIO, "EIO"),
+        (ENXIO, "ENXIO"),
         (EBADF, "EBADF"),
         (EACCES, "EACCES"),
         (EBUSY, "EBUSY"),
@@ -222,4 +237,4 @@ mod errno {
 }
 
 #[cfg(unix)]
-pub(crate) use errno::{ELOOP, EMLINK, ENOTDIR as ERRNO_ENOTDIR};
+pub(crate) use errno::{ELOOP, EMLINK, ENOTDIR as ERRNO_ENOTDIR, ENXIO};

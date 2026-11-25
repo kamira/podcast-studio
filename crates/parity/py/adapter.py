@@ -27,6 +27,8 @@ CHG-20261125-01 代決 11;
 `safe_fs.*` 單元(CHG-20261125-01 代決 10):輸入 `{"tree": [項目…], "call": {參數}}`;**單元會在系統暫存目錄
 建立唯一名稱的工作目錄(`tempfile.mkdtemp`),其下放 `top/`(受信根目錄,依 `tree` 建立合成檔案樹)與
 `outside/`(固定的標記檔),呼叫 `safe_fs` 後取結果與快照,案例結束即刪除工作目錄**;不寫其他任何位置。
+`safe_fs.*` 共 14 個單元:`check_name` 與開啟類四個(T1)、建立 / 查詢 / 刪除 / 搬移類九個(T2:`create_excl`、
+`open_or_create`、`lstat`、`entries`、`unlink`、`rmtree`、`rename`、`replace`、`link`)。
 """
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -396,6 +399,138 @@ def safe_fs_open_path(value):
     return _run_tree_case(value, _act_open_path)
 
 
+# 建立類只接受含寫入的旗標(Rust 端建立檔案須帶寫入權限);`r` 視為輸入格式不符
+CREATE_FLAGS = ("w", "rw", "w_trunc")
+
+
+def _entry_type(st):
+    """lstat 結果的型別:symlink / dir / file / other(與 Rust `EntryKind` 相同)。"""
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    return "other"
+
+
+def _lstat_result(st):
+    """`null`(不存在)或 `{"type", "size"?}`(只有一般檔帶 size;不比對時間、inode 等隨環境變動的欄位)。"""
+    if st is None:
+        return None
+    out = {"type": _entry_type(st)}
+    if out["type"] == "file":
+        out["size"] = st.st_size
+    return out
+
+
+def _create_flags(call, default):
+    flags = call.get("flags", default)
+    if flags not in CREATE_FLAGS:
+        raise _type_error()
+    return flags
+
+
+def _act_create_excl(work, call):
+    parts = _call_field(call, "dir", "list", [])
+    name = _call_field(call, "name", "str")
+    flags = _create_flags(call, "w")
+    with safe_fs.closing(safe_fs.open_dir(work.top, parts)) as d:
+        with safe_fs.closing(safe_fs.create_excl(d, name, 0o600, FLAGS[flags])) as fd:
+            return _file_result(fd, flags)
+
+
+def _act_open_or_create(work, call):
+    parts = _call_field(call, "dir", "list", [])
+    name = _call_field(call, "name", "str")
+    flags = _create_flags(call, "rw")
+    with safe_fs.closing(safe_fs.open_dir(work.top, parts)) as d:
+        with safe_fs.closing(safe_fs.open_or_create(d, name, FLAGS[flags])) as fd:
+            return _file_result(fd, flags)
+
+
+def _act_lstat(work, call):
+    parts = _call_field(call, "dir", "list", [])
+    name = _call_field(call, "name", "str")
+    with safe_fs.closing(safe_fs.open_dir(work.top, parts)) as d:
+        return _lstat_result(safe_fs.lstat(d, name))
+
+
+def _act_entries(work, call):
+    parts = _call_field(call, "dir", "list", [])
+    with safe_fs.closing(safe_fs.open_dir(work.top, parts)) as d:
+        return [[n, _entry_type(st)] for n, st in safe_fs.entries(d)]
+
+
+def _act_remove(func):
+    def act(work, call):
+        parts = _call_field(call, "dir", "list", [])
+        name = _call_field(call, "name", "str")
+        missing_ok = _call_field(call, "missing_ok", "bool", False)
+        with safe_fs.closing(safe_fs.open_dir(work.top, parts)) as d:
+            func(d, name, missing_ok=missing_ok)
+        return None
+    return act
+
+
+def _act_move(func):
+    def act(work, call):
+        src_parts = _call_field(call, "src_dir", "list", [])
+        src = _call_field(call, "src", "str")
+        dst_parts = _call_field(call, "dst_dir", "list", [])
+        dst = _call_field(call, "dst", "str")
+        with safe_fs.closing(safe_fs.open_dir(work.top, src_parts)) as s:
+            with safe_fs.closing(safe_fs.open_dir(work.top, dst_parts)) as t:
+                func(s, src, t, dst)
+        return None
+    return act
+
+
+def safe_fs_create_excl(value):
+    """safe_fs.create_excl:call `{"dir", "name", "flags"?(w / rw / w_trunc,預設 w)}` → `{"file"}`;權限 0o600。"""
+    return _run_tree_case(value, _act_create_excl)
+
+
+def safe_fs_open_or_create(value):
+    """safe_fs.open_or_create:call `{"dir", "name", "flags"?(w / rw / w_trunc,預設 rw)}` → `{"file"}`。"""
+    return _run_tree_case(value, _act_open_or_create)
+
+
+def safe_fs_lstat(value):
+    """safe_fs.lstat:call `{"dir", "name"}` → `null` 或 `{"type", "size"?}`。"""
+    return _run_tree_case(value, _act_lstat)
+
+
+def safe_fs_entries(value):
+    """safe_fs.entries:call `{"dir"}` → `[[名稱, 型別], …]`(依名稱的碼位排序)。"""
+    return _run_tree_case(value, _act_entries)
+
+
+def safe_fs_unlink(value):
+    """safe_fs.unlink:call `{"dir", "name", "missing_ok"?}` → `null`。"""
+    return _run_tree_case(value, _act_remove(safe_fs.unlink))
+
+
+def safe_fs_rmtree(value):
+    """safe_fs.rmtree:call `{"dir", "name", "missing_ok"?}` → `null`。"""
+    return _run_tree_case(value, _act_remove(safe_fs.rmtree))
+
+
+def safe_fs_rename(value):
+    """safe_fs.rename:call `{"src_dir", "src", "dst_dir", "dst"}` → `null`。"""
+    return _run_tree_case(value, _act_move(safe_fs.rename))
+
+
+def safe_fs_replace(value):
+    """safe_fs.replace:call 同 rename → `null`。"""
+    return _run_tree_case(value, _act_move(safe_fs.replace))
+
+
+def safe_fs_link(value):
+    """safe_fs.link:call 同 rename → `null`(硬連結;來源是符號連結時不跟隨)。"""
+    return _run_tree_case(value, _act_move(safe_fs.link))
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -412,6 +547,15 @@ def build_units(environ=None):
         "safe_fs.open_child": safe_fs_open_child,
         "safe_fs.open_file": safe_fs_open_file,
         "safe_fs.open_path": safe_fs_open_path,
+        "safe_fs.create_excl": safe_fs_create_excl,
+        "safe_fs.open_or_create": safe_fs_open_or_create,
+        "safe_fs.lstat": safe_fs_lstat,
+        "safe_fs.entries": safe_fs_entries,
+        "safe_fs.unlink": safe_fs_unlink,
+        "safe_fs.rmtree": safe_fs_rmtree,
+        "safe_fs.rename": safe_fs_rename,
+        "safe_fs.replace": safe_fs_replace,
+        "safe_fs.link": safe_fs_link,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep

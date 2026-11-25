@@ -125,7 +125,9 @@ impl Registry {
     /// 產品模組單元 `value_checks.is_int`、`names.name_char_ok`、`names.normalize_name`、
     /// `names.fold_name`、`names.constants`(CHG-20261124-01,見 [`units`]);
     /// `safe_fs.check_name`、`safe_fs.open_dir`、`safe_fs.open_child`、`safe_fs.open_file`、`safe_fs.open_path`
-    /// (CHG-20261125-01,見 [`units_safe_fs`]);
+    /// (CHG-20261125-01 T1)與 `safe_fs.create_excl`、`safe_fs.open_or_create`、`safe_fs.lstat`、
+    /// `safe_fs.entries`、`safe_fs.unlink`、`safe_fs.rmtree`、`safe_fs.rename`、`safe_fs.replace`、`safe_fs.link`
+    /// (T2;見 [`units_safe_fs`]);
     /// 環境變數 `PARITY_TEST_SLEEP=1` 時另登錄測試專用的 `demo.sleep`。
     /// 路線圖第 2 筆起,各模組的 Rust 單元在此登錄。
     pub fn builtin() -> Self {
@@ -142,6 +144,18 @@ impl Registry {
         r.register("safe_fs.open_child", units_safe_fs::safe_fs_open_child);
         r.register("safe_fs.open_file", units_safe_fs::safe_fs_open_file);
         r.register("safe_fs.open_path", units_safe_fs::safe_fs_open_path);
+        r.register("safe_fs.create_excl", units_safe_fs::safe_fs_create_excl);
+        r.register(
+            "safe_fs.open_or_create",
+            units_safe_fs::safe_fs_open_or_create,
+        );
+        r.register("safe_fs.lstat", units_safe_fs::safe_fs_lstat);
+        r.register("safe_fs.entries", units_safe_fs::safe_fs_entries);
+        r.register("safe_fs.unlink", units_safe_fs::safe_fs_unlink);
+        r.register("safe_fs.rmtree", units_safe_fs::safe_fs_rmtree);
+        r.register("safe_fs.rename", units_safe_fs::safe_fs_rename);
+        r.register("safe_fs.replace", units_safe_fs::safe_fs_replace);
+        r.register("safe_fs.link", units_safe_fs::safe_fs_link);
         if std::env::var_os("PARITY_TEST_SLEEP").is_some_and(|v| v == "1") {
             r.register("demo.sleep", demo::sleep);
         }

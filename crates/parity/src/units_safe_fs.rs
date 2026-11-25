@@ -18,8 +18,15 @@
 //! | `safe_fs.open_child` | `{"dir", "name", "create"?}` | `{"dir"}` |
 //! | `safe_fs.open_file` | `{"dir", "name", "flags"}` | `{"file"}` |
 //! | `safe_fs.open_path` | `{"parts", "flags", "top"?}` | `{"file"}` |
+//! | `safe_fs.create_excl` | `{"dir", "name", "flags"?}`(`w` / `rw` / `w_trunc`,預設 `w`;權限 0o600) | `{"file"}` |
+//! | `safe_fs.open_or_create` | `{"dir", "name", "flags"?}`(`w` / `rw` / `w_trunc`,預設 `rw`) | `{"file"}` |
+//! | `safe_fs.lstat` | `{"dir", "name"}` | `null` 或 `{"type", "size"?}`(只有一般檔帶 `size`) |
+//! | `safe_fs.entries` | `{"dir"}` | `[[名稱, 型別], …]` |
+//! | `safe_fs.unlink`、`safe_fs.rmtree` | `{"dir", "name", "missing_ok"?}` | `null` |
+//! | `safe_fs.rename`、`safe_fs.replace`、`safe_fs.link` | `{"src_dir", "src", "dst_dir", "dst"}` | `null` |
 //!
 //! 開啟旗標 `r` / `w` / `rw` / `w_trunc`;寫入旗標先寫入標記 `<W>`,`rw` 再從頭讀回,`w`、`w_trunc` 的值為 `null`。
+//! 型別為 `file` / `dir` / `symlink` / `other`(不比對時間、檔案識別碼等隨環境變動的欄位)。
 //! 錯誤類別表(與轉接器相同):`Unsafe` → `reject unsafe`、`InvalidName` → `reject invalid_name`、
 //! `ReservedDevice` → `reject reserved_device`、`NotFound` → `error not_found`、`AlreadyExists` → `error exists`、
 //! `NotADirectory` → `error not_a_directory`、`IsADirectory` → `error is_a_directory`、
@@ -31,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use safe_fs::{DirOptions, ErrorKind, FileAccess, SafeDir};
+use safe_fs::{DirOptions, EntryKind, ErrorKind, FileAccess, Meta, SafeDir};
 use serde_json::{Map, Value, json};
 
 use crate::Outcome;
@@ -432,6 +439,135 @@ fn act_open_path(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcom
     file_result(f, flags)
 }
 
+/// 建立檔案的權限位元(與 Python 轉接器相同;Windows 忽略)。
+const CREATE_MODE: u32 = 0o600;
+
+/// 建立類單元的旗標:只接受含寫入的 `w` / `rw` / `w_trunc`(`r` 為輸入格式不符)。
+fn create_flags(
+    call: &Map<String, Value>,
+    default: &'static str,
+) -> Result<(&'static str, FileAccess), Outcome> {
+    let flag = match call.get("flags") {
+        None => default,
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Err(type_error()),
+    };
+    match flag {
+        "w" => Ok(("w", FileAccess::Write { truncate: false })),
+        "rw" => Ok(("rw", FileAccess::ReadWrite { truncate: false })),
+        "w_trunc" => Ok(("w_trunc", FileAccess::Write { truncate: true })),
+        _ => Err(type_error()),
+    }
+}
+
+fn kind_name(k: EntryKind) -> &'static str {
+    match k {
+        EntryKind::File => "file",
+        EntryKind::Dir => "dir",
+        EntryKind::Symlink => "symlink",
+        EntryKind::Other => "other",
+    }
+}
+
+fn lstat_value(m: Option<Meta>) -> Value {
+    match m {
+        None => Value::Null,
+        Some(m) if m.kind == EntryKind::File => json!({"type": "file", "size": m.len}),
+        Some(m) => json!({ "type": kind_name(m.kind) }),
+    }
+}
+
+fn open_in(work: &Work, parts: &[String]) -> Result<SafeDir, Outcome> {
+    safe_fs::open_dir(&work.top, parts, DirOptions::default()).map_err(|e| map_error(&e))
+}
+
+fn act_create_excl(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    let parts = str_list(call, "dir")?;
+    let name = str_field(call, "name")?;
+    let (flags, access) = create_flags(call, "w")?;
+    let d = open_in(work, &parts)?;
+    let f = d
+        .create_excl(&name, access, CREATE_MODE)
+        .map_err(|e| map_error(&e))?;
+    file_result(f, flags)
+}
+
+fn act_open_or_create(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    let parts = str_list(call, "dir")?;
+    let name = str_field(call, "name")?;
+    let (flags, access) = create_flags(call, "rw")?;
+    let d = open_in(work, &parts)?;
+    let f = d
+        .open_or_create(&name, access, CREATE_MODE)
+        .map_err(|e| map_error(&e))?;
+    file_result(f, flags)
+}
+
+fn act_lstat(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    let parts = str_list(call, "dir")?;
+    let name = str_field(call, "name")?;
+    let d = open_in(work, &parts)?;
+    d.lstat(&name).map(lstat_value).map_err(|e| map_error(&e))
+}
+
+fn act_entries(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    let parts = str_list(call, "dir")?;
+    let d = open_in(work, &parts)?;
+    let rows = d.entries().map_err(|e| map_error(&e))?;
+    Ok(Value::Array(
+        rows.into_iter()
+            .map(|(n, m)| json!([n.to_string_lossy(), kind_name(m.kind)]))
+            .collect(),
+    ))
+}
+
+fn remove_args(call: &Map<String, Value>) -> Result<(Vec<String>, String, bool), Outcome> {
+    Ok((
+        str_list(call, "dir")?,
+        str_field(call, "name")?,
+        bool_field(call, "missing_ok")?,
+    ))
+}
+
+fn act_unlink(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    let (parts, name, missing_ok) = remove_args(call)?;
+    let d = open_in(work, &parts)?;
+    d.unlink(&name, missing_ok).map_err(|e| map_error(&e))?;
+    Ok(Value::Null)
+}
+
+fn act_rmtree(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    let (parts, name, missing_ok) = remove_args(call)?;
+    let d = open_in(work, &parts)?;
+    d.rmtree(&name, missing_ok).map_err(|e| map_error(&e))?;
+    Ok(Value::Null)
+}
+
+type Move = fn(&SafeDir, &str, &SafeDir, &str) -> safe_fs::Result<()>;
+
+fn act_move(work: &Work, call: &Map<String, Value>, op: Move) -> Result<Value, Outcome> {
+    let src_parts = str_list(call, "src_dir")?;
+    let src = str_field(call, "src")?;
+    let dst_parts = str_list(call, "dst_dir")?;
+    let dst = str_field(call, "dst")?;
+    let s = open_in(work, &src_parts)?;
+    let t = open_in(work, &dst_parts)?;
+    op(&s, &src, &t, &dst).map_err(|e| map_error(&e))?;
+    Ok(Value::Null)
+}
+
+fn act_rename(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    act_move(work, call, |s, a, t, b| s.rename(a, t, b))
+}
+
+fn act_replace(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    act_move(work, call, |s, a, t, b| s.replace(a, t, b))
+}
+
+fn act_link(work: &Work, call: &Map<String, Value>) -> Result<Value, Outcome> {
+    act_move(work, call, |s, a, t, b| s.hard_link(a, t, b))
+}
+
 /// `safe_fs.check_name`:字串 → 合格 `ok null`、不合格 `reject invalid_name`;非字串 `error type`。
 pub fn safe_fs_check_name(input: &Value) -> Outcome {
     let Value::String(s) = input else {
@@ -461,6 +597,51 @@ pub fn safe_fs_open_file(input: &Value) -> Outcome {
 /// `safe_fs.open_path`。
 pub fn safe_fs_open_path(input: &Value) -> Outcome {
     run_tree_case(input, act_open_path)
+}
+
+/// `safe_fs.create_excl`。
+pub fn safe_fs_create_excl(input: &Value) -> Outcome {
+    run_tree_case(input, act_create_excl)
+}
+
+/// `safe_fs.open_or_create`。
+pub fn safe_fs_open_or_create(input: &Value) -> Outcome {
+    run_tree_case(input, act_open_or_create)
+}
+
+/// `safe_fs.lstat`。
+pub fn safe_fs_lstat(input: &Value) -> Outcome {
+    run_tree_case(input, act_lstat)
+}
+
+/// `safe_fs.entries`。
+pub fn safe_fs_entries(input: &Value) -> Outcome {
+    run_tree_case(input, act_entries)
+}
+
+/// `safe_fs.unlink`。
+pub fn safe_fs_unlink(input: &Value) -> Outcome {
+    run_tree_case(input, act_unlink)
+}
+
+/// `safe_fs.rmtree`。
+pub fn safe_fs_rmtree(input: &Value) -> Outcome {
+    run_tree_case(input, act_rmtree)
+}
+
+/// `safe_fs.rename`。
+pub fn safe_fs_rename(input: &Value) -> Outcome {
+    run_tree_case(input, act_rename)
+}
+
+/// `safe_fs.replace`。
+pub fn safe_fs_replace(input: &Value) -> Outcome {
+    run_tree_case(input, act_replace)
+}
+
+/// `safe_fs.link`。
+pub fn safe_fs_link(input: &Value) -> Outcome {
+    run_tree_case(input, act_link)
 }
 
 #[cfg(test)]
@@ -494,6 +675,30 @@ mod tests {
             type_error()
         );
         assert_eq!(safe_fs_check_name(&json!(5)), type_error());
+        // T2:建立類只接受含寫入的旗標;各單元的欄位型別不符
+        for f in [json!("r"), json!("x"), json!(1)] {
+            let input = json!({"call": {"dir": [], "name": "a", "flags": f}});
+            assert_eq!(safe_fs_create_excl(&input), type_error(), "{input}");
+            assert_eq!(safe_fs_open_or_create(&input), type_error(), "{input}");
+        }
+        assert_eq!(safe_fs_lstat(&json!({"call": {"dir": []}})), type_error());
+        assert_eq!(
+            safe_fs_entries(&json!({"call": {"dir": "a"}})),
+            type_error()
+        );
+        for unit in [safe_fs_unlink, safe_fs_rmtree] {
+            assert_eq!(
+                unit(&json!({"call": {"name": "a", "missing_ok": 1}})),
+                type_error()
+            );
+        }
+        for unit in [safe_fs_rename, safe_fs_replace, safe_fs_link] {
+            assert_eq!(
+                unit(&json!({"call": {"src": "a", "dst_dir": [], "dst": 1}})),
+                type_error()
+            );
+            assert_eq!(unit(&json!("5")), type_error());
+        }
     }
 
     #[test]

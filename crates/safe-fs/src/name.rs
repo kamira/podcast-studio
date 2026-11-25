@@ -48,7 +48,7 @@ fn platform_ok(name: &OsStr) -> bool {
 }
 
 /// cap-std(`cap-primitives` 4.0.3 `windows/fs/open_impl.rs`)拒絕開啟的保留裝置名:
-/// 取名稱第一個句點(自第 2 個位元組起找)之前的部分,去掉結尾空白、轉大寫後與下列名稱相同者。
+/// 取名稱第一個句點(自第 2 個單位起找)之前的部分,去掉結尾空白、轉大寫後與下列名稱相同者。
 #[cfg(windows)]
 const RESERVED: &[&str] = &[
     "CON",
@@ -83,22 +83,33 @@ const RESERVED: &[&str] = &[
     "LPT\u{b3}",
 ];
 
-/// Windows 上名稱是否為 cap-std 會拒絕開啟的保留裝置名(例 `con`、`CON.txt`、`Com1`、`LPT¹`);
-/// 其他平台一律 `false`。規則與 cap-std 相同,使「cap-std 拒絕」與「本 crate 回 `ReservedDevice`」完全對應。
+/// Windows 上名稱是否為保留裝置名(例 `con`、`CON.txt`、`Com1`、`LPT¹`);其他平台一律 `false`。
+///
+/// 規則與 cap-std 相同——取名稱第一個句點(自第 2 個單位起找)之前的部分,去掉結尾空白、轉大寫後與
+/// `RESERVED` 比對——但**以 UTF-16 單位進行**(K-4):cap-std 以 `to_str` 取字串,含未配對代理單位
+/// (非 UTF-8)的名稱一律不擋;本函式把未配對代理單位換成 U+FFFD 後照同一規則判定,所以
+/// `con.<未配對代理>` 這類名稱(Win32 仍視為 `CON` 裝置)也回 `true`。凡 cap-std 拒絕開啟的名稱本函式
+/// 必回 `true`,本函式另多擋上述非 UTF-8 名稱(只會更嚴)。
 pub fn reserved_device(name: &OsStr) -> bool {
     #[cfg(windows)]
     {
-        let Some(s) = name.to_str() else {
-            return false;
+        use std::os::windows::ffi::OsStrExt;
+        const DOT: u16 = b'.' as u16;
+        let units: Vec<u16> = name.encode_wide().collect();
+        let stem = if units == [DOT, DOT] {
+            &units[..]
+        } else {
+            match units
+                .get(1..)
+                .and_then(|rest| rest.iter().position(|&u| u == DOT))
+            {
+                Some(i) => &units[..=i],
+                None => &units[..],
+            }
         };
-        let bytes = s.as_bytes();
-        let stem = match bytes
-            .get(1..)
-            .and_then(|rest| rest.iter().position(|&b| b == b'.'))
-        {
-            Some(i) if s != ".." => &s[..=i],
-            _ => s,
-        };
+        let stem: String = char::decode_utf16(stem.iter().copied())
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
         let upper = stem.trim_end().to_uppercase();
         RESERVED.contains(&upper.as_str())
     }
@@ -145,6 +156,40 @@ mod tests {
         }
         for n in miss {
             assert!(!reserved_device(OsStr::new(n)), "{n}");
+        }
+    }
+
+    /// K-4:以 UTF-16 單位判定,非 UTF-8 名稱的主檔名是保留名稱時同樣擋下;不會 panic。
+    #[cfg(windows)]
+    #[test]
+    fn reserved_device_works_on_utf16_units() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        let w = |s: &str, tail: &[u16]| {
+            let mut v: Vec<u16> = s.encode_utf16().collect();
+            v.extend_from_slice(tail);
+            OsString::from_wide(&v)
+        };
+        // 主檔名是保留名稱、副檔名含未配對代理單位:擋
+        for n in [
+            w("con.", &[0xD800]),
+            w("NUL.", &[0xDC00, 0x61]),
+            w("com1.", &[0xDFFF]),
+            w("LPT\u{b9}.x", &[0xD800]),
+            w("aux .", &[0xD83D]),
+        ] {
+            assert!(n.to_str().is_none());
+            assert!(reserved_device(&n), "{n:?}");
+        }
+        // 主檔名本身含未配對代理單位:不是保留名稱
+        for n in [
+            w("con", &[0xD800]),
+            w("", &[0xD800, 0x63, 0x6f, 0x6e]),
+            w("co", &[0xDC00, 0x6e]),
+            OsString::from_wide(&[0xD800]),
+            OsString::from_wide(&[0x2e, 0xD800]),
+        ] {
+            assert!(!reserved_device(&n), "{n:?}");
         }
     }
 
