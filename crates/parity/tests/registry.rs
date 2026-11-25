@@ -1,7 +1,9 @@
 //! 契約測試:Rust 單元介面(登錄名 → `fn(&serde_json::Value) -> Outcome`)與示範單元(CHG-20261123-01 T2)。
 //!
-//! L1:登錄表查詢、panic 攔截為 `Error { class: "panic" }`、示範單元各案例的 Rust 端期望結果。
-//! L2:Rust 登錄表的單元名,Python 轉接器都有回應;未知單元轉接器 exit 2。
+//! L1:登錄表查詢、panic 攔截為 `Error { class: "panic" }`、示範單元各案例的 Rust 端期望結果;
+//! 產品模組單元 `value_checks.is_int` 的登錄與 Rust 端結果(CHG-20261124-01 T1)。
+//! L2:Rust 登錄表的每個單元名,Python 轉接器都有合法回應(id 對應、三型之一);
+//! `ok 5` 的斷言只限 `demo.*` 單元(CHG-20261124-01 代決 13);未知單元轉接器 exit 2。
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -42,6 +44,35 @@ fn builtin_contains_demo_units() {
     assert!(names.contains(&"demo.parse_count_drift"), "{names:?}");
     assert!(r.contains("demo.parse_count"));
     assert!(!r.contains("demo.nope"));
+}
+
+#[test]
+fn builtin_contains_value_checks_is_int() {
+    let r = Registry::builtin();
+    assert!(r.contains("value_checks.is_int"), "{:?}", r.names());
+}
+
+#[test]
+fn value_checks_is_int_rust_side() {
+    // 代決 6:`ok` 的值為 true / false,沒有 reject 與 error。
+    let r = Registry::builtin();
+    for (input, expected) in [
+        (json!(0), true),
+        (json!(-3), true),
+        (json!(u64::MAX), true),
+        (json!(true), false),
+        (json!(1.0), false),
+        (json!("1"), false),
+        (json!(null), false),
+        (json!([1]), false),
+        (json!({"a": 1}), false),
+    ] {
+        assert_eq!(
+            r.run("value_checks.is_int", &input),
+            Some(ok(json!(expected))),
+            "輸入 {input}"
+        );
+    }
 }
 
 #[test]
@@ -167,17 +198,26 @@ fn run_adapter(unit: &str, stdin_text: &str) -> std::process::Output {
 
 #[test]
 fn adapter_answers_every_registered_unit() {
-    for name in Registry::builtin().names() {
+    let registry = Registry::builtin();
+    let names = registry.names();
+    assert!(names.contains(&"value_checks.is_int"), "{names:?}");
+    for name in names {
         let out = run_adapter(name, "{\"id\": \"p\", \"input\": \"5\"}\n");
         assert!(
             out.status.success(),
             "轉接器對 {name} 失敗:{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let line = String::from_utf8(out.stdout).unwrap();
-        let resp = parity::parse_response(line.trim_end()).expect("回應須合法");
-        assert_eq!(resp.id, "p");
-        assert_eq!(resp.outcome, ok(json!(5)), "{name}");
+        let text = String::from_utf8(out.stdout).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{name} 應恰好回一行:{text:?}");
+        // parse_response 只接受 ok / reject / error 三型且欄位齊全。
+        let resp = parity::parse_response(lines[0]).expect("回應須合法");
+        assert_eq!(resp.id, "p", "{name}");
+        // 示範單元的規則已知:輸入 "5" 必為 ok 5;產品模組單元只要求回應合法。
+        if name.starts_with("demo.") {
+            assert_eq!(resp.outcome, ok(json!(5)), "{name}");
+        }
     }
 }
 

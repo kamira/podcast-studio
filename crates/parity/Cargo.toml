@@ -7,11 +7,14 @@ description = "Rust 遷移的並行比對工具:同一組 fixture 交給 Python 
 # 不發佈;授權宣告與路線圖第 24 筆一併決定。cargo-deny 的 [licenses.private] 依此略過本 crate(CHG-20261123-01 T3)
 publish = false
 
-# 相依只限 serde(derive)與 serde_json(CHG-20261123-01 代決 4);
+# 外部相依只限 serde(derive)與 serde_json(CHG-20261123-01 代決 4);
+# 另以 path 相依 workspace 內的 studio-core,供比對單元呼叫(CHG-20261124-01 代決 4);
 # 命令列以標準函式庫解析,測試只用內建 #[test]。
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# 帶 version,cargo-deny bans 才不會把無版本的 path 相依判為 wildcard(合併 PR #174 CI 發現)
+studio-core = { path = "../studio-core", version = "=0.0.0" }
 
 [[bin]]
 name = "parity"

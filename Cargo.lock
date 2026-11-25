@@ -20,6 +20,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "studio-core",
 ]
 
 [[package]]
@@ -86,6 +87,9 @@ dependencies = [
 [[package]]
 name = "studio-core"
 version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "syn"

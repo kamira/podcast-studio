@@ -14,6 +14,7 @@
 
 pub mod demo;
 pub mod py;
+pub mod units;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -118,12 +119,19 @@ impl Registry {
     }
 
     /// 內建單元:示範單元 `demo.parse_count`、`demo.parse_count_drift`;
+    /// 產品模組單元 `value_checks.is_int`、`names.name_char_ok`、`names.normalize_name`、
+    /// `names.fold_name`、`names.constants`(CHG-20261124-01,見 [`units`]);
     /// 環境變數 `PARITY_TEST_SLEEP=1` 時另登錄測試專用的 `demo.sleep`。
     /// 路線圖第 2 筆起,各模組的 Rust 單元在此登錄。
     pub fn builtin() -> Self {
         let mut r = Self::new();
         r.register("demo.parse_count", demo::parse_count);
         r.register("demo.parse_count_drift", demo::parse_count_drift);
+        r.register("value_checks.is_int", units::value_checks_is_int);
+        r.register("names.name_char_ok", units::names_name_char_ok);
+        r.register("names.normalize_name", units::names_normalize_name);
+        r.register("names.fold_name", units::names_fold_name);
+        r.register("names.constants", units::names_constants);
         if std::env::var_os("PARITY_TEST_SLEEP").is_some_and(|v| v == "1") {
             r.register("demo.sleep", demo::sleep);
         }
