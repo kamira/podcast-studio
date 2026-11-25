@@ -8,8 +8,9 @@
 //! 另斷言 fixture 不含單獨代理碼位與超出 `u64` / 低於 `i64` 的整數字面值(CHG-20261124-01 T2 test (4))。
 //!
 //! `safe_fs.*`(CHG-20261125-01 T1,代決 10):macOS / Linux 上 `fixtures/safe_fs/` 照常以真轉接器比對,
-//! L4 以真執行檔跑五個開啟類 fixture;**Windows 上略過 `fixtures/safe_fs/`**(Python `safe_fs` 在 Windows
-//! 無法執行,事實 D)並印出原因,其他 fixture 照舊比對——Windows 的對照改由 `safe_fs_expected.rs` 進行。
+//! L4 以真執行檔跑 14 個 `safe_fs.*` fixture(T1 五個開啟類、T2 九個);**Windows 上略過
+//! `fixtures/safe_fs/`**(Python `safe_fs` 在 Windows 無法執行,事實 D)並印出原因,其他 fixture
+//! 照舊比對——Windows 的對照改由 `safe_fs_expected.rs` 進行。
 //!
 //! 直譯器沿用比對工具的取得順序:環境變數 `PARITY_PYTHON` → 平台預設值。
 

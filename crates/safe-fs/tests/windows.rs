@@ -629,7 +629,8 @@ fn k1_mutating_functions_reject_ambiguous_names_before_cap_std() {
     );
 }
 
-/// K-2:持有子目錄 handle 時改名上層目錄的實際結果(印出);`rmtree` 自己開的 handle 一定先關閉再刪除,
+/// K-2:持有子目錄 handle 時改名上層目錄的實際結果(T3 以斷言鎖住:上層改名錯誤碼 5;外部持有子目錄 handle 時
+/// `rmtree` 上層為 `Other`、原始錯誤碼 32);`rmtree` 自己開的 handle 一定先關閉再刪除,
 /// 而外部持有的子目錄 handle 會使該目錄無法刪除(共用違規)。
 #[test]
 fn k2_ancestor_rename_while_child_handle_is_open() {
@@ -869,7 +870,8 @@ fn d7_error_kinds_match_linux() {
     println!("T2 D-9 rename(目錄→既有空目錄):成功(與 Linux 相同,取代空目錄)");
 }
 
-/// D-9:改名的目標或來源有開啟中的檔案 handle 時的實際結果(印出)。
+/// D-9:改名的目標或來源有開啟中的檔案 handle 時的實際結果(T3 以斷言鎖住:三項皆成功,開著的 handle 仍讀到
+/// 改名前的內容)。
 #[test]
 fn d9_rename_with_open_handles() {
     let w = WorkDir::new();
@@ -1035,6 +1037,7 @@ fn h1_reserved_names_in_every_function() {
     // create_excl:不得開到裝置(建立出磁碟上的檔案,或 ReservedDevice 且沒有建立任何東西)
     std::fs::create_dir(top.join("c")).unwrap();
     let c = open_dir(&top, &["c"], DirOptions::default()).unwrap();
+    let mut created = 0;
     for name in ["con", "CON.txt", "nul"] {
         let o = h1_outcome(name, c.create_excl(name, W, 0o600), |f| {
             assert!(f.metadata().unwrap().is_file());
@@ -1045,8 +1048,21 @@ fn h1_reserved_names_in_every_function() {
             );
         });
         tally(o);
+        if o == "ReservedDevice" {
+            assert!(
+                std::fs::symlink_metadata(verbatim(&top.join("c").join(name))).is_err(),
+                "create_excl {name} 回 ReservedDevice 時不得建立任何東西"
+            );
+        } else {
+            created += 1;
+        }
         println!("T3 H-1 create_excl {name}:{o}");
     }
+    assert_eq!(
+        std::fs::read_dir(verbatim(&top.join("c"))).unwrap().count(),
+        created,
+        "c/ 的項目數須等於 create_excl 開到目錄項的次數(回 ReservedDevice 者不得建立任何東西)"
+    );
     println!("T3 H-1 合計:開到目錄項 {opened}、ReservedDevice {refused}");
 
     // rmtree 中途失敗:子項依碼位順序處理,a.txt 先刪除,遇到 con 以 ReservedDevice 失敗,z.txt 留下;
