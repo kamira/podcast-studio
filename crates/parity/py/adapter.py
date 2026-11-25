@@ -20,7 +20,7 @@
 import 的範圍:標準函式庫,加上明列的產品模組 `names`、`value_checks`(CHG-20261124-01 代決 13;
 `tests/test_parity_adapter.py` 以 AST 斷言集合以外的 import 會失敗)。產品模組以 repo 根目錄
 (本檔往上三層)插入 `sys.path[0]` 後 import,執行的是 repo 內受版本控制的程式;
-只 import 只用標準函式庫、不依賴 `fcntl` 等平台模組者,三平台都能載入。
+只 import 本身只用標準函式庫、不依賴 `fcntl` 等平台模組的產品模組,三平台都能載入。
 產品模組單元:`value_checks.is_int`(CHG-20261124-01 T1)、`names.name_char_ok`、`names.normalize_name`、
 `names.fold_name`、`names.constants`(T2);拒絕代碼 `invalid`、錯誤類別 `type`(代決 6)。
 """

@@ -8,8 +8,10 @@
 //!   某批不一致時再逐碼位查出是哪些碼位。執行中 Python 的 `unicodedata.unidata_version`
 //!   與摺疊表表頭版本([`CASEFOLD_UNICODE_VERSION`])相同時一律比對;不同時,環境變數
 //!   `GITHUB_ACTIONS` 為 `true`(CI)即判失敗、不略過,只有本機才印出「略過」與差異碼位數。
-//! - 逾時:每次啟動轉接器沿用 `DEFAULT_TIMEOUT_SECS`(60 秒,不改比對工具契約);
-//!   請求依碼位範圍分批,每批各啟動一次轉接器,批次大小以最慢的平台(Windows)估算。
+//! - 逾時:每次啟動轉接器沿用 `DEFAULT_TIMEOUT_SECS`(60 秒,不改比對工具契約)。
+//!   `name_char_ok` 依碼位範圍分批(每批 `CHAR_BATCH_SPAN` = 0x20000 個碼位、共 9 批),
+//!   每批啟動一次轉接器,批次大小以最慢的平台(Windows)估算;`fold_name` 每個請求串接
+//!   `FOLD_CHARS_PER_CASE` = 2048 個碼位,全部碼位只啟動一次轉接器、送 543 個請求。
 //!   各批耗時以 `cargo test -- --nocapture` 可見。
 //!
 //! 直譯器沿用比對工具的取得順序:環境變數 `PARITY_PYTHON` → 平台預設值
