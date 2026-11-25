@@ -2,7 +2,10 @@
 """並行比對工具 Python 轉接器的測試(CHG-20261123-01 T2;CHG-20261124-01 T1 擴充)。
 
 L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Python 端期望結果(上限都是 1000);
-產品模組單元 `value_checks.is_int` 各案例的 Python 端期望結果(CHG-20261124-01 代決 6)。
+產品模組單元 `value_checks.is_int` 各案例的 Python 端期望結果(CHG-20261124-01 代決 6);
+`names.name_char_ok`、`names.normalize_name`、`names.fold_name`、`names.constants` 各案例的 Python 端
+期望結果與「拒絕代碼 `invalid`、錯誤類別 `type`」的對應(CHG-20261124-01 T2);`str.casefold` 逐字進行、
+分批串接的結果等於逐字結果(全碼位比對分批的前提)。
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
 轉接器 import 的 `value_checks` 是 repo 根目錄的產品模組。
@@ -243,6 +246,125 @@ def test_轉接器_import_的是_repo_根目錄的產品模組():
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
     files = [Path(line).resolve() for line in proc.stdout.decode("utf-8").splitlines()]
     assert files == [ROOT / "value_checks.py", ROOT / "names.py"]
+
+
+# ---------- L1:產品模組單元 names.*(CHG-20261124-01 T2) ----------
+
+NAMES_FIXTURES = ROOT / "crates" / "parity" / "fixtures" / "names"
+
+
+def load_names_fixture(file, unit):
+    fixture = json.loads((NAMES_FIXTURES / file).read_text(encoding="utf-8"))
+    assert fixture["unit"] == unit
+    got = responses(run_adapter(unit, fixture["cases"]))
+    assert [r["id"] for r in got] == [c["id"] for c in fixture["cases"]]
+    return fixture["cases"], got
+
+
+# name_char_ok:白名單內為 True;輸入不是恰好一個碼位的字串為 error type(Python 端 TypeError)。
+NAME_CHAR_OK_TRUE = {
+    "ascii_lower_a", "ascii_upper_z", "ascii_digit_0", "ascii_hyphen", "ascii_underscore",
+    "hiragana_first_u3041", "hiragana_last_u3096", "katakana_first_u30a1", "katakana_last_u30fa",
+    "prolonged_mark_u30fc", "iteration_mark_u3005", "ext_a_first_u3400", "ext_a_last_u4dbf",
+    "cjk_first_u4e00", "cjk_last_u9fff",
+}
+NAME_CHAR_OK_TYPE_ERROR = {
+    "type_empty_string", "type_two_chars", "type_int", "type_null", "type_bool", "type_array",
+    "type_object",
+}
+
+
+def test_names_name_char_ok_各案例():
+    cases, got = load_names_fixture("name_char_ok.json", "names.name_char_ok")
+    assert NAME_CHAR_OK_TRUE | NAME_CHAR_OK_TYPE_ERROR <= {c["id"] for c in cases}
+    for case, resp in zip(cases, got):
+        cid = case["id"]
+        if cid in NAME_CHAR_OK_TYPE_ERROR:
+            want = error("type")
+        else:
+            want = ok(cid in NAME_CHAR_OK_TRUE)
+        assert strip(resp) == want, cid
+
+
+# normalize_name:合格回原字串;不合格與非字串輸入一律 reject invalid(Python 端回 None)。
+NORMALIZE_OK = {
+    "ascii_one_char", "ascii_64_chars", "cjk_one_char", "cjk_64_chars", "mixed_good", "hiragana",
+    "katakana_prolonged", "iteration_mark", "ext_a_edge", "reserved_con_compat",
+    "reserved_com1_compat", "reserved_lpt9_compat",
+}
+
+
+def test_names_normalize_name_各案例():
+    cases, got = load_names_fixture("normalize_name.json", "names.normalize_name")
+    ids = {c["id"] for c in cases}
+    assert NORMALIZE_OK <= ids
+    assert {"ascii_65_chars", "cjk_65_chars", "empty", "non_string_int", "non_string_null"} <= ids
+    for case, resp in zip(cases, got):
+        cid = case["id"]
+        want = ok(case["input"]) if cid in NORMALIZE_OK else reject("invalid")
+        assert strip(resp) == want, cid
+
+
+# fold_name:Python str.casefold 的結果;非字串輸入為 error type(Python 端 AttributeError)。
+FOLD_EXPECTED = {
+    "ascii_upper": "strasse",
+    "ascii_mixed": "abcxyz-_09",
+    "sharp_s_word": "strasse",
+    "sharp_s": "ss",
+    "capital_sharp_s": "ss",
+    "kelvin_sign": "k",
+    "long_s": "s",
+    "ligature_ff": "ff",
+    "ligature_st": "st",
+    "dotted_capital_i": "i\u0307",
+    "dotless_small_i": "\u0131",
+    "greek_capital_sigma": "\u03c3",
+    "greek_final_sigma": "\u03c3",
+    "greek_word": "\u03c3\u03b1\u03c3",
+    "cherokee_small_a": "\u13a0",
+    "cherokee_capital_a": "\u13a0",
+    "fullwidth_capital_a": "\uff41",
+    "n_preceded_by_apostrophe": "\u02bcn",
+    "cyrillic": "\u043c\u043e\u0441\u043a\u0432\u0430",
+    "deseret_capital": "\U00010428",
+    "cjk_kana_unchanged": "漢字かなカナ",
+    "whitelist_mixed": "my_project-01ゆめ",
+    "empty": "",
+    "control_and_space": "a\u0000 b",
+}
+FOLD_TYPE_ERROR = {
+    "non_string_int", "non_string_null", "non_string_bool", "non_string_array",
+    "non_string_object",
+}
+
+
+def test_names_fold_name_各案例():
+    cases, got = load_names_fixture("fold_name.json", "names.fold_name")
+    assert {c["id"] for c in cases} == set(FOLD_EXPECTED) | FOLD_TYPE_ERROR
+    for case, resp in zip(cases, got):
+        cid = case["id"]
+        want = error("type") if cid in FOLD_TYPE_ERROR else ok(FOLD_EXPECTED[cid])
+        assert strip(resp) == want, cid
+
+
+def test_names_constants():
+    cases, got = load_names_fixture("constants.json", "names.constants")
+    assert len(cases) == 1
+    assert strip(got[0]) == ok({
+        "max_name": 64,
+        "ascii": "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",
+        "ranges": [[0x4E00, 0x9FFF], [0x3400, 0x4DBF], [0x3041, 0x3096], [0x30A1, 0x30FA],
+                   [0x30FC, 0x30FC], [0x3005, 0x3005]],
+    })
+
+
+def test_casefold_逐字進行_分批串接等於逐字結果():
+    # crates/parity/tests/names_exhaustive.rs 把連續碼位串成一個字串分批送出;前提是 casefold 不依上下文。
+    chars = [chr(c) for c in range(0x110000) if not 0xD800 <= c <= 0xDFFF]
+    batch = 2048
+    for i in range(0, len(chars), batch):
+        chunk = chars[i:i + batch]
+        assert "".join(chunk).casefold() == "".join(ch.casefold() for ch in chunk), hex(ord(chunk[0]))
 
 
 # ---------- 約束:只 import 標準函式庫與明列的產品模組 ----------
