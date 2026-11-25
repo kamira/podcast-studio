@@ -5,7 +5,8 @@
 //!
 //! 目前的模組:
 //! - [`value_checks`]:跨模組共用的值檢查 `is_int`(CHG-20261124-01 T1)。
-//! - [`names`]:使用者命名規則的相容部分(常數、`name_char_ok`、`normalize_name`、`fold_name`;CHG-20261124-01 T2)。
+//! - [`names`]:使用者命名規則——與 Python 等價的相容部分(常數、`name_char_ok`、`normalize_name`、`fold_name`;
+//!   CHG-20261124-01 T2),以及只用於新名稱、拒絕 Windows 保留名稱的 `normalize_new_name`(T3)。
 #![forbid(unsafe_code)]
 
 pub mod names;
