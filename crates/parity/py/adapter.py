@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""並行比對工具的 Python 轉接器(CHG-20261123-01 T2,代決 5、6)。
+"""並行比對工具的 Python 轉接器(CHG-20261123-01 T2,代決 5、6;CHG-20261124-01 T1 起接上產品模組)。
 
 用途:由 Rust 比對器 `parity` 以子程序啟動(argv 清單、不經 shell),
 把同一組 fixture 案例交給 Python 端的單元,回傳結果供比對。
@@ -17,7 +17,11 @@
 拒絕代碼與錯誤類別由各單元在兩邊各自定義同一組字串;對應表寫在本檔的單元函式內,
 並列入該模組 CHG 的契約清單。單元內未預期的例外記為 `error`,類別為例外類別名稱。
 
-只用標準函式庫;路線圖第 2 筆起可 import 被比對的產品模組;本筆不 import 任何產品模組。
+import 的範圍:標準函式庫,加上明列的產品模組 `names`、`value_checks`(CHG-20261124-01 代決 13;
+`tests/test_parity_adapter.py` 以 AST 斷言集合以外的 import 會失敗)。產品模組以 repo 根目錄
+(本檔往上三層)插入 `sys.path[0]` 後 import,執行的是 repo 內受版本控制的程式;
+只 import 只用標準函式庫、不依賴 `fcntl` 等平台模組者,三平台都能載入。
+`names` 的比對單元由 CHG-20261124-01 T2 登錄。
 """
 from __future__ import annotations
 
@@ -26,6 +30,13 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
+
+# 先 import 完標準函式庫,再把 repo 根目錄放到 sys.path 最前面,確保 import 到的是根目錄的產品模組。
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+import names  # noqa: E402,F401 — 比對單元由 CHG-20261124-01 T2 登錄
+import value_checks  # noqa: E402
 
 
 class Reject(Exception):
@@ -77,12 +88,20 @@ def demo_sleep(value):
     return None
 
 
+# ---------- 產品模組單元(CHG-20261124-01 代決 6;Rust 端在 crates/parity/src/units.rs) ----------
+
+def value_checks_is_int(value):
+    """value_checks.is_int:任意 JSON 輸入,回 True / False;沒有 reject 與 error。"""
+    return value_checks.is_int(value)
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
     units = {
         "demo.parse_count": demo_parse_count,
         "demo.parse_count_drift": demo_parse_count_drift,
+        "value_checks.is_int": value_checks_is_int,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep
