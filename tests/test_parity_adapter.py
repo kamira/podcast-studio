@@ -6,7 +6,7 @@ L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Pytho
 `names.name_char_ok`、`names.normalize_name`、`names.fold_name`、`names.constants` 各案例的 Python 端
 期望結果與「拒絕代碼 `invalid`、錯誤類別 `type`」的對應(CHG-20261124-01 T2);`str.casefold` 逐字進行、
 分批串接的結果等於逐字結果(全碼位比對分批的前提)。
-`safe_fs.*` 五個開啟類單元(CHG-20261125-01 T1):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+`safe_fs.*` 14 個單元(CHG-20261125-01 T1 五個開啟類、T2 九個建立 / 查詢 / 刪除 / 搬移類):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
 (`crates/parity/tests/data/safe_fs_expected.json`,macOS / Linux 欄),`check_name` 直接案例,
 案例結束後轉接器的暫存工作目錄不存在(Python `safe_fs` 不能在 Windows 執行,這些測試在 Windows 略過)。
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
@@ -377,7 +377,9 @@ def test_casefold_逐字進行_分批串接等於逐字結果():
 
 SAFE_FS_FIXTURES = ROOT / "crates" / "parity" / "fixtures" / "safe_fs"
 SAFE_FS_EXPECTED = ROOT / "crates" / "parity" / "tests" / "data" / "safe_fs_expected.json"
-SAFE_FS_UNITS = ["check_name", "open_dir", "open_child", "open_file", "open_path"]
+SAFE_FS_UNITS = ["check_name", "open_dir", "open_child", "open_file", "open_path",
+                 "create_excl", "open_or_create", "lstat", "entries", "unlink", "rmtree",
+                 "rename", "replace", "link"]
 needs_posix_safe_fs = pytest.mark.skipif(
     sys.platform == "win32", reason="Python safe_fs 在 Windows 無法執行(CHG-20261125-01 事實 D)")
 
@@ -413,6 +415,31 @@ def test_safe_fs_check_name_直接案例():
     reqs.append({"id": "number", "input": 5})
     got = [strip(r) for r in responses(run_adapter("safe_fs.check_name", reqs))]
     assert got == [reject("invalid_name")] * 5 + [ok(None)] * 3 + [error("type")]
+
+
+@needs_posix_safe_fs
+def test_safe_fs_rmtree_不跟隨連結且根目錄外不變():
+    """場景「刪除目錄樹不跟隨連結」(T2):目錄樹與連結本身都刪除,outside/ 快照不變。"""
+    tree = [{"path": "t/sub/x.txt", "type": "file", "content": "x"},
+            {"path": "t/out", "type": "symlink", "target": "@outside/d", "kind": "dir"},
+            {"path": "t/sub/fl", "type": "symlink", "target": "@outside/marker.txt", "kind": "file"},
+            {"path": "keep.txt", "type": "file", "content": "k"}]
+    reqs = [{"id": "rm", "input": {"tree": tree, "call": {"dir": [], "name": "t"}}},
+            {"id": "again", "input": {"tree": [], "call": {"dir": [], "name": "t"}}},
+            {"id": "again_ok", "input": {"tree": [], "call": {"dir": [], "name": "t", "missing_ok": True}}}]
+    got = [strip(r) for r in responses(run_adapter("safe_fs.rmtree", reqs))]
+    outside = [["d", "dir", None], ["d/inner.txt", "file", "outside-inner"], ["marker.txt", "file", "outside"]]
+    assert got[0] == ok({"result": None, "top": [["keep.txt", "file", "k"]], "outside": outside})
+    assert got[1:] == [error("not_found"), ok({"result": None, "top": [], "outside": outside})]
+
+
+@needs_posix_safe_fs
+def test_safe_fs_建立類只接受寫入旗標():
+    reqs = [{"id": f"{u}-{flag}", "input": {"tree": [], "call": {"dir": [], "name": "x", "flags": flag}}}
+            for u in ("c", "o") for flag in ("r", "x", 1)]
+    for unit in ("safe_fs.create_excl", "safe_fs.open_or_create"):
+        got = [strip(r) for r in responses(run_adapter(unit, reqs))]
+        assert got == [error("type")] * len(reqs), unit
 
 
 @needs_posix_safe_fs

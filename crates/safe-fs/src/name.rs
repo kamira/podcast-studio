@@ -148,6 +148,40 @@ mod tests {
         }
     }
 
+    /// K-4:以 UTF-16 單位判定,非 UTF-8 名稱的主檔名是保留名稱時同樣擋下;不會 panic。
+    #[cfg(windows)]
+    #[test]
+    fn reserved_device_works_on_utf16_units() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        let w = |s: &str, tail: &[u16]| {
+            let mut v: Vec<u16> = s.encode_utf16().collect();
+            v.extend_from_slice(tail);
+            OsString::from_wide(&v)
+        };
+        // 主檔名是保留名稱、副檔名含未配對代理單位:擋
+        for n in [
+            w("con.", &[0xD800]),
+            w("NUL.", &[0xDC00, 0x61]),
+            w("com1.", &[0xDFFF]),
+            w("LPT\u{b9}.x", &[0xD800]),
+            w("aux .", &[0xD83D]),
+        ] {
+            assert!(n.to_str().is_none());
+            assert!(reserved_device(&n), "{n:?}");
+        }
+        // 主檔名本身含未配對代理單位:不是保留名稱
+        for n in [
+            w("con", &[0xD800]),
+            w("", &[0xD800, 0x63, 0x6f, 0x6e]),
+            w("co", &[0xDC00, 0x6e]),
+            OsString::from_wide(&[0xD800]),
+            OsString::from_wide(&[0x2e, 0xD800]),
+        ] {
+            assert!(!reserved_device(&n), "{n:?}");
+        }
+    }
+
     #[test]
     fn stem_is_found_after_the_first_byte() {
         // `.con` 的第一個位元組是句點,不當成分隔:整個名稱 `.con` 不是保留名稱

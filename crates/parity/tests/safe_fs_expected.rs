@@ -39,10 +39,17 @@ const WINDOWS_CASES: &[(&str, &str, &str)] = &[
     ("safe_fs.check_name", "quote", "D-4"),
     ("safe_fs.check_name", "ctrl_01", "D-4"),
     ("safe_fs.check_name", "ctrl_1f", "D-4"),
+    // T2:Windows 上硬連結的來源是連結時回 Unsafe(Linux / macOS 連結到符號連結本身)
+    ("safe_fs.link", "src_symlink_file_out", "D-3"),
+    ("safe_fs.link", "src_symlink_dir_out", "D-3"),
+    ("safe_fs.link", "src_symlink_in", "D-3"),
+    ("safe_fs.link", "src_dangling", "D-3"),
+    // T2:目錄改名到自己的子目錄內,Windows 只給「拒絕存取」(Linux / macOS 為 EINVAL)
+    ("safe_fs.rename", "dir_into_itself", "D-7"),
 ];
 
 /// `windows` 欄的筆數(與 `WINDOWS_CASES` 相同;改動差異清單時兩者一起改)。
-const WINDOWS_ENTRY_COUNT: usize = 13;
+const WINDOWS_ENTRY_COUNT: usize = 18;
 
 /// 差異清單中屬 Windows 機制的編號(代決 12)。
 const WINDOWS_DIFF_IDS: &[&str] = &[

@@ -98,16 +98,26 @@ fn module_fixtures_include_value_checks_is_int() {
     }
 }
 
-/// T1 的五個 `safe_fs.*` 單元與 fixture。
-const SAFE_FS_FIXTURES: [(&str, &str); 5] = [
+/// `safe_fs.*` 的 14 個單元與 fixture(T1 五個開啟類、T2 九個建立 / 查詢 / 刪除 / 搬移類)。
+const SAFE_FS_FIXTURES: [(&str, &str); 14] = [
     ("safe_fs.check_name", "check_name.json"),
     ("safe_fs.open_dir", "open_dir.json"),
     ("safe_fs.open_child", "open_child.json"),
     ("safe_fs.open_file", "open_file.json"),
     ("safe_fs.open_path", "open_path.json"),
+    ("safe_fs.create_excl", "create_excl.json"),
+    ("safe_fs.open_or_create", "open_or_create.json"),
+    ("safe_fs.lstat", "lstat.json"),
+    ("safe_fs.entries", "entries.json"),
+    ("safe_fs.unlink", "unlink.json"),
+    ("safe_fs.rmtree", "rmtree.json"),
+    ("safe_fs.rename", "rename.json"),
+    ("safe_fs.replace", "replace.json"),
+    ("safe_fs.link", "link.json"),
 ];
 
-/// L4:場景「開啟類函式兩邊一致」——以真執行檔與真轉接器跑五個 `safe_fs.*` fixture(macOS / Linux)。
+/// L4:場景「開啟類函式兩邊一致」(T1)與「刪除目錄樹不跟隨連結」(T2)——以真執行檔與真轉接器跑
+/// 14 個 `safe_fs.*` fixture(macOS / Linux)。
 #[test]
 fn parity_run_safe_fs_fixtures_exit_0() {
     if cfg!(windows) {
@@ -220,6 +230,15 @@ fn parity_list_shows_module_units() {
         "safe_fs.open_child",
         "safe_fs.open_file",
         "safe_fs.open_path",
+        "safe_fs.create_excl",
+        "safe_fs.open_or_create",
+        "safe_fs.lstat",
+        "safe_fs.entries",
+        "safe_fs.unlink",
+        "safe_fs.rmtree",
+        "safe_fs.rename",
+        "safe_fs.replace",
+        "safe_fs.link",
     ] {
         assert!(stdout.lines().any(|l| l == unit), "缺少 {unit}:{stdout}");
     }
