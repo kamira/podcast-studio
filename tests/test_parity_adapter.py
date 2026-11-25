@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
-"""並行比對工具 Python 轉接器的測試(CHG-20261123-01 T2;CHG-20261124-01 T1 擴充)。
+"""並行比對工具 Python 轉接器的測試(CHG-20261123-01 T2;CHG-20261124-01 T1、CHG-20261125-01 T1 擴充)。
 
 L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Python 端期望結果(上限都是 1000);
 產品模組單元 `value_checks.is_int` 各案例的 Python 端期望結果(CHG-20261124-01 代決 6);
 `names.name_char_ok`、`names.normalize_name`、`names.fold_name`、`names.constants` 各案例的 Python 端
 期望結果與「拒絕代碼 `invalid`、錯誤類別 `type`」的對應(CHG-20261124-01 T2);`str.casefold` 逐字進行、
 分批串接的結果等於逐字結果(全碼位比對分批的前提)。
+`safe_fs.*` 14 個單元(CHG-20261125-01 T1 五個開啟類、T2 九個建立 / 查詢 / 刪除 / 搬移類):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+(`crates/parity/tests/data/safe_fs_expected.json`,macOS / Linux 欄),`check_name` 直接案例,
+案例結束後轉接器的暫存工作目錄不存在(Python `safe_fs` 不能在 Windows 執行,這些測試在 Windows 略過)。
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
-轉接器 import 的 `value_checks` 是 repo 根目錄的產品模組。
-約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks}`(CHG-20261124-01 代決 13)。
+轉接器 import 的 `value_checks`、`names`、`safe_fs` 是 repo 根目錄的產品模組。
+約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs}`(CHG-20261124-01 代決 13、
+CHG-20261125-01 代決 11)。
 
 轉接器以子程序執行(與 `parity` 比對器相同的呼叫方式),不 import 進測試行程。
 """
@@ -20,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -237,6 +242,7 @@ def test_轉接器_import_的是_repo_根目錄的產品模組():
         "g = runpy.run_path(sys.argv[1], run_name='adapter_probe')\n"
         "print(g['value_checks'].__file__)\n"
         "print(g['names'].__file__)\n"
+        "print(g['safe_fs'].__file__)\n"
     )
     proc = subprocess.run(
         [sys.executable, "-c", probe, str(ADAPTER)],
@@ -245,7 +251,7 @@ def test_轉接器_import_的是_repo_根目錄的產品模組():
     )
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
     files = [Path(line).resolve() for line in proc.stdout.decode("utf-8").splitlines()]
-    assert files == [ROOT / "value_checks.py", ROOT / "names.py"]
+    assert files == [ROOT / "value_checks.py", ROOT / "names.py", ROOT / "safe_fs.py"]
 
 
 # ---------- L1:產品模組單元 names.*(CHG-20261124-01 T2) ----------
@@ -367,10 +373,89 @@ def test_casefold_逐字進行_分批串接等於逐字結果():
         assert "".join(chunk).casefold() == "".join(ch.casefold() for ch in chunk), hex(ord(chunk[0]))
 
 
+# ---------- L1:產品模組單元 safe_fs.*(CHG-20261125-01 T1) ----------
+
+SAFE_FS_FIXTURES = ROOT / "crates" / "parity" / "fixtures" / "safe_fs"
+SAFE_FS_EXPECTED = ROOT / "crates" / "parity" / "tests" / "data" / "safe_fs_expected.json"
+SAFE_FS_UNITS = ["check_name", "open_dir", "open_child", "open_file", "open_path",
+                 "create_excl", "open_or_create", "lstat", "entries", "unlink", "rmtree",
+                 "rename", "replace", "link"]
+needs_posix_safe_fs = pytest.mark.skipif(
+    sys.platform == "win32", reason="Python safe_fs 在 Windows 無法執行(CHG-20261125-01 事實 D)")
+
+
+def _platform_column():
+    return "macos" if sys.platform == "darwin" else "linux"
+
+
+def _safe_fs_work_dirs():
+    base = Path(tempfile.gettempdir())
+    return {p.name for p in base.iterdir() if p.name.startswith("parity-safe-fs-py-")}
+
+
+@needs_posix_safe_fs
+@pytest.mark.parametrize("name", SAFE_FS_UNITS)
+def test_safe_fs_各案例等於預期結果表(name):
+    fixture = json.loads((SAFE_FS_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    unit = f"safe_fs.{name}"
+    assert fixture["unit"] == unit
+    table = json.loads(SAFE_FS_EXPECTED.read_text(encoding="utf-8"))[unit]
+    assert set(table) == {c["id"] for c in fixture["cases"]}
+    got = responses(run_adapter(unit, fixture["cases"]))
+    assert [r["id"] for r in got] == [c["id"] for c in fixture["cases"]]
+    col = _platform_column()
+    for case, resp in zip(fixture["cases"], got):
+        entry = table[case["id"]]
+        assert strip(resp) == entry.get(col, entry["all"]), case["id"]
+
+
+@needs_posix_safe_fs
+def test_safe_fs_check_name_直接案例():
+    reqs = [{"id": n or "empty", "input": n} for n in ["", ".", "..", "a/b", "x\x00y", "...", "a:b", "con"]]
+    reqs.append({"id": "number", "input": 5})
+    got = [strip(r) for r in responses(run_adapter("safe_fs.check_name", reqs))]
+    assert got == [reject("invalid_name")] * 5 + [ok(None)] * 3 + [error("type")]
+
+
+@needs_posix_safe_fs
+def test_safe_fs_rmtree_不跟隨連結且根目錄外不變():
+    """場景「刪除目錄樹不跟隨連結」(T2):目錄樹與連結本身都刪除,outside/ 快照不變。"""
+    tree = [{"path": "t/sub/x.txt", "type": "file", "content": "x"},
+            {"path": "t/out", "type": "symlink", "target": "@outside/d", "kind": "dir"},
+            {"path": "t/sub/fl", "type": "symlink", "target": "@outside/marker.txt", "kind": "file"},
+            {"path": "keep.txt", "type": "file", "content": "k"}]
+    reqs = [{"id": "rm", "input": {"tree": tree, "call": {"dir": [], "name": "t"}}},
+            {"id": "again", "input": {"tree": [], "call": {"dir": [], "name": "t"}}},
+            {"id": "again_ok", "input": {"tree": [], "call": {"dir": [], "name": "t", "missing_ok": True}}}]
+    got = [strip(r) for r in responses(run_adapter("safe_fs.rmtree", reqs))]
+    outside = [["d", "dir", None], ["d/inner.txt", "file", "outside-inner"], ["marker.txt", "file", "outside"]]
+    assert got[0] == ok({"result": None, "top": [["keep.txt", "file", "k"]], "outside": outside})
+    assert got[1:] == [error("not_found"), ok({"result": None, "top": [], "outside": outside})]
+
+
+@needs_posix_safe_fs
+def test_safe_fs_建立類只接受寫入旗標():
+    reqs = [{"id": f"{u}-{flag}", "input": {"tree": [], "call": {"dir": [], "name": "x", "flags": flag}}}
+            for u in ("c", "o") for flag in ("r", "x", 1)]
+    for unit in ("safe_fs.create_excl", "safe_fs.open_or_create"):
+        got = [strip(r) for r in responses(run_adapter(unit, reqs))]
+        assert got == [error("type")] * len(reqs), unit
+
+
+@needs_posix_safe_fs
+def test_safe_fs_案例結束後工作目錄不存在():
+    before = _safe_fs_work_dirs()
+    for name in SAFE_FS_UNITS[1:]:
+        fixture = json.loads((SAFE_FS_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        responses(run_adapter(f"safe_fs.{name}", fixture["cases"]))
+    assert _safe_fs_work_dirs() <= before
+
+
 # ---------- 約束:只 import 標準函式庫與明列的產品模組 ----------
 
-# 轉接器可 import 的產品模組(CHG-20261124-01 代決 13;只放三平台都能載入、不依賴 fcntl 等的模組)。
-ALLOWED_PRODUCT_MODULES = frozenset({"names", "value_checks"})
+# 轉接器可 import 的產品模組(CHG-20261124-01 代決 13、CHG-20261125-01 代決 11;
+# 只放三平台都能載入、不依賴 fcntl 等的模組)。
+ALLOWED_PRODUCT_MODULES = frozenset({"names", "value_checks", "safe_fs"})
 
 
 def imports_outside_allowed(source):

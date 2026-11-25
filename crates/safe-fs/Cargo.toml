@@ -1,0 +1,19 @@
+[package]
+name = "safe-fs"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "安全路徑層:自受信根目錄逐層、單一名稱、不跟隨連結、以 handle 操作(safe_fs.py 的 Rust 版,CHG-20261125-01)"
+# 不發佈;授權宣告與路線圖第 24 筆一併決定。cargo-deny 的 [licenses.private] 依此略過本 crate
+publish = false
+
+# 第三方直接相依只限 cap-std、cap-fs-ext(CHG-20261125-01 代決 5),只用預設 feature:
+# - cap-std:能力式目錄 handle(`Dir`)與相對開啟
+# - cap-fs-ext:不跟隨連結的開啟(`FollowSymlinks::No`)、`symlink_metadata`、跨平台檔案識別碼
+[dependencies]
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+
+[lib]
+name = "safe_fs"
+path = "src/lib.rs"
