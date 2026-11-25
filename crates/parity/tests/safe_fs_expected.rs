@@ -55,9 +55,9 @@ const WINDOWS_ENTRY_COUNT: usize = 18;
 /// 合計等於 `WINDOWS_ENTRY_COUNT`)。
 const WINDOWS_COUNT_BY_DIFF: &[(&str, usize)] = &[("D-3", 4), ("D-4", 13), ("D-7", 1)];
 
-/// 差異清單中屬 Windows 機制的編號(代決 12)。
+/// 差異清單中屬 Windows 機制的編號(代決 12、代決事項 12:D-3~D-12;D-12 為 T2 補列的記錄項)。
 const WINDOWS_DIFF_IDS: &[&str] = &[
-    "D-3", "D-4", "D-5", "D-6", "D-7", "D-8", "D-9", "D-10", "D-11",
+    "D-3", "D-4", "D-5", "D-6", "D-7", "D-8", "D-9", "D-10", "D-11", "D-12",
 ];
 
 /// 工作目錄名稱前綴(Rust 單元 `parity-safe-fs-rs-`、Python 轉接器 `parity-safe-fs-py-`)。

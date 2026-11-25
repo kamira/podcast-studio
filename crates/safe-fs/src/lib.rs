@@ -16,6 +16,12 @@
 //! 串接名稱再呼叫標準函式庫(經 Win32 路徑轉換;開工閘紀錄見本 CHG 派發記錄,D-12)——所以這些操作的
 //! 名稱安全完全依賴 [`check_name`] 的 Windows 加嚴與保留裝置名的事前拒絕,兩者都在呼叫 cap-std **之前**檢查。
 //!
+//! Windows 開發機實測(T3;CHG 行為差異清單 D-5、D-10、D-11,由 `tests/windows.rs` 鎖住):
+//! 保留裝置名(`con`、`nul`、`COM1` 等)在每個函式都回 [`ErrorKind::ReservedDevice`]、不開任何東西;
+//! `CONIN$`、`CONOUT$`、`CLOCK$` 不是保留名稱,對應磁碟上的目錄項。檔案 handle 開著時 `unlink`
+//! 成功且名稱立即消失(NTFS 的 POSIX 刪除語意)、改名也成功;目錄 handle 或其內檔案的 handle 開著時,
+//! 該目錄不能改名或刪除。8.3 短檔名別名開到同一項目,型別檢查照常(連結的別名同樣被拒絕)。
+//!
 //! 介面:[`check_name`]、[`open_dir`]、[`open_path`];[`SafeDir`] 的 `open_child`、`open_file`、
 //! `entry_names`(T1)與 `create_excl`、`open_or_create`、`lstat`、`entries`、`unlink`、`rmtree`、
 //! `rename`、`replace`、`hard_link`(T2);比對工具與測試用的 [`support`]。
