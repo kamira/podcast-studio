@@ -35,7 +35,8 @@ impl WorkDir {
                     let w = WorkDir { root };
                     std::fs::create_dir(w.top()).expect("建立 top 失敗");
                     std::fs::create_dir(w.outside()).expect("建立 outside 失敗");
-                    std::fs::write(w.outside().join("marker.txt"), "outside").expect("寫入標記失敗");
+                    std::fs::write(w.outside().join("marker.txt"), "outside")
+                        .expect("寫入標記失敗");
                     return w;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -131,9 +132,7 @@ pub fn symlink(target: &Path, link: &Path, kind: LinkKind) -> bool {
 }
 
 /// `cmd /c` 會重新解析整個命令列的字元(安全影響 (f)、C-3);路徑含有任一個就判測試失敗,不略過。
-pub const CMD_METACHARS: &[char] = &[
-    '&', '|', '<', '>', '^', '%', '"', '(', ')', '!', '\n', '\r',
-];
+pub const CMD_METACHARS: &[char] = &['&', '|', '<', '>', '^', '%', '"', '(', ')', '!', '\n', '\r'];
 
 /// 以 `cmd /d /c mklink /J "<連結>" "<目標>"` 建立 junction(只在測試中;不需權限、不得略過)。
 ///
@@ -144,7 +143,9 @@ pub const CMD_METACHARS: &[char] = &[
 pub fn junction(link: &Path, target: &Path) {
     use std::os::windows::process::CommandExt;
     for (what, p) in [("連結路徑", link), ("目標路徑", target)] {
-        let s = p.to_str().unwrap_or_else(|| panic!("{what}不是合法 Unicode"));
+        let s = p
+            .to_str()
+            .unwrap_or_else(|| panic!("{what}不是合法 Unicode"));
         if let Some(c) = s.chars().find(|c| CMD_METACHARS.contains(c)) {
             panic!("{what}含 cmd 元字元 {c:?},不得以 cmd /c mklink /J 建立 junction");
         }

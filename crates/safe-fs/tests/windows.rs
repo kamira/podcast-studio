@@ -73,8 +73,16 @@ fn gate_i_links_and_junctions_are_rejected_at_every_level() {
     // 符號連結(目錄、檔案)
     let mut sym = 0;
     if symlink(&w.outside(), &top.join("sout"), LinkKind::Dir)
-        && symlink(&top.join("a").join("inner"), &top.join("a").join("sin"), LinkKind::Dir)
-        && symlink(&w.outside().join("marker.txt"), &top.join("sfile"), LinkKind::File)
+        && symlink(
+            &top.join("a").join("inner"),
+            &top.join("a").join("sin"),
+            LinkKind::Dir,
+        )
+        && symlink(
+            &w.outside().join("marker.txt"),
+            &top.join("sfile"),
+            LinkKind::File,
+        )
     {
         for parts in [
             &["sout"][..],
@@ -108,27 +116,96 @@ fn gate_i_links_and_junctions_are_rejected_at_every_level() {
     assert!(!top.join("a").join("inner").join("x").exists());
 }
 
-/// (ii):handle 相對開啟——原路徑改名並換成 junction 後,已開啟的 handle 仍指向原目錄。
+/// (ii):cap-std 在 Windows 的實際機制。
+///
+/// - 開啟:以 `\\?\` 預先建立 `f.txt.`(結尾句點)與 `f.txt` 兩個不同的檔案、`d.` 與 `d` 兩個不同的目錄;
+///   cap-std 以名稱 `f.txt.` / `d.` 相對目錄 handle 開啟時讀到的是**結尾帶句點的那一個**——
+///   表示開啟走 `NtCreateFile` 相對目錄 handle,不經 Win32 路徑轉換(Win32 會去掉結尾句點)。
+/// - 變更類:cap-std 的 `create_dir("g.")` 在磁碟上建立的是 `g`(結尾句點被去掉)——表示建立目錄是
+///   由 handle 取回完整路徑、串接名稱後經 Win32 路徑轉換(cap-primitives `windows/fs/get_path.rs`
+///   的 `concatenate`);`safe-fs` 在 Windows 拒絕結尾句點與空白等名稱(代決 8)即為此故。
+/// - 目錄 handle 開啟中時把原路徑改名:實測結果印出;若改名成功,已開啟的 handle 仍須指向原目錄,
+///   且經 `top` 重新開啟遇到換上的 junction 為 `Unsafe`。
 #[test]
 fn gate_ii_open_is_relative_to_the_directory_handle() {
+    use cap_fs_ext::DirExt;
     let w = WorkDir::new();
     let top = w.top();
+    let vtop = verbatim(&top);
+    std::fs::write(vtop.join("f.txt."), "with-dot").unwrap();
+    std::fs::write(vtop.join("f.txt"), "without-dot").unwrap();
+    std::fs::create_dir(vtop.join("d.")).unwrap();
+    std::fs::write(vtop.join("d.").join("m"), "dir-with-dot").unwrap();
+    std::fs::create_dir(vtop.join("d")).unwrap();
+    std::fs::write(vtop.join("d").join("m"), "dir-without-dot").unwrap();
+    let cap = cap_std::fs::Dir::open_ambient_dir(&top, cap_std::ambient_authority()).unwrap();
+    assert_eq!(
+        cap.read_to_string("f.txt.").unwrap(),
+        "with-dot",
+        "檔案開啟經過 Win32 路徑轉換"
+    );
+    let d = cap.open_dir_nofollow("d.").unwrap();
+    assert_eq!(
+        d.read_to_string("m").unwrap(),
+        "dir-with-dot",
+        "目錄開啟經過 Win32 路徑轉換"
+    );
+    println!(
+        "開工閘 (ii) 開啟:相對目錄 handle(NtCreateFile),名稱不經 Win32 路徑轉換(結尾句點保留)"
+    );
+
+    let created = match cap.create_dir("g.") {
+        Ok(()) => {
+            let dot = std::fs::symlink_metadata(vtop.join("g.")).is_ok();
+            let plain = std::fs::symlink_metadata(vtop.join("g")).is_ok();
+            assert!(dot ^ plain, "應恰好建立一個目錄");
+            if plain {
+                "建立出 g(結尾句點被去掉:完整路徑串接後經 Win32 轉換)"
+            } else {
+                "建立出 g.(未經 Win32 轉換)"
+            }
+        }
+        Err(e) => panic!("create_dir(\"g.\") 失敗:{e}"),
+    };
+    println!("開工閘 (ii) 變更類 create_dir:{created}");
+
     std::fs::create_dir_all(top.join("a").join("sub")).unwrap();
     std::fs::write(top.join("a").join("f"), "original").unwrap();
     std::fs::write(top.join("a").join("sub").join("g"), "original-sub").unwrap();
-    let d = open_dir(&top, &["a"], DirOptions::default()).unwrap();
-    std::fs::rename(top.join("a"), top.join("moved")).unwrap();
-    junction(&top.join("a"), &w.outside());
-    std::fs::write(w.outside().join("f"), "outside-f").unwrap();
-    assert_eq!(read_all(d.open_file("f", FileAccess::Read).unwrap()), "original");
-    let sub = d.open_child("sub", DirOptions::default()).unwrap();
-    assert_eq!(read_all(sub.open_file("g", FileAccess::Read).unwrap()), "original-sub");
-    // 經 top 重新開啟會遇到 junction → Unsafe
-    assert_eq!(
-        open_dir(&top, &["a"], DirOptions::default()).unwrap_err().kind(),
-        ErrorKind::Unsafe
-    );
-    println!("開工閘 (ii) 原路徑改名並換成 junction 後,handle 相對開啟仍讀到原目錄內容");
+    let sd = open_dir(&top, &["a"], DirOptions::default()).unwrap();
+    match std::fs::rename(top.join("a"), top.join("moved")) {
+        Ok(()) => {
+            junction(&top.join("a"), &w.outside());
+            std::fs::write(w.outside().join("f"), "outside-f").unwrap();
+            assert_eq!(
+                read_all(sd.open_file("f", FileAccess::Read).unwrap()),
+                "original"
+            );
+            let sub = sd.open_child("sub", DirOptions::default()).unwrap();
+            assert_eq!(
+                read_all(sub.open_file("g", FileAccess::Read).unwrap()),
+                "original-sub"
+            );
+            assert_eq!(
+                open_dir(&top, &["a"], DirOptions::default())
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::Unsafe
+            );
+            println!("開工閘 (ii) 原路徑改名並換成 junction 後,handle 相對開啟仍讀到原目錄內容");
+        }
+        Err(e) => {
+            // ERROR_SHARING_VIOLATION:cap-std 開啟目錄時未給刪除共用,handle 開著時原路徑不能被改名或換掉
+            assert_eq!(e.raw_os_error(), Some(32), "改名失敗的原因不是共用違規:{e}");
+            assert_eq!(
+                read_all(sd.open_file("f", FileAccess::Read).unwrap()),
+                "original"
+            );
+            println!(
+                "開工閘 (ii) 目錄 handle 開啟中時原路徑無法改名(錯誤碼 32,共用違規),原路徑無法被換成 junction"
+            );
+        }
+    }
 }
 
 /// (iii) 的一個項目:以 `\\?\` 預先建立的保留名稱目錄項。
@@ -140,25 +217,101 @@ struct Reserved {
 }
 
 const RESERVED: &[Reserved] = &[
-    Reserved { dir: "r1", name: "con", is_dir: true },
-    Reserved { dir: "r1", name: "nul", is_dir: false },
-    Reserved { dir: "r1", name: "COM1", is_dir: true },
-    Reserved { dir: "r1", name: "con.txt", is_dir: false },
-    Reserved { dir: "r1", name: "CONIN$", is_dir: false },
-    Reserved { dir: "r1", name: "CONOUT$", is_dir: true },
-    Reserved { dir: "r1", name: "COM\u{b9}", is_dir: true },
-    Reserved { dir: "r1", name: "LPT1", is_dir: false },
-    Reserved { dir: "r1", name: "AUX", is_dir: true },
-    Reserved { dir: "r1", name: "PRN.log", is_dir: false },
-    Reserved { dir: "r2", name: "Con", is_dir: true },
-    Reserved { dir: "r2", name: "NuL", is_dir: false },
-    Reserved { dir: "r2", name: "cOm1", is_dir: true },
-    Reserved { dir: "r2", name: "CON.TXT", is_dir: false },
-    Reserved { dir: "r2", name: "conin$", is_dir: false },
-    Reserved { dir: "r2", name: "Conout$", is_dir: true },
-    Reserved { dir: "r2", name: "com\u{b9}", is_dir: true },
-    Reserved { dir: "r3", name: "CON", is_dir: false },
-    Reserved { dir: "r3", name: "Nul.Txt", is_dir: true },
+    Reserved {
+        dir: "r1",
+        name: "con",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r1",
+        name: "nul",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r1",
+        name: "COM1",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r1",
+        name: "con.txt",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r1",
+        name: "CONIN$",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r1",
+        name: "CONOUT$",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r1",
+        name: "COM\u{b9}",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r1",
+        name: "LPT1",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r1",
+        name: "AUX",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r1",
+        name: "PRN.log",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r2",
+        name: "Con",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r2",
+        name: "NuL",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r2",
+        name: "cOm1",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r2",
+        name: "CON.TXT",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r2",
+        name: "conin$",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r2",
+        name: "Conout$",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r2",
+        name: "com\u{b9}",
+        is_dir: true,
+    },
+    Reserved {
+        dir: "r3",
+        name: "CON",
+        is_dir: false,
+    },
+    Reserved {
+        dir: "r3",
+        name: "Nul.Txt",
+        is_dir: true,
+    },
 ];
 
 fn marker(r: &Reserved) -> String {
@@ -194,8 +347,8 @@ fn gate_iii_existing_reserved_names_open_the_entry_or_fail_explicitly() {
                     assert!(f.metadata().unwrap().is_file());
                     assert_eq!(read_all(f), marker(r), "{}/{}", r.dir, r.name);
                     // open_path 經同一名稱也一致
-                    let f = open_path(&top, &[r.dir, r.name, "marker.txt"], FileAccess::Read)
-                        .unwrap();
+                    let f =
+                        open_path(&top, &[r.dir, r.name, "marker.txt"], FileAccess::Read).unwrap();
                     assert_eq!(read_all(f), marker(r));
                     "開到目錄項"
                 }
@@ -246,7 +399,17 @@ fn gate_iii_existing_reserved_names_open_the_entry_or_fail_explicitly() {
 fn gate_iii_creating_reserved_names_never_reaches_a_device() {
     let w = WorkDir::new();
     let top = w.top();
-    for name in ["con", "NUL", "COM1", "con.txt", "CONIN$", "CONOUT$", "conout$x", "CLOCK$", "COM\u{b9}"] {
+    for name in [
+        "con",
+        "NUL",
+        "COM1",
+        "con.txt",
+        "CONIN$",
+        "CONOUT$",
+        "conout$x",
+        "CLOCK$",
+        "COM\u{b9}",
+    ] {
         let outcome = match open_dir(&top, &[name], create()) {
             Ok(d) => {
                 let meta = std::fs::symlink_metadata(verbatim(&top.join(name))).unwrap();
@@ -273,9 +436,12 @@ fn gate_iii_creating_reserved_names_never_reaches_a_device() {
 fn gate_iv_deep_paths_beyond_max_path() {
     let w = WorkDir::new();
     let top = w.top();
-    let parts: Vec<String> = (0..30).map(|i| format!("level-{i:02}-abcdefghijk")).collect();
+    let parts: Vec<String> = (0..30)
+        .map(|i| format!("level-{i:02}-abcdefghijk"))
+        .collect();
     assert!(parts.iter().all(|p| p.chars().count() == 20));
-    let full_len = top.to_string_lossy().chars().count() + parts.iter().map(|p| p.len() + 1).sum::<usize>();
+    let full_len =
+        top.to_string_lossy().chars().count() + parts.iter().map(|p| p.len() + 1).sum::<usize>();
     assert!(full_len > 600, "完整路徑只有 {full_len} 字元");
     let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
     let deep = open_dir(&top, &refs, create()).unwrap();
@@ -286,23 +452,32 @@ fn gate_iv_deep_paths_beyond_max_path() {
     }
     std::fs::write(file_path.join("f.txt"), "deep-0").unwrap();
     {
-        let mut f = deep.open_file("f.txt", FileAccess::Write { truncate: true }).unwrap();
+        let mut f = deep
+            .open_file("f.txt", FileAccess::Write { truncate: true })
+            .unwrap();
         f.write_all(b"deep-1").unwrap();
     }
     let mut all = refs.clone();
     all.push("f.txt");
-    assert_eq!(read_all(open_path(&top, &all, FileAccess::Read).unwrap()), "deep-1");
+    assert_eq!(
+        read_all(open_path(&top, &all, FileAccess::Read).unwrap()),
+        "deep-1"
+    );
     drop(deep);
 
     // 刪除:以 cap-std 的 handle 相對刪除由最深層往上(T2 的 rmtree 依賴同一機制)
     remove_tree_with_cap_std(&top, &refs);
-    assert!(std::fs::read_dir(&top).unwrap().next().is_none(), "top 應已清空");
+    assert!(
+        std::fs::read_dir(&top).unwrap().next().is_none(),
+        "top 應已清空"
+    );
     println!("開工閘 (iv) 完整路徑 {full_len} 字元:建立、寫入、讀回、刪除皆成功");
 }
 
 fn remove_tree_with_cap_std(top: &Path, parts: &[&str]) {
     use cap_fs_ext::DirExt;
-    let mut dirs = vec![cap_std::fs::Dir::open_ambient_dir(top, cap_std::ambient_authority()).unwrap()];
+    let mut dirs =
+        vec![cap_std::fs::Dir::open_ambient_dir(top, cap_std::ambient_authority()).unwrap()];
     for p in parts {
         let next = dirs.last().unwrap().open_dir_nofollow(p).unwrap();
         dirs.push(next);

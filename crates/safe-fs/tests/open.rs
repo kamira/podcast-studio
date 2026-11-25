@@ -83,7 +83,10 @@ fn open_dir_walks_existing_levels_and_creates_when_asked() {
     std::fs::create_dir_all(w.top().join("a").join("b")).unwrap();
     std::fs::write(w.top().join("a").join("b").join("f.txt"), "inside").unwrap();
     let d = open_dir(&w.top(), &["a", "b"], DirOptions::default()).unwrap();
-    assert_eq!(read_all(d.open_file("f.txt", FileAccess::Read).unwrap()), "inside");
+    assert_eq!(
+        read_all(d.open_file("f.txt", FileAccess::Read).unwrap()),
+        "inside"
+    );
 
     let e = open_dir(&w.top(), &["a", "nope"], DirOptions::default()).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::NotFound);
@@ -99,7 +102,10 @@ fn open_dir_checks_every_name_before_opening_anything() {
     let w = WorkDir::new();
     let e = open_dir(&w.top(), &["new", ".."], create()).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::InvalidName);
-    assert!(!w.top().join("new").exists(), "名稱不合法時不得建立任何東西");
+    assert!(
+        !w.top().join("new").exists(),
+        "名稱不合法時不得建立任何東西"
+    );
 }
 
 #[test]
@@ -113,7 +119,10 @@ fn open_dir_top_rules() {
     // top 本身是連結時跟隨(top 視為受信)
     if symlink(&w.outside(), &w.root().join("toplink"), LinkKind::Dir) {
         let d = open_dir(&w.root().join("toplink"), NONE, DirOptions::default()).unwrap();
-        assert_eq!(read_all(d.open_file("marker.txt", FileAccess::Read).unwrap()), "outside");
+        assert_eq!(
+            read_all(d.open_file("marker.txt", FileAccess::Read).unwrap()),
+            "outside"
+        );
     }
 }
 
@@ -133,7 +142,11 @@ fn open_dir_rejects_symlink_or_file_at_any_level() {
     if symlink(&w.outside(), &top.join("out"), LinkKind::Dir) {
         made += 1;
     }
-    if symlink(&top.join("a").join("inner"), &top.join("a").join("in"), LinkKind::Dir) {
+    if symlink(
+        &top.join("a").join("inner"),
+        &top.join("a").join("in"),
+        LinkKind::Dir,
+    ) {
         made += 1;
     }
     if made == 0 {
@@ -147,7 +160,12 @@ fn open_dir_rejects_symlink_or_file_at_any_level() {
     ] {
         for opts in [DirOptions::default(), create()] {
             let e = open_dir(&top, parts, opts).unwrap_err();
-            assert_eq!(e.kind(), ErrorKind::Unsafe, "{parts:?} create={}", opts.create);
+            assert_eq!(
+                e.kind(),
+                ErrorKind::Unsafe,
+                "{parts:?} create={}",
+                opts.create
+            );
         }
     }
     assert_eq!(snapshot(&w.outside()), before, "outside/ 不得有任何變動");
@@ -158,7 +176,11 @@ fn open_dir_rejects_symlink_or_file_at_any_level() {
 fn open_dir_create_over_dangling_link_is_unsafe() {
     let w = WorkDir::new();
     let before = snapshot(&w.outside());
-    if !symlink(&w.outside().join("ghost"), &w.top().join("dang"), LinkKind::Dir) {
+    if !symlink(
+        &w.outside().join("ghost"),
+        &w.top().join("dang"),
+        LinkKind::Dir,
+    ) {
         return;
     }
     let e = open_dir(&w.top(), &["dang"], create()).unwrap_err();
@@ -173,7 +195,10 @@ fn open_file_rejects_symlink_and_non_regular() {
     std::fs::create_dir(top.join("sub")).unwrap();
     std::fs::write(top.join("ok.txt"), "ok").unwrap();
     let d = open_dir(&top, NONE, DirOptions::default()).unwrap();
-    assert_eq!(read_all(d.open_file("ok.txt", FileAccess::Read).unwrap()), "ok");
+    assert_eq!(
+        read_all(d.open_file("ok.txt", FileAccess::Read).unwrap()),
+        "ok"
+    );
     let e = d.open_file("sub", FileAccess::Read).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Unsafe);
     let e = d.open_file("missing", FileAccess::Read).unwrap_err();
@@ -181,7 +206,11 @@ fn open_file_rejects_symlink_and_non_regular() {
     let e = d.open_file("a/b", FileAccess::Read).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::InvalidName);
     let before = snapshot(&w.outside());
-    if symlink(&w.outside().join("marker.txt"), &top.join("fl"), LinkKind::File) {
+    if symlink(
+        &w.outside().join("marker.txt"),
+        &top.join("fl"),
+        LinkKind::File,
+    ) {
         for access in [
             FileAccess::Read,
             FileAccess::Write { truncate: true },
@@ -200,21 +229,35 @@ fn open_file_write_and_truncate() {
     std::fs::write(w.top().join("f.txt"), "0123456789").unwrap();
     let d = open_dir(&w.top(), NONE, DirOptions::default()).unwrap();
     {
-        let mut f = d.open_file("f.txt", FileAccess::Write { truncate: false }).unwrap();
+        let mut f = d
+            .open_file("f.txt", FileAccess::Write { truncate: false })
+            .unwrap();
         f.write_all(b"ab").unwrap();
     }
-    assert_eq!(std::fs::read_to_string(w.top().join("f.txt")).unwrap(), "ab23456789");
+    assert_eq!(
+        std::fs::read_to_string(w.top().join("f.txt")).unwrap(),
+        "ab23456789"
+    );
     {
-        let mut f = d.open_file("f.txt", FileAccess::Write { truncate: true }).unwrap();
+        let mut f = d
+            .open_file("f.txt", FileAccess::Write { truncate: true })
+            .unwrap();
         f.write_all(b"xy").unwrap();
     }
-    assert_eq!(std::fs::read_to_string(w.top().join("f.txt")).unwrap(), "xy");
-    let mut f = d.open_file("f.txt", FileAccess::ReadWrite { truncate: false }).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(w.top().join("f.txt")).unwrap(),
+        "xy"
+    );
+    let mut f = d
+        .open_file("f.txt", FileAccess::ReadWrite { truncate: false })
+        .unwrap();
     let mut s = String::new();
     f.read_to_string(&mut s).unwrap();
     assert_eq!(s, "xy");
     // 檔案不存在時不建立(開啟類函式不建立檔案)
-    let e = d.open_file("new.txt", FileAccess::Write { truncate: true }).unwrap_err();
+    let e = d
+        .open_file("new.txt", FileAccess::Write { truncate: true })
+        .unwrap_err();
     assert_eq!(e.kind(), ErrorKind::NotFound);
     assert!(!w.top().join("new.txt").exists());
 }
@@ -228,10 +271,22 @@ fn open_child_opens_subdir_and_rejects_file() {
     let d = open_dir(&w.top(), NONE, DirOptions::default()).unwrap();
     let s = d.open_child("s", DirOptions::default()).unwrap();
     assert_eq!(read_all(s.open_file("m", FileAccess::Read).unwrap()), "m");
-    assert_eq!(d.open_child("f", DirOptions::default()).unwrap_err().kind(), ErrorKind::Unsafe);
-    assert_eq!(d.open_child("f", create()).unwrap_err().kind(), ErrorKind::Unsafe);
-    assert_eq!(d.open_child("n", DirOptions::default()).unwrap_err().kind(), ErrorKind::NotFound);
-    assert_eq!(d.open_child("", create()).unwrap_err().kind(), ErrorKind::InvalidName);
+    assert_eq!(
+        d.open_child("f", DirOptions::default()).unwrap_err().kind(),
+        ErrorKind::Unsafe
+    );
+    assert_eq!(
+        d.open_child("f", create()).unwrap_err().kind(),
+        ErrorKind::Unsafe
+    );
+    assert_eq!(
+        d.open_child("n", DirOptions::default()).unwrap_err().kind(),
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        d.open_child("", create()).unwrap_err().kind(),
+        ErrorKind::InvalidName
+    );
     d.open_child("n", create()).unwrap();
     assert!(w.top().join("n").is_dir());
 }
@@ -241,7 +296,10 @@ fn open_path_reads_last_component_as_file() {
     let w = WorkDir::new();
     std::fs::create_dir_all(w.top().join("a")).unwrap();
     std::fs::write(w.top().join("a").join("f"), "deep").unwrap();
-    assert_eq!(read_all(open_path(&w.top(), &["a", "f"], FileAccess::Read).unwrap()), "deep");
+    assert_eq!(
+        read_all(open_path(&w.top(), &["a", "f"], FileAccess::Read).unwrap()),
+        "deep"
+    );
     let e = open_path(&w.top(), NONE, FileAccess::Read).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::InvalidName);
     let e = open_path(&w.top(), &["a"], FileAccess::Read).unwrap_err();
@@ -257,10 +315,25 @@ fn dir_handle_keeps_pointing_at_the_original_directory() {
     std::fs::create_dir(w.top().join("a")).unwrap();
     std::fs::write(w.top().join("a").join("f"), "original").unwrap();
     let d = open_dir(&w.top(), &["a"], DirOptions::default()).unwrap();
-    std::fs::rename(w.top().join("a"), w.top().join("moved")).unwrap();
+    if let Err(e) = std::fs::rename(w.top().join("a"), w.top().join("moved")) {
+        // Windows:目錄 handle 開著時原路徑不能改名(共用違規,錯誤碼 32);路徑無法被換掉,
+        // handle 仍指向原目錄。其他平台改名必須成功。
+        assert!(
+            cfg!(windows) && e.raw_os_error() == Some(32),
+            "改名失敗:{e}"
+        );
+        assert_eq!(
+            read_all(d.open_file("f", FileAccess::Read).unwrap()),
+            "original"
+        );
+        return;
+    }
     std::fs::create_dir(w.top().join("a")).unwrap();
     std::fs::write(w.top().join("a").join("f"), "replacement").unwrap();
-    assert_eq!(read_all(d.open_file("f", FileAccess::Read).unwrap()), "original");
+    assert_eq!(
+        read_all(d.open_file("f", FileAccess::Read).unwrap()),
+        "original"
+    );
 }
 
 #[test]
