@@ -38,3 +38,15 @@
 - 觸發證據:ACC-20261122-01、ACC-20261123-01、ACC-20261124-01 等 15 份 ACC(CHG-20261124-02「影響範圍」逐檔列出)
 - 計數:seen 1 / applied 1 / last-applied 2026-11-24
 - 狀態:觀察中
+
+## KN-4 — 在 Windows 上 clone 一律關閉換行轉換,提交時逐檔 stage
+
+- tier:shallow
+- 日期 / 分支:2026-11-25(UTC+0)/ 全分支
+- tags/scope:cicd
+- 規則:在 Windows 開發機為本 repo 建工作副本時,一律 `git clone -c core.autocrlf=false <repo>`(既有副本先確認 `git config core.autocrlf` 為 `false`);提交時只以檔名逐一 `git add <路徑>`,不用 `git add -A`、`git add .` 或 `git commit -a`;commit 前以 `git diff --cached --stat` 確認只有預期的檔案、行數合理。派發 Windows 上的施工者、起草者、驗收者時,派發提示寫明這兩點。
+- 原因:repo 內檔案一律 LF;Windows 的 Git 預設 `core.autocrlf=true` 會在工作副本把檔案換成 CRLF,整批 stage 時就把只有換行差異的檔案全部提交。2026-11-25 實例:CHG-20261124-01 建整合分支時,派發者把工作副本的 CRLF 換行整批提交為 `399f6d4`(181 檔只有換行差異)並推上整合分支,隨即以還原 commit `339de92` 把樹還原(未強制推送、未改寫歷史;見該 CHG「## 派發記錄」整合分支列)。同日稍後又險些重犯(派發者轉述,未進 repo)。
+- 處置邊界:只規範工作方式;不新增 `.gitattributes` 或 CI 檢查(若要做,另開 CHG;`.github/`、`scripts/ci/` 屬治理基礎設施)。
+- 觸發證據:CHG-20261124-01「## 派發記錄」整合分支列(`399f6d4`、`339de92`)
+- 計數:seen 2 / applied 1 / last-applied 2026-11-25
+- 狀態:觀察中
