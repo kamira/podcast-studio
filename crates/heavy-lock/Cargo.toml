@@ -1,0 +1,18 @@
+[package]
+name = "heavy-lock"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "跨行程重型工作鎖:outputs/.heavy.lock 的排他鎖(heavy_lock.py 的 Rust 版,CHG-20261127-01)"
+# 不發佈;授權宣告與路線圖第 24 筆一併決定。cargo-deny 的 [licenses.private] 依此略過本 crate
+publish = false
+
+# 相依只有 workspace 內的 safe-fs(CHG-20261127-01 代決 3、5:開啟 outputs/ 與鎖檔);不引入第三方 crate,
+# 上鎖用標準函式庫 `std::fs::File::try_lock` / `unlock`(代決 4)。
+# path 相依須帶 version(cargo-deny bans.wildcards = "deny";CHG-20261124-01 合併 PR #174 的教訓)。
+[dependencies]
+safe-fs = { path = "../safe-fs", version = "=0.0.0" }
+
+[lib]
+name = "heavy_lock"
+path = "src/lib.rs"
