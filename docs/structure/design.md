@@ -24,6 +24,7 @@
 > 2026-11-25 依 CHG-20261125-01 結構文件更新(T2):關鍵元件表 `safe_fs` 列補建立、查詢、刪除、搬移類的 Rust 對應(`create_excl`、`open_or_create`、`lstat` / `Meta`、`entries`、`unlink`、`rmtree`、`rename`、`replace`、`hard_link`)與 D-1(FIFO 不阻塞)、D-2(`rmtree` 不受遞迴深度限制)、D-12(Windows 變更類經完整路徑);`parity` 列補九個 T2 單元。
 > 2026-11-25 依 CHG-20261125-01 結構文件更新(T3):設計決策表新增「Windows 連結以名稱代理重新解析點判定」「Windows 名稱規則只在路徑層、只在 Windows 加嚴」「保留裝置名:開啟真正目錄項或明確失敗」三列(含 T3 於 Windows 開發機的實測結果)。
 > 2026-11-27 依 CHG-20261127-01 結構文件更新(T1):關鍵元件表 `heavy_lock.heavy_lock(...)` 列補 Rust 對應 `heavy_lock::acquire` / `acquire_with`(`crates/heavy-lock`)。
+> 2026-11-27 依 CHG-20261127-01 結構文件更新(T2):設計決策表新增「Rust 重型工作鎖用標準函式庫檔案鎖、以跨語言測試證明 `flock` 語意」一列。
 
 ## 關鍵元件
 
@@ -359,6 +360,7 @@ classDiagram
 | 停頓空隙的點擊範圍以交界為中心至少 12px、層級高於選取片段 | 依停頓寬度 vs 最小點擊範圍 | 停頓可設 0 秒(使用者 2026-10-27),逗號強制停頓預設 0 秒,0 秒空隙是常態 | 〔觀察〕DIR-5 修正 M-2 |
 | 第一句另給 180 秒模型載入額度 | 每句 120 秒含載入 vs 另給載入額度 | 改聲調後只重合成一句是主要路徑,實測載入約 70–93 秒,原規定餘裕約 27 秒 | 〔觀察〕CHG-20261022-04 修訂 4(使用者 2026-10-28 核准,RS-7) |
 | 專案名稱沿用中英日白名單 | ASCII `^[\w\-]{1,64}$` vs 中英日白名單 | 驗收要建立「夜市的味道」;與工作流程名稱同一套規則(使用者 2026-10-26「中英日即可」) | 〔觀察〕CHG-20261022-04 修訂 4(RS-3) |
+| Rust 重型工作鎖用標準函式庫檔案鎖、以跨語言測試證明 `flock` 語意 | 標準函式庫 `std::fs::File::try_lock` vs 第三方 crate(`fs4` 類)vs 自行以 FFI 呼叫作業系統 API | 標準函式庫文件寫明 Unix 為 `flock`、Windows 為 `LockFileEx`,正是與 Python `fcntl.flock` 互斥所需,且不引入 crate、不需 `unsafe`、沒有新增下載;Unix 實作只有文件敘述(「may change in the future」),所以以 `crates/heavy-lock/tests/cross_lang.rs`(`#![cfg(unix)]`)證明 Python 與 Rust 雙向互斥(Python 子行程以 `-I -B -X utf8` 啟動、只自 repo 根目錄匯入 `heavy_lock.py` 並把 `ROOT` / `LOCK_PATH` 改指向暫存目錄),另以 Linux 區辨測試確認 Rust 持鎖時 Python `fcntl.lockf` 仍可取得、`fcntl.flock` 被擋(Rust 不是 POSIX 記錄鎖);工具鏈升級時須重跑;Windows 上 Python 版不執行,以 Rust 對 Rust 跨行程測試證明 | 〔觀察〕CHG-20261127-01 代決 4、10(T2) |
 
 ## 採用模式
 
