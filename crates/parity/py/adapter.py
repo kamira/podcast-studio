@@ -29,6 +29,13 @@ CHG-20261125-01 代決 11;
 `outside/`(固定的標記檔),呼叫 `safe_fs` 後取結果與快照,案例結束即刪除工作目錄**;不寫其他任何位置。
 `safe_fs.*` 共 14 個單元:`check_name` 與開啟類四個(T1)、建立 / 查詢 / 刪除 / 搬移類九個(T2:`create_excl`、
 `open_or_create`、`lstat`、`entries`、`unlink`、`rmtree`、`rename`、`replace`、`link`)。
+`project.*` 單元(CHG-20261128-01 代決 10):`project.py` 頂層 import `fcntl`,在 Windows 上無法載入,
+所以**不在檔頂 import**,只在 `project_*` / `_project_*` 函式內延後 `import project`(事實 H;
+`tests/test_parity_adapter.py` 以 AST 斷言);Windows 上這些單元回報 import 失敗的錯誤類別,
+其他單元不受影響。T1 六個單元:`project.constants`、`project.normalize_speed`、`project.normalize_pause`、
+`project.check_zhuyin`、`project.check_pitch_points`、`project.py_json`;結果一律以 `ok` 回傳——
+接受時 `{"value", "repr"?}`(`repr` 為 `json.dumps(值, ensure_ascii=False, sort_keys=True)`,
+連 `-0.0` 與整數 / 浮點的寫法一起比對),拒絕時 `{"class", "errors"}`(錯誤類別與逐字的錯誤訊息清單)。
 """
 from __future__ import annotations
 
@@ -531,6 +538,149 @@ def safe_fs_link(value):
     return _run_tree_case(value, _act_move(safe_fs.link))
 
 
+# ---------- project.* 單元(CHG-20261128-01 代決 10;Rust 端在 crates/parity/src/units_project.rs) ----------
+# 只在 project_* / _project_* 函式內才 import project(project.py 頂層 import fcntl,Windows 上無法載入;事實 H)。
+
+
+def _project_error_result(e, pj):
+    """ProjectError 及其子類別 → `{"class", "errors"}`(類別字串與 Rust `Error::class` 相同)。"""
+    for cls, name in ((pj.UnsafePath, "unsafe_path"), (pj.ProjectNotFound, "not_found"),
+                      (pj.ProjectExists, "exists"), (pj.QuotaExceeded, "quota")):
+        if isinstance(e, cls):
+            return {"class": name, "errors": list(e.errors)}
+    return {"class": "project_error", "errors": list(e.errors)}
+
+
+def _sorted_json(value):
+    """`post_key` 用的緊湊、鍵排序寫法(連 -0.0 與整數 / 浮點的寫法一起比對)。"""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _value_result(value):
+    return {"value": value, "repr": _sorted_json(value)}
+
+
+def _number_input(value):
+    """`{"v": 任意 JSON, "where"?: 字串}`;格式不符 → error type。"""
+    if not isinstance(value, dict) or "v" not in value:
+        raise _type_error()
+    where = value.get("where")
+    if where is not None and not isinstance(where, str):
+        raise _type_error()
+    return value["v"], where
+
+
+def project_constants(_value):
+    """project.constants:忽略輸入;回 project.py 的常數(集合以排序後字串、Decimal 以 str 表示)、
+    str.isspace 為真的全部碼位,另附三個 dict 常數依建構順序的 `_dump` 字串。"""
+    import project as pj
+    return {
+        "schema_version": pj.SCHEMA_VERSION,
+        "old_schema_versions": list(pj.OLD_SCHEMA_VERSIONS),
+        "projects_name": pj.PROJECTS_NAME,
+        "trash_name": pj.TRASH_NAME,
+        "project_file": pj.PROJECT_FILE,
+        "lock_file": pj.LOCK_FILE,
+        "history_keep": pj.HISTORY_KEEP,
+        "trash_days": pj.TRASH_DAYS,
+        "speed": [str(pj.SPEED_MIN), str(pj.SPEED_MAX), str(pj.SPEED_STEP)],
+        "pause": [str(pj.PAUSE_MIN), str(pj.PAUSE_MAX), str(pj.PAUSE_STEP)],
+        "semi": [str(pj.SEMI_MIN), str(pj.SEMI_MAX), str(pj.SEMI_STEP)],
+        "pos_step": str(pj.POS_STEP),
+        "defaults": pj.DEFAULTS,
+        "defaults_dump": pj._dump(pj.DEFAULTS).decode("utf-8"),
+        "break_pause": pj.BREAK_PAUSE,
+        "breaks": list(pj.BREAKS),
+        "max_script": pj.MAX_SCRIPT,
+        "max_segment_text": pj.MAX_SEGMENT_TEXT,
+        "max_segments": pj.MAX_SEGMENTS,
+        "max_project_bytes": pj.MAX_PROJECT_BYTES,
+        "max_assets": pj.MAX_ASSETS,
+        "max_asset_bytes": pj.MAX_ASSET_BYTES,
+        "max_audio_seconds": pj.MAX_AUDIO_SECONDS,
+        "max_label": pj.MAX_LABEL,
+        "zhuyin_max": pj.ZHUYIN_MAX,
+        "prosody_defaults": pj.PROSODY_DEFAULTS,
+        "prosody_defaults_dump": pj._dump(pj.PROSODY_DEFAULTS).decode("utf-8"),
+        "pitch_points": [pj.PITCH_POINTS_MIN, pj.PITCH_POINTS_MAX],
+        "inner_points_max": pj.INNER_POINTS_MAX,
+        "inner_semi_limit": pj.INNER_SEMI_LIMIT,
+        "max_word_clarity": pj.MAX_WORD_CLARITY,
+        "max_fusions": pj.MAX_FUSIONS,
+        "fusion": [pj.FUSION_MIN, pj.FUSION_MAX],
+        "max_fusion_off": pj.MAX_FUSION_OFF,
+        "fusion_display_max": pj.FUSION_DISPLAY_MAX,
+        "fusion_sources": list(pj.FUSION_SOURCES),
+        "post_version": pj.POST_VERSION,
+        "post_algo": pj.POST_ALGO,
+        "trim_params": pj.TRIM_PARAMS,
+        "trim_params_dump": pj._dump(pj.TRIM_PARAMS).decode("utf-8"),
+        "asset_exts": {k: list(v) for k, v in pj.ASSET_EXTS.items()},
+        "zhuyin_chars": "".join(sorted(pj.ZHUYIN_CHARS)),
+        "sentence_enders": "".join(sorted(pj.SENTENCE_ENDERS)),
+        "closers": "".join(sorted(pj.CLOSERS)),
+        "newlines": "".join(sorted(pj.NEWLINES)),
+        "hanzi_ranges": [list(r) for r in pj.HANZI_RANGES],
+        "name_hint": pj.NAME_HINT,
+        "link_tries": pj.LINK_TRIES,
+        "top_keys": list(pj.TOP_KEYS),
+        "segment_keys_v1": list(pj.SEGMENT_KEYS_V1),
+        "segment_keys": list(pj.SEGMENT_KEYS),
+        "post_keys": list(pj.POST_KEYS),
+        "post_optional": list(pj.POST_OPTIONAL),
+        "image_keys": list(pj.IMAGE_KEYS),
+        "asset_keys": list(pj.ASSET_KEYS),
+        "whitespace": [c for c in range(0x110000) if chr(c).isspace()],
+    }
+
+
+def _project_normalize(value, name):
+    import project as pj
+    v, where = _number_input(value)
+    fn = getattr(pj, name)
+    try:
+        result = fn(v) if where is None else fn(v, where)
+    except pj.ProjectError as e:
+        return _project_error_result(e, pj)
+    return _value_result(result)
+
+
+def project_normalize_speed(value):
+    """project.normalize_speed:輸入 `{"v", "where"?}`;未給 where 時用 Python 的預設「語速」。"""
+    return _project_normalize(value, "normalize_speed")
+
+
+def project_normalize_pause(value):
+    """project.normalize_pause:輸入 `{"v", "where"?}`;未給 where 時用 Python 的預設「停頓」。"""
+    return _project_normalize(value, "normalize_pause")
+
+
+def project_check_zhuyin(value):
+    """project.check_zhuyin:輸入為任意 JSON(注音標註)。"""
+    import project as pj
+    try:
+        return {"value": pj.check_zhuyin(value)}
+    except pj.ProjectError as e:
+        return _project_error_result(e, pj)
+
+
+def project_check_pitch_points(value):
+    """project.check_pitch_points:輸入 `{"points": 任意 JSON, "where": 字串}`。"""
+    import project as pj
+    if not isinstance(value, dict) or "points" not in value or not isinstance(value.get("where"), str):
+        raise _type_error()
+    try:
+        return _value_result(pj.check_pitch_points(value["points"], value["where"]))
+    except pj.ProjectError as e:
+        return _project_error_result(e, pj)
+
+
+def project_py_json(value):
+    """project.py_json:輸入任意 JSON 值;回 `_dump` 的字串與 `post_key` 用的緊湊排序寫法。"""
+    import project as pj
+    return {"dump": pj._dump(value).decode("utf-8"), "sorted": _sorted_json(value)}
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -556,6 +706,12 @@ def build_units(environ=None):
         "safe_fs.rename": safe_fs_rename,
         "safe_fs.replace": safe_fs_replace,
         "safe_fs.link": safe_fs_link,
+        "project.constants": project_constants,
+        "project.normalize_speed": project_normalize_speed,
+        "project.normalize_pause": project_normalize_pause,
+        "project.check_zhuyin": project_check_zhuyin,
+        "project.check_pitch_points": project_check_pitch_points,
+        "project.py_json": project_py_json,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep

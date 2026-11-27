@@ -7,7 +7,8 @@
 //!   案例 id 在檔內唯一;只放合成資料。
 //! - JSON 行協定:請求 `{"id", "input"}`;回應 `ok`(`value`)、`reject`(`code`)、`error`(`class`)三型。
 //! - 判定:`outcome` 相同,且 `value` 以 JSON 值完全相等(整數 1 與浮點 1.0 不同)、
-//!   `code` / `class` 字串相同才算一致;人看的訊息文字不比對。
+//!   `code` / `class` 字串相同才算一致;人看的訊息文字不比對。`project.*` 單元把錯誤訊息清單放進
+//!   `ok` 的值,因此逐字比對(CHG-20261128-01 代決 9,見 [`units_project`])。
 //!
 //! 本 crate 不使用網路;唯一的子程序是 Python 轉接器(見 [`py`])。只有 `safe_fs.*` 單元會在系統暫存目錄
 //! 建立唯一名稱的工作目錄、放合成檔案樹,案例結束即刪除(見 [`units_safe_fs`];CHG-20261125-01 代決 11);
@@ -17,6 +18,7 @@
 pub mod demo;
 pub mod py;
 pub mod units;
+pub mod units_project;
 pub mod units_safe_fs;
 
 use std::collections::{BTreeMap, HashSet};
@@ -128,6 +130,8 @@ impl Registry {
     /// (CHG-20261125-01 T1)與 `safe_fs.create_excl`、`safe_fs.open_or_create`、`safe_fs.lstat`、
     /// `safe_fs.entries`、`safe_fs.unlink`、`safe_fs.rmtree`、`safe_fs.rename`、`safe_fs.replace`、`safe_fs.link`
     /// (T2;見 [`units_safe_fs`]);
+    /// `project.constants`、`project.normalize_speed`、`project.normalize_pause`、`project.check_zhuyin`、
+    /// `project.check_pitch_points`、`project.py_json`(CHG-20261128-01 T1;見 [`units_project`]);
     /// 環境變數 `PARITY_TEST_SLEEP=1` 時另登錄測試專用的 `demo.sleep`。
     /// 路線圖第 2 筆起,各模組的 Rust 單元在此登錄。
     pub fn builtin() -> Self {
@@ -156,6 +160,21 @@ impl Registry {
         r.register("safe_fs.rename", units_safe_fs::safe_fs_rename);
         r.register("safe_fs.replace", units_safe_fs::safe_fs_replace);
         r.register("safe_fs.link", units_safe_fs::safe_fs_link);
+        r.register("project.constants", units_project::project_constants);
+        r.register(
+            "project.normalize_speed",
+            units_project::project_normalize_speed,
+        );
+        r.register(
+            "project.normalize_pause",
+            units_project::project_normalize_pause,
+        );
+        r.register("project.check_zhuyin", units_project::project_check_zhuyin);
+        r.register(
+            "project.check_pitch_points",
+            units_project::project_check_pitch_points,
+        );
+        r.register("project.py_json", units_project::project_py_json);
         if std::env::var_os("PARITY_TEST_SLEEP").is_some_and(|v| v == "1") {
             r.register("demo.sleep", demo::sleep);
         }
