@@ -12,6 +12,8 @@
 
 > 2026-11-22 依 CHG-20261122-01 結構文件更新(以整合分支 `chg/CHG-20261122-01-impl` 的 T1 為準):專案 `history/` 版本時間戳在同一專案內嚴格遞增。
 
+> 2026-11-27 依 CHG-20261127-01 結構文件更新(T1):檔案表 `.heavy.lock` 列補 Rust `heavy-lock` 共用同一鎖檔。
+
 〔觀察〕持久化資料有五類:設定資料庫 `config/studio.db`(使用者資料,不入 git)、工作流程 JSON(`workflows/`)、專案資料 `projects/`(使用者資料,不入 git;CHG-20261022-04)、`outputs/` 下的產出檔與上傳檔、程式內常數。流程執行中的文字(文案、標題、prompt)只存在伺服器記憶體中的執行事件(最近 20 次 run)與瀏覽器畫布上,另存工作流程時隨節點參數或釘住的編輯值寫入 JSON。
 
 ## 實體 / 資料表
@@ -96,7 +98,7 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,�
 | `uploads/<uuid4 hex>.<ext>` | `POST /api/upload` | 使用者上傳檔;副檔名白名單 `.txt .md .png .jpg .jpeg .webp .wav .mp3 .m4a`,≤ 200 MB,檔頭內容嗅探相符;檔名由伺服器產生,原始檔名只取副檔名 |
 | `podcast-<stamp>.mp4` / `.srt`(時間軸匯出) | `media.render_timeline`(`POST /api/projects/{p}/render`,CHG-20261022-04 T5) | 1920×1080 H.264 + AAC + mov_text;`-r 10`、`-vf fps=10`、`-t <layout.duration>`;音軌為 48 kHz 單聲道 PCM 依 layout 組成(各片段解碼以 `-t` 截在需要的長度,DIR-5 修正 M-3);圖片重疊時後開始者優先、沒有圖的時段為黑畫面 |
 | `.tmp/` | `/api/annotate` | worker 輸入檔,用完即刪;`/files/` 不提供點開頭目錄 |
-| `.heavy.lock` | `heavy_lock` | 跨行程鎖檔,內容不讀不寫、不刪除 |
+| `.heavy.lock` | `heavy_lock` | 跨行程鎖檔,內容不讀不寫、不刪除;Rust `heavy-lock` 共用同一鎖檔(CHG-20261127-01) |
 | `.studio.pid`、`studio_server.log` | `scripts/deploy_local.sh` | 部署用 pidfile 與伺服器日誌 |
 | `ui_check/*.png` | UI 互動檢查(CHG-20261022-01 T14) | 截圖 |
 
