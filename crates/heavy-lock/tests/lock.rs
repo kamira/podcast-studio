@@ -193,8 +193,8 @@ fn nested_on_same_thread_times_out() {
 fn on_wait_not_called_without_waiting() {
     let w = WorkDir::new();
     let called = AtomicBool::new(false);
-    let lock = acquire_with(&w.top(), None, || called.store(true, Ordering::SeqCst))
-        .expect("取鎖失敗");
+    let lock =
+        acquire_with(&w.top(), None, || called.store(true, Ordering::SeqCst)).expect("取鎖失敗");
     drop(lock);
     assert!(!called.load(Ordering::SeqCst), "沒有等待卻呼叫了 on_wait");
 }

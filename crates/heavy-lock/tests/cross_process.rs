@@ -100,9 +100,7 @@ fn lock_released_after_holder_is_killed() {
     let threshold = release_threshold();
     let r = acquire(&w.top(), Some(threshold));
     let elapsed = start.elapsed();
-    println!(
-        "持鎖子行程被終止({status:?})後取得重型鎖的實際耗時:{elapsed:?}(門檻 {threshold:?})"
-    );
+    println!("持鎖子行程被終止({status:?})後取得重型鎖的實際耗時:{elapsed:?}(門檻 {threshold:?})");
     let lock = r.expect("被終止後未在門檻內取得");
     assert!(elapsed < threshold, "{elapsed:?}");
     assert!(!w.has(RELEASING), "子行程應是被終止,而非自行釋放");
