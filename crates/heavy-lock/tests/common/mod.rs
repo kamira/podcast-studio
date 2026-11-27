@@ -6,8 +6,9 @@
 //!   `outside/`(含標記檔,模擬根目錄外的資料);交握用的標記檔直接放在工作目錄下。
 //! - 一律以標記檔交握、斷言因果順序,不以睡眠長短推斷兩行程是否重疊。
 //! - 輔助行程:`std::env::current_exe()` 以 argv 清單 `--exact heavy_lock_helper --nocapture` 重新執行,
-//!   以環境變數傳角色與工作目錄;每個測試執行檔都要定義 `#[test] fn heavy_lock_helper()` 呼叫
-//!   [`run_helper_if_requested`](沒有該環境變數時立即返回)。不新增 `[[bin]]`、範例程式或 dev-dependency。
+//!   以環境變數傳角色與工作目錄;需啟動輔助行程的測試執行檔(`cross_process.rs`、`cross_lang.rs`)都要定義
+//!   `#[test] fn heavy_lock_helper()` 呼叫 [`run_helper_if_requested`](沒有該環境變數時立即返回;
+//!   `lock.rs` 不啟動輔助行程,不需定義)。不新增 `[[bin]]`、範例程式或 dev-dependency。
 #![allow(dead_code)]
 
 use std::ffi::OsStr;
@@ -43,13 +44,14 @@ pub const DIR_ENV: &str = "HEAVY_LOCK_TEST_DIR";
 /// 每個測試執行檔裡的輔助測試名稱。
 pub const HELPER_TEST: &str = "heavy_lock_helper";
 
-/// `try` 角色的結束碼:以短逾時取鎖回 `Timeout`。
-pub const EXIT_TIMEOUT: i32 = 0;
+/// `try` 角色的結束碼:以短逾時取鎖回 `Timeout`。用非 0 專用碼,避免輔助行程沒有執行到角色時
+/// (例:libtest 找不到符合的測試名稱而以 0 結束)被誤判為逾時。
+pub const EXIT_TIMEOUT: i32 = 20;
 /// `try` 角色的結束碼:取得鎖(不該發生)。
 pub const EXIT_ACQUIRED: i32 = 10;
-/// 開啟或上鎖錯誤。
+/// 開啟或上鎖錯誤(`Timeout` 以外的 [`heavy_lock::Error`])。
 pub const EXIT_ERROR: i32 = 11;
-/// `hold` 角色等不到開始或釋放訊號。
+/// `hold` 角色等不到開始(取鎖逾時)或釋放訊號。
 pub const EXIT_NO_SIGNAL: i32 = 12;
 /// 角色不明或工作目錄缺漏。
 pub const EXIT_USAGE: i32 = 2;
@@ -253,7 +255,8 @@ impl Drop for Helper {
 ///
 /// 角色:
 /// - `hold`:以 [`START_LIMIT`] 取鎖 → 寫 `ready` → 等 `waiting` 或 `release`(至多 [`RELEASE_LIMIT`])
-///   → 寫 `releasing` → 釋放 → 結束碼 0;等不到訊號以 [`EXIT_NO_SIGNAL`] 結束(作業系統釋放鎖)。
+///   → 寫 `releasing` → 釋放 → 結束碼 0;取鎖逾時或等不到訊號以 [`EXIT_NO_SIGNAL`] 結束(作業系統釋放鎖),
+///   其他取鎖錯誤以 [`EXIT_ERROR`] 結束。
 /// - `try`:以 [`SHORT_TIMEOUT`] 取鎖,回 `Timeout` 以 [`EXIT_TIMEOUT`] 結束,取得以 [`EXIT_ACQUIRED`]、
 ///   其他錯誤以 [`EXIT_ERROR`] 結束。
 pub fn run_helper_if_requested() {
@@ -277,7 +280,8 @@ pub fn run_helper_if_requested() {
 fn helper_hold(w: &WorkDir) -> i32 {
     let lock = match heavy_lock::acquire(&w.top(), Some(START_LIMIT)) {
         Ok(lock) => lock,
-        Err(_) => return EXIT_NO_SIGNAL,
+        Err(heavy_lock::Error::Timeout(_)) => return EXIT_NO_SIGNAL,
+        Err(_) => return EXIT_ERROR,
     };
     w.touch(READY);
     if !w.wait_any(&[WAITING, RELEASE], RELEASE_LIMIT) {

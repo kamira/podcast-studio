@@ -160,7 +160,210 @@ else:
     sys.exit(2)
 "#;
 
-// 紅燈:Python 子行程輔助(python、repo_root、Case、Py)尚未實作,本檔編譯失敗。
+/// 直譯器:`PARITY_PYTHON`(空字串視為未提供),沒有時 `python3`(與 `crates/parity` 的 Unix 規則相同)。
+fn python() -> OsString {
+    std::env::var_os("PARITY_PYTHON")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| OsString::from("python3"))
+}
+
+/// repo 根目錄(`CARGO_MANIFEST_DIR/../..`,`canonicalize` 過)。
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("無法取得 repo 根目錄")
+}
+
+/// 工作副本 `outputs/.heavy.lock` 的狀態(不跟隨連結)。
+#[derive(Debug, PartialEq, Eq)]
+enum RepoLock {
+    Missing,
+    Present {
+        len: u64,
+        mtime: i64,
+        mtime_nsec: i64,
+        ino: u64,
+    },
+}
+
+fn repo_lock_state(repo: &Path) -> RepoLock {
+    match std::fs::symlink_metadata(repo.join("outputs").join(".heavy.lock")) {
+        Ok(m) => RepoLock::Present {
+            len: m.len(),
+            mtime: m.mtime(),
+            mtime_nsec: m.mtime_nsec(),
+            ino: m.ino(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RepoLock::Missing,
+        Err(e) => panic!("讀取工作副本鎖檔狀態失敗:{e}"),
+    }
+}
+
+/// 一個跨語言案例:暫存工作目錄、`canonicalize` 過的路徑與測試前的工作副本鎖檔狀態。
+struct Case {
+    name: &'static str,
+    w: WorkDir,
+    repo: PathBuf,
+    work: PathBuf,
+    top: PathBuf,
+    before: RepoLock,
+}
+
+impl Case {
+    fn new(name: &'static str) -> Case {
+        let repo = repo_root();
+        let before = repo_lock_state(&repo);
+        println!("{name} 測試前工作副本 outputs/.heavy.lock:{before:?}");
+        let w = WorkDir::new();
+        let work = w.root().canonicalize().expect("canonicalize 工作目錄失敗");
+        let top = w.top().canonicalize().expect("canonicalize top 失敗");
+        Case {
+            name,
+            w,
+            repo,
+            work,
+            top,
+            before,
+        }
+    }
+
+    /// 以角色 `role` 啟動 Python 子行程。啟動失敗即判失敗(不略過)。
+    fn spawn(&self, role: &'static str) -> Py {
+        let child = Command::new(python())
+            .args(PY_FLAGS)
+            .arg("-c")
+            .arg(PY_PROGRAM)
+            .arg(&self.repo)
+            .arg(&self.top)
+            .arg(&self.work)
+            .arg(role)
+            .current_dir(&self.work)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("無法啟動 Python 直譯器 {:?}(判失敗,不略過):{e}", python()));
+        Py {
+            child: Some(child),
+            role,
+        }
+    }
+
+    /// 斷言 Python 改寫後的 `LOCK_PATH` 位於暫存工作目錄之下,且工作副本鎖檔未被建立或修改。
+    fn finish(self) {
+        let written = std::fs::read_to_string(self.work.join(PY_LOCK_PATH))
+            .expect("Python 未寫出改寫後的 LOCK_PATH");
+        let lock_path = PathBuf::from(written);
+        assert!(
+            lock_path.starts_with(&self.work),
+            "Python LOCK_PATH 不在暫存工作目錄之下"
+        );
+        assert_eq!(lock_path, self.top.join("outputs").join(".heavy.lock"));
+        let after = repo_lock_state(&self.repo);
+        println!(
+            "{} 測試後工作副本 outputs/.heavy.lock:{after:?}(LOCK_PATH 位於暫存工作目錄之下)",
+            self.name
+        );
+        assert_eq!(
+            self.before, after,
+            "工作副本 outputs/.heavy.lock 被建立或修改"
+        );
+    }
+}
+
+/// Python 子行程;`Drop` 時 kill 並回收,不留孤兒行程。
+struct Py {
+    child: Option<Child>,
+    role: &'static str,
+}
+
+impl Py {
+    fn child(&mut self) -> &mut Child {
+        self.child.as_mut().expect("Python 子行程已回收")
+    }
+
+    /// 回收後讀出 stdout 與 stderr(輸出很短,結束後讀取不會塞住管線)。
+    fn collect(child: &mut Child) -> String {
+        let mut out = String::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut out);
+        }
+        if let Some(mut s) = child.stderr.take() {
+            let mut err = String::new();
+            let _ = s.read_to_string(&mut err);
+            if !err.is_empty() {
+                out.push_str("[stderr] ");
+                out.push_str(&err);
+            }
+        }
+        out
+    }
+
+    /// 等子行程結束,至多 `limit`;逾時判失敗(之後由 `Drop` kill)。回傳結束狀態與輸出。
+    fn wait(&mut self, limit: Duration) -> (ExitStatus, String) {
+        let start = Instant::now();
+        loop {
+            if let Some(status) = self.child().try_wait().expect("查詢 Python 子行程失敗") {
+                let mut child = self.child.take().expect("Python 子行程已回收");
+                let out = Self::collect(&mut child);
+                println!(
+                    "Python 子行程({})結束 {status:?},輸出:{}",
+                    self.role,
+                    out.trim()
+                );
+                return (status, out);
+            }
+            assert!(
+                start.elapsed() < limit,
+                "Python 子行程({})未在 {limit:?} 內結束",
+                self.role
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// 等標記檔 `name` 出現,至多 `limit`;子行程先結束或逾時都判失敗。
+    fn wait_marker(&mut self, case: &Case, name: &str, limit: Duration) {
+        let start = Instant::now();
+        loop {
+            if case.w.has(name) {
+                return;
+            }
+            if let Some(status) = self.child().try_wait().expect("查詢 Python 子行程失敗") {
+                let mut child = self.child.take().expect("Python 子行程已回收");
+                let out = Self::collect(&mut child);
+                panic!(
+                    "Python 子行程({})在寫出 {name} 前結束 {status:?}:{}",
+                    self.role,
+                    out.trim()
+                );
+            }
+            assert!(
+                start.elapsed() < limit,
+                "Python 子行程({})未在 {limit:?} 內寫出 {name}",
+                self.role
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// 終止子行程並等到回收(`Child::wait()` 返回)。
+    fn kill_and_wait(&mut self) -> ExitStatus {
+        let mut child = self.child.take().expect("Python 子行程已回收");
+        child.kill().expect("無法終止 Python 子行程");
+        child.wait().expect("無法回收 Python 子行程")
+    }
+}
+
+impl Drop for Py {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 #[test]
 fn python_interpreter_starts() {
@@ -227,7 +430,10 @@ fn python_times_out_while_rust_holds() {
     let lock = acquire(&c.top, None).expect("Rust 取鎖失敗");
     let mut py = c.spawn("try_short");
     let (status, out) = py.wait(RELEASE_LIMIT);
-    println!("(iii) Rust 持鎖時 Python heavy_lock(timeout=0.3):{}", out.trim());
+    println!(
+        "(iii) Rust 持鎖時 Python heavy_lock(timeout=0.3):{}",
+        out.trim()
+    );
     assert_eq!(status.code(), Some(PY_OK), "Python 應丟 TimeoutError:{out}");
     assert!(out.contains("result=timeout"), "{out}");
     drop(lock);
