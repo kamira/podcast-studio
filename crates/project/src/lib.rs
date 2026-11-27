@@ -3,7 +3,7 @@
 //! 路線圖第 5 筆:專案檔 schema 2 的讀取 / 驗證 / 以 Python 相同位元組寫出、`history/` 與專案鎖。
 //! 依 task 逐步加入(T1~T7);本筆沒有任何產品呼叫端,Python 版行為不變。
 //!
-//! 目前的模組(T1、T2):
+//! 目前的模組(T1~T3):
 //! - [`error`]:[`Error`]、[`ErrorKind`]——錯誤類別與逐字與 Python 相同的錯誤訊息清單(代決 9)。
 //! - [`pyjson`]:與 Python `_dump`(`json.dumps(ensure_ascii=False, indent=1)` + 換行)逐位元組相同的寫出器,
 //!   以及 `post_key` 用的緊湊、鍵排序寫法;浮點依 Python `repr`(代決 6)。
@@ -16,6 +16,12 @@
 //!   `Project.to_dict`,寫出一律先驗證(`Project::dump_bytes` = `_dump(validate(self.to_dict()))`)。
 //! - [`validate`]:讀 JSON 原文(`parse_project_json`,= `_read_project_file` 讀檔之後的部分)、完整驗證
 //!   (`validate`,累積全部錯誤訊息)、`dump_validated`(5 MB 上限)、`check_version`(T2)。
+//! - [`text`]:分句 `split_segments`、`escape_text`、合成文字 `tts_text`、合音的 `fused_out` / `model_units` /
+//!   `shift_marks`(T3)。
+//! - [`post`]:後製參數 `post_params`、`is_default_post`、後製鍵 `post_key`、`is_post_fresh`,以及
+//!   `effective_speed` / `effective_pause`(T3)。
+//! - [`sha256`]:自寫的 SHA-256(FIPS 180-4;後製鍵用,代決 18,T3)。
+//! - [`ids`]:`new_id`、`token_hex` 與寫入類 API 注入的 [`ids::Clock`](代決 13,T3)。
 //!
 //! JSON 解析用 `serde_json`(開 `float_roundtrip`,浮點解析正確捨入,與 Python `float()` 相同;代決 5)。
 //! `src/` 不含平台條件編譯(平台差異由標準函式庫與 `safe-fs` 承擔;Global Constraints)。
@@ -24,10 +30,14 @@
 pub mod checks;
 pub mod constants;
 pub mod error;
+pub mod ids;
 pub mod model;
+pub mod post;
 pub mod pyjson;
 pub mod pystr;
 pub mod round;
+pub mod sha256;
+pub mod text;
 pub mod validate;
 
 pub use error::{Error, ErrorKind, Result};

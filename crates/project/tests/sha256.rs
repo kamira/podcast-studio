@@ -241,7 +241,10 @@ fn primes(count: usize) -> Vec<u128> {
     let mut out = Vec::new();
     let mut k = 2u128;
     while out.len() < count {
-        if (2..k).take_while(|d| d * d <= k).all(|d| k % d != 0) {
+        if (2..k)
+            .take_while(|d| d * d <= k)
+            .all(|d| !k.is_multiple_of(d))
+        {
             out.push(k);
         }
         k += 1;
