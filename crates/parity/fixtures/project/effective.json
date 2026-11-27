@@ -1,0 +1,25 @@
+{
+  "unit": "project.effective",
+  "cases": [
+    {"id": "defaults_sentence", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "sentence"}}},
+    {"id": "custom_sentence", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "sentence"}, "defaults": {"speed": 0.8, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.5}}},
+    {"id": "defaults_paragraph", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "paragraph"}}},
+    {"id": "custom_paragraph", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "paragraph"}, "defaults": {"speed": 0.8, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.5}}},
+    {"id": "defaults_forced", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "forced"}}},
+    {"id": "custom_forced", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "forced"}, "defaults": {"speed": 0.8, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.5}}},
+    {"id": "defaults_end", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "end"}}},
+    {"id": "custom_end", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "end"}, "defaults": {"speed": 0.8, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.5}}},
+    {"id": "no_break_is_end", "input": {"segment": {"id": "0123456789abcdef", "text": "好。"}}},
+    {"id": "pause_after_given", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "pause_after": 2.0, "break": "sentence"}, "defaults": {"speed": 0.8, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.5}}},
+    {"id": "pause_after_zero", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "pause_after": 0, "break": "paragraph"}}},
+    {"id": "pause_after_rounded", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "pause_after": 0.25, "break": "forced"}}},
+    {"id": "speed_given", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "speed": 1.5}, "defaults": {"speed": 0.8, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.5}}},
+    {"id": "speed_rounded", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "speed": 1.125}}},
+    {"id": "speed_null_uses_default", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "speed": null}, "defaults": {"speed": 2}}},
+    {"id": "partial_defaults", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "paragraph"}, "defaults": {"pause_paragraph": 3}}},
+    {"id": "defaults_null", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "sentence"}, "defaults": null}},
+    {"id": "invalid_defaults", "input": {"segment": {"id": "0123456789abcdef", "text": "好。"}, "defaults": {"speed": 9}}},
+    {"id": "invalid_break", "input": {"segment": {"id": "0123456789abcdef", "text": "好。", "break": "comma"}}},
+    {"id": "type_missing_segment", "input": {"defaults": {"speed": 0.8, "pause_comma": 0.2, "pause_sentence": 0.5, "pause_paragraph": 1.5}}}
+  ]
+}

@@ -39,6 +39,12 @@ CHG-20261125-01 代決 11;
 1000 個以上時改回 `{"dump": {"parts": […]}}`,見 `_project_compact_dump`);結果一律以 `ok` 回傳——
 接受時 `{"value", "repr"?}`(`repr` 為 `json.dumps(值, ensure_ascii=False, sort_keys=True)`,
 連 `-0.0` 與整數 / 浮點的寫法一起比對),拒絕時 `{"class", "errors"}`(錯誤類別與逐字的錯誤訊息清單)。
+T3 加純函式 11 個單元:`project.split_segments`(`{"text": 字串或 {"parts"}, "forced"?: [整數…]}`)、
+`project.escape_text`(字串),以及片段類的 `project.tts_text`、`project.fused_out`、`project.model_units`、
+`project.shift_marks`(另需 `old`、`new`)、`project.post_params`、`project.post_key`、`project.is_post_fresh`、
+`project.is_default_post`、`project.effective`(`effective_speed` 與 `effective_pause`,另可給 `defaults`)——
+片段類輸入 `{"segment"}`,先放進 `{"schema_version": 2, "name": "p", "segments": [segment]}` 以 `validate`
+(`effective` 以 `Project.from_dict`)驗證,失敗回 `{"class", "errors"}`,通過才對驗證後的片段呼叫函式。
 """
 from __future__ import annotations
 
@@ -770,6 +776,126 @@ def project_validate_text(value):
         shutil.rmtree(work)
 
 
+# ---------- project.* T3:純函式(Rust 端 units_project.rs 的同名單元) ----------
+
+PROJECT_I64 = 2 ** 63
+
+
+def _project_segment_data(value, with_defaults=False):
+    """片段類單元的輸入 `{"segment", "defaults"?}` → 交給 `validate` 的專案;缺 `segment` → error type。"""
+    if not isinstance(value, dict) or "segment" not in value:
+        raise _type_error()
+    data = {"schema_version": 2, "name": "p", "segments": [value["segment"]]}
+    if with_defaults and "defaults" in value:
+        data["defaults"] = value["defaults"]
+    return data
+
+
+def _project_on_segment(value, fn):
+    """驗證後的片段交給 `fn`;驗證失敗回 `{"class", "errors"}`。"""
+    import project as pj
+    data = _project_segment_data(value)
+    try:
+        segment = pj.validate(data)["segments"][0]
+    except pj.ProjectError as e:
+        return _project_error_result(e, pj)
+    return fn(pj, segment)
+
+
+def project_split_segments(value):
+    """project.split_segments:`{"text": 字串或 {"parts"}, "forced"?: [整數…]}`(forced 只接受 64 位元範圍內的整數,
+    不含布林;Rust API 為 `&[i64]`)。"""
+    import project as pj
+    if not isinstance(value, dict):
+        raise _type_error()
+    text = value.get("text")
+    if isinstance(text, dict) and set(text) == {"parts"}:
+        text = _project_parts_text(text["parts"])
+    if not isinstance(text, str):
+        raise _type_error()
+    forced = value.get("forced", [])
+    if not isinstance(forced, list) or not all(
+            isinstance(b, int) and not isinstance(b, bool) and -PROJECT_I64 <= b < PROJECT_I64 for b in forced):
+        raise _type_error()
+    try:
+        return {"value": pj.split_segments(text, forced)}
+    except pj.ProjectError as e:
+        return _project_error_result(e, pj)
+
+
+def project_escape_text(value):
+    """project.escape_text:輸入為字串。"""
+    import project as pj
+    if not isinstance(value, str):
+        raise _type_error()
+    return {"value": pj.escape_text(value)}
+
+
+def project_tts_text(value):
+    """project.tts_text:`{"segment"}`(先驗證)。"""
+    def run(pj, segment):
+        try:
+            return {"value": pj.tts_text(segment)}
+        except pj.ProjectError as e:
+            return _project_error_result(e, pj)
+    return _project_on_segment(value, run)
+
+
+def project_fused_out(value):
+    """project.fused_out:`{"segment"}` → 遞增排序的索引。"""
+    return _project_on_segment(value, lambda pj, s: {"value": sorted(pj.fused_out(s))})
+
+
+def project_model_units(value):
+    """project.model_units:`{"segment"}`。"""
+    return _project_on_segment(value, lambda pj, s: {"value": pj.model_units(s)})
+
+
+def project_shift_marks(value):
+    """project.shift_marks:`{"segment", "old": 字串, "new": 字串}`。"""
+    if not isinstance(value, dict) or not isinstance(value.get("old"), str) or not isinstance(value.get("new"), str):
+        raise _type_error()
+    return _project_on_segment(value, lambda pj, s: {"value": pj.shift_marks(s, value["old"], value["new"])})
+
+
+def project_post_params(value):
+    """project.post_params:`{"segment"}` → `{"value", "repr"}`。"""
+    return _project_on_segment(value, lambda pj, s: _value_result(pj.post_params(s)))
+
+
+def project_post_key(value):
+    """project.post_key:`{"segment"}`;自錄音檔或沒有音檔回 `{"class", "errors"}`。"""
+    def run(pj, segment):
+        try:
+            return {"value": pj.post_key(segment)}
+        except pj.ProjectError as e:
+            return _project_error_result(e, pj)
+    return _project_on_segment(value, run)
+
+
+def project_is_post_fresh(value):
+    """project.is_post_fresh:`{"segment"}`。"""
+    return _project_on_segment(value, lambda pj, s: {"value": pj.is_post_fresh(s)})
+
+
+def project_is_default_post(value):
+    """project.is_default_post:`{"segment"}`。"""
+    return _project_on_segment(value, lambda pj, s: {"value": pj.is_default_post(s)})
+
+
+def project_effective(value):
+    """project.effective:`{"segment", "defaults"?}` → `effective_speed` 與 `effective_pause`
+    (以 `Project.from_dict` 建立專案)。"""
+    import project as pj
+    data = _project_segment_data(value, with_defaults=True)
+    try:
+        proj = pj.Project.from_dict(data)
+    except pj.ProjectError as e:
+        return _project_error_result(e, pj)
+    segment = proj.segments[0]
+    return _value_result({"speed": pj.effective_speed(proj, segment), "pause": pj.effective_pause(proj, segment)})
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -802,6 +928,17 @@ def build_units(environ=None):
         "project.check_pitch_points": project_check_pitch_points,
         "project.py_json": project_py_json,
         "project.validate_text": project_validate_text,
+        "project.split_segments": project_split_segments,
+        "project.escape_text": project_escape_text,
+        "project.tts_text": project_tts_text,
+        "project.fused_out": project_fused_out,
+        "project.model_units": project_model_units,
+        "project.shift_marks": project_shift_marks,
+        "project.post_params": project_post_params,
+        "project.post_key": project_post_key,
+        "project.is_post_fresh": project_is_post_fresh,
+        "project.is_default_post": project_is_default_post,
+        "project.effective": project_effective,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep

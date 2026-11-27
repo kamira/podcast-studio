@@ -12,7 +12,7 @@ L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Pytho
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
 轉接器 import 的 `value_checks`、`names`、`safe_fs` 是 repo 根目錄的產品模組。
-`project.*` 7 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`;`validate_text` 案例結束後轉接器的暫存目錄不存在):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+`project.*` 18 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`、T3 純函式 11 個;`validate_text` 案例結束後轉接器的暫存目錄不存在):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
 (`crates/parity/tests/data/project_expected.json`);轉接器載入的 `project`、`breezy_worker` 是 repo 根目錄的
 產品模組(`project.py` 頂層 import `fcntl`,這些測試在 Windows 略過)。
 約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs, project}`(CHG-20261124-01 代決 13、
@@ -460,7 +460,10 @@ def test_safe_fs_案例結束後工作目錄不存在():
 PROJECT_FIXTURES = ROOT / "crates" / "parity" / "fixtures" / "project"
 PROJECT_EXPECTED = ROOT / "crates" / "parity" / "tests" / "data" / "project_expected.json"
 PROJECT_UNITS = ["constants", "normalize_speed", "normalize_pause", "check_zhuyin", "check_pitch_points",
-                 "py_json", "validate_text"]
+                 "py_json", "validate_text",
+                 # T3:純函式
+                 "split_segments", "escape_text", "tts_text", "fused_out", "model_units", "shift_marks",
+                 "post_params", "post_key", "is_post_fresh", "is_default_post", "effective"]
 needs_posix_project = pytest.mark.skipif(
     sys.platform == "win32", reason="project.py 頂層 import fcntl,在 Windows 無法載入(CHG-20261128-01 事實 H)")
 
@@ -555,6 +558,37 @@ def test_project_validate_text_的_dump_精簡門檻與可逆性():
         assert not any(isinstance(a, str) and isinstance(b, str) for a, b in zip(parts, parts[1:])), "相鄰字串段須合併"
         assert f'"script": "{"a" * n}",' in _parts_expand(parts)
     assert _parts_expand(got[1]["value"]["dump"]["parts"]).replace("a" * 1000, "a" * 999) == got[0]["value"]["dump"]
+
+
+@needs_posix_project
+def test_project_片段類單元先驗證再呼叫():
+    """T3:片段類單元把 `segment` 放進最小專案以 `validate` 驗證;失敗回 validate 的訊息,缺 `segment` 為 error type。"""
+    seg = {"id": "0123456789abcdef", "text": "是這樣啊",
+           "fusions": [{"index": 1, "length": 2, "zhuyin": "ㄐㄧㄤˋ", "source": "rule"}]}
+    reqs = [{"id": "ok", "input": {"segment": seg}}, {"id": "bad", "input": {"segment": {**seg, "text": " "}}},
+            {"id": "missing", "input": {"seg": seg}}, {"id": "list", "input": [seg]}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.tts_text", reqs))]
+    assert got == [ok({"value": "是這[:ㄐㄧㄤˋ]啊"}),
+                   ok({"class": "project_error", "errors": ["segments[0].text 是空的"]}),
+                   error("type"), error("type")]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.fused_out", reqs[:1]))]
+    assert got == [ok({"value": [2]})], "set 以遞增陣列回傳"
+
+
+@needs_posix_project
+def test_project_split_segments_的_forced_只接受_64_位元整數():
+    """T3:Rust API 為 `&[i64]`;布林、浮點、字串、超出 64 位元一律 error type,範圍外的整數為 ProjectError。"""
+    text = "大家好，歡迎。"
+    bad = [[True], [1.0], ["3"], 3, [2 ** 63], [-(2 ** 63) - 1]]
+    reqs = [{"id": f"b{i}", "input": {"text": text, "forced": b}} for i, b in enumerate(bad)]
+    reqs += [{"id": "min", "input": {"text": text, "forced": [-(2 ** 63)]}},
+             {"id": "parts", "input": {"text": {"parts": [{"repeat": " ", "count": 50001}]}}},
+             {"id": "none", "input": {"text": text}}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.split_segments", reqs))]
+    assert got[:len(bad)] == [error("type")] * len(bad)
+    assert got[len(bad):] == [ok({"class": "project_error", "errors": ["強制停頓位置超出文稿範圍"]}),
+                              ok({"class": "project_error", "errors": ["文稿超過 50000 字"]}),
+                              ok({"value": [{"text": "大家好，歡迎。", "break": "sentence", "start": 0, "end": 7}]})]
 
 
 @needs_posix_project

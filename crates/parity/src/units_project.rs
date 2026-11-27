@@ -15,6 +15,24 @@
 //! | `project.check_pitch_points` | `{"points", "where"}` | `{"value": [[位置, 半音], …], "repr"}` |
 //! | `project.py_json` | 任意 JSON 值 | `{"dump": _dump 字串, "sorted": 緊湊排序字串}` |
 //! | `project.validate_text` | JSON 原文字串(以 UTF-8 編碼)、`{"hex": 位元組的十六進位}` 或 `{"parts": [片段…]}` | `{"dump": _dump(validate(…)) 字串或 {"parts"}}` |
+//! | `project.split_segments` | `{"text": 字串或 {"parts"}, "forced"?: [整數…]}` | `{"value": [{"text", "break", "start", "end"}…]}` |
+//! | `project.escape_text` | 字串 | `{"value": 字串}` |
+//! | `project.tts_text` | `{"segment"}` | `{"value": 合成文字}` |
+//! | `project.fused_out` | `{"segment"}` | `{"value": [索引…](遞增)}` |
+//! | `project.model_units` | `{"segment"}` | `{"value": [索引…]}` |
+//! | `project.shift_marks` | `{"segment", "old": 字串, "new": 字串}` | `{"value": {"fusions", "fusion_off", "cleared"}}` |
+//! | `project.post_params` | `{"segment"}` | `{"value": 後製參數, "repr"}` |
+//! | `project.post_key` | `{"segment"}` | `{"value": 64 碼後製鍵}` |
+//! | `project.is_post_fresh` | `{"segment"}` | `{"value": 布林}` |
+//! | `project.is_default_post` | `{"segment"}` | `{"value": 布林}` |
+//! | `project.effective` | `{"segment", "defaults"?}` | `{"value": {"speed", "pause"}, "repr"}` |
+//!
+//! 片段類單元(T3):兩邊都把 `segment` 放進 `{"schema_version": 2, "name": "p", "segments": [segment]}`(`effective` 另把
+//! 給定的 `defaults` 放進去)以 `validate` 驗證——Python 呼叫端傳入的就是驗證後的片段;驗證失敗時回 `validate` 的
+//! `{"class", "errors"}`,通過時對驗證後的片段呼叫函式(Rust `project::text` / `project::post`,Python 同名函式;
+//! `effective` 為 `effective_speed` 與 `effective_pause`,Python 以 `Project.from_dict` 建立專案)。
+//! `split_segments` 的 `forced` 只接受整數(不含布林、64 位元範圍內):Rust API 為 `&[i64]`,非整數由型別排除
+//! (D-12 T3 補記),兩邊都回 `error type`;`text` 可用 `{"parts"}` 精簡形式(同 `validate_text`)。
 //!
 //! `project.validate_text`(T2):兩邊各自解析原文——Rust 以 [`project::validate::parse_project_json`]
 //! (= Python `_read_project_file` 讀到位元組之後的部分:5 MB 上限、UTF-8、JSON、須為物件),Python 端把位元組寫進
@@ -28,8 +46,9 @@
 //! `project.py_json` 的物件鍵:fixture 經 `serde_json` 解析後鍵已依碼位排序,送給 Python 的請求也是排序後的鍵,
 //! 兩邊收到同一個鍵順序(依建構順序寫出由 `crates/project/tests/pyjson.rs` 的 `Entries` 與結構測試鎖住)。
 
+use project::model::Segment;
 use project::pyjson::{self, Entries};
-use project::{Error, checks, constants, pystr, validate};
+use project::{Error, Project, checks, constants, post, pystr, text, validate};
 use serde_json::{Map, Value, json};
 
 use crate::Outcome;
@@ -316,6 +335,140 @@ pub fn project_validate_text(input: &Value) -> Outcome {
             Err(_) => type_error(),
         },
         Err(e) => error_result(&e),
+    }
+}
+
+// ---------- T3:純函式 ----------
+
+/// 片段類單元的輸入:`{"segment", "defaults"?}` → 交給 `validate` 的專案;缺 `segment` 回 `None`(→ `error type`)。
+fn segment_project(input: &Value, with_defaults: bool) -> Option<Value> {
+    let obj = input.as_object()?;
+    let segment = obj.get("segment")?;
+    let mut data = json!({"schema_version": 2, "name": "p", "segments": [segment]});
+    if with_defaults && let Some(d) = obj.get("defaults") {
+        data["defaults"] = d.clone();
+    }
+    Some(data)
+}
+
+/// 驗證後的專案(片段在 `segments[0]`);輸入格式不符回 `Err(type_error)`、驗證失敗回 `Err(錯誤結果)`。
+fn validated(input: &Value, with_defaults: bool) -> Result<Project, Outcome> {
+    let data = segment_project(input, with_defaults).ok_or_else(type_error)?;
+    validate::validate(&data).map_err(|e| error_result(&e))
+}
+
+fn on_segment(input: &Value, f: impl FnOnce(&Segment) -> Outcome) -> Outcome {
+    match validated(input, false) {
+        Ok(p) => p.segments.first().map_or_else(type_error, f),
+        Err(o) => o,
+    }
+}
+
+/// `project.split_segments`:`{"text": 字串或 {"parts"}, "forced"?: [整數…]}`。
+pub fn project_split_segments(input: &Value) -> Outcome {
+    let Some(obj) = input.as_object() else {
+        return type_error();
+    };
+    let text = match obj.get("text") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Object(o)) if o.len() == 1 && o.contains_key("parts") => {
+            match parts_text(&o["parts"]) {
+                Some(s) => s,
+                None => return type_error(),
+            }
+        }
+        _ => return type_error(),
+    };
+    let forced: Vec<i64> = match obj.get("forced") {
+        None => Vec::new(),
+        Some(Value::Array(list)) => match list.iter().map(Value::as_i64).collect() {
+            Some(v) => v,
+            None => return type_error(),
+        },
+        Some(_) => return type_error(),
+    };
+    match text::split_segments(&text, &forced) {
+        Ok(pieces) => Outcome::Ok(json!({ "value": pieces })),
+        Err(e) => error_result(&e),
+    }
+}
+
+/// `project.escape_text`:輸入為字串。
+pub fn project_escape_text(input: &Value) -> Outcome {
+    match input {
+        Value::String(s) => Outcome::Ok(json!({"value": text::escape_text(s)})),
+        _ => type_error(),
+    }
+}
+
+/// `project.tts_text`。
+pub fn project_tts_text(input: &Value) -> Outcome {
+    on_segment(input, |s| match text::tts_text(s) {
+        Ok(t) => Outcome::Ok(json!({ "value": t })),
+        Err(e) => error_result(&e),
+    })
+}
+
+/// `project.fused_out`(遞增排序的索引)。
+pub fn project_fused_out(input: &Value) -> Outcome {
+    on_segment(input, |s| Outcome::Ok(json!({"value": text::fused_out(s)})))
+}
+
+/// `project.model_units`。
+pub fn project_model_units(input: &Value) -> Outcome {
+    on_segment(input, |s| {
+        Outcome::Ok(json!({"value": text::model_units(s)}))
+    })
+}
+
+/// `project.shift_marks`:另需 `old`、`new` 字串。
+pub fn project_shift_marks(input: &Value) -> Outcome {
+    let (Some(Value::String(old)), Some(Value::String(new))) = (input.get("old"), input.get("new"))
+    else {
+        return type_error();
+    };
+    on_segment(input, |s| {
+        Outcome::Ok(json!({"value": text::shift_marks(s, old, new)}))
+    })
+}
+
+/// `project.post_params`。
+pub fn project_post_params(input: &Value) -> Outcome {
+    on_segment(input, |s| value_result(post::post_params(s).to_value()))
+}
+
+/// `project.post_key`。
+pub fn project_post_key(input: &Value) -> Outcome {
+    on_segment(input, |s| match post::post_key(s) {
+        Ok(k) => Outcome::Ok(json!({ "value": k })),
+        Err(e) => error_result(&e),
+    })
+}
+
+/// `project.is_post_fresh`。
+pub fn project_is_post_fresh(input: &Value) -> Outcome {
+    on_segment(input, |s| {
+        Outcome::Ok(json!({"value": post::is_post_fresh(s)}))
+    })
+}
+
+/// `project.is_default_post`。
+pub fn project_is_default_post(input: &Value) -> Outcome {
+    on_segment(input, |s| {
+        Outcome::Ok(json!({"value": post::is_default_post(s)}))
+    })
+}
+
+/// `project.effective`:`effective_speed` 與 `effective_pause`(專案的 `defaults` 可由輸入給定)。
+pub fn project_effective(input: &Value) -> Outcome {
+    match validated(input, true) {
+        Ok(p) => p.segments.first().map_or_else(type_error, |s| {
+            value_result(json!({
+                "speed": post::effective_speed(&p, s),
+                "pause": post::effective_pause(&p, s),
+            }))
+        }),
+        Err(o) => o,
     }
 }
 
