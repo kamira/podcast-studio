@@ -12,7 +12,7 @@ L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Pytho
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
 轉接器 import 的 `value_checks`、`names`、`safe_fs` 是 repo 根目錄的產品模組。
-`project.*` 6 個單元(CHG-20261128-01 T1):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+`project.*` 7 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`;`validate_text` 案例結束後轉接器的暫存目錄不存在):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
 (`crates/parity/tests/data/project_expected.json`);轉接器載入的 `project`、`breezy_worker` 是 repo 根目錄的
 產品模組(`project.py` 頂層 import `fcntl`,這些測試在 Windows 略過)。
 約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs, project}`(CHG-20261124-01 代決 13、

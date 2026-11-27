@@ -6,10 +6,11 @@
 //! - macOS / Linux:**Python 實際結果等於表**(表以 Python 為錨,由真轉接器產生,不能憑空寫);
 //! - 三平台:**Rust 實際結果等於表中該平台的預期**——`project.py` 頂層 import `fcntl`,Python 端在 Windows
 //!   無法執行(事實 H),Windows 的 Rust 行為因此經由表間接等於 macOS / Linux 上的 Python 行為;
-//! - 每個 fixture 案例都有預期;`windows` 欄只出現在「### 行為差異清單」列出的案例(T1 為 0 筆,以常數鎖住);
-//! - 每份 fixture 的案例數以常數寫明,且不低於 T1 L2 的下限;
+//! - 每個 fixture 案例都有預期;`windows` 欄只出現在「### 行為差異清單」列出的案例(T1、T2 為 0 筆,以常數鎖住);
+//! - 每份 fixture 的案例數以常數寫明,且不低於該 task L2 的下限;`project.validate_text`(T2)另固定接受 / 拒絕筆數;
 //! - L2(macOS / Linux):以真 `parity` 執行檔跑每份 `fixtures/project/*.json`,exit 0、最後一行「結論:一致」。
-//!   對應 `features/project_rust.feature`「數值四捨五入與錯誤訊息與 Python 相同」。
+//!   對應 `features/project_rust.feature`「數值四捨五入與錯誤訊息與 Python 相同」(T1)、
+//!   「專案檔驗證結果與錯誤訊息與 Python 相同」「Rust 寫出的位元組與 Python 相同」(T2,`validate_text.json`)。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use parity::py::{self, Adapter, DEFAULT_TIMEOUT_SECS};
 use parity::{Fixture, Outcome, Registry};
 use serde_json::Value;
 
-/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1 沒有。
+/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1、T2 沒有。
 const WINDOWS_CASES: &[(&str, &str, &str)] = &[];
 
 /// `windows` 欄的筆數(與 `WINDOWS_CASES` 相同;改動差異清單時兩者一起改)。
