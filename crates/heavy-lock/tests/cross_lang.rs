@@ -48,6 +48,8 @@ const PY_LOCK_PATH: &str = "py_lock_path";
 /// 其餘(程式內以數字寫死):2 用法或匯入來源不符、10 不該取得卻取得、12 等不到訊號、13 取得時 `releasing`
 /// 不存在或 `on_wait` 不是一次、20 `acquire_2s` 逾時;未攔下的例外為 1。
 const PY_OK: i32 = 0;
+/// 只有 Linux 限定的 (vii) 使用;macOS 上不編譯,避免 clippy `dead_code`(合併 PR #189 CI macOS 格)。
+#[cfg(target_os = "linux")]
 const PY_LOCKF_MISMATCH: i32 = 14;
 
 /// Python 子行程程式。參數一律經 `sys.argv` 傳入,不內插進程式字串。
