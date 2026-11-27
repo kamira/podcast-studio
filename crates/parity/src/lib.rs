@@ -131,7 +131,7 @@ impl Registry {
     /// `safe_fs.entries`、`safe_fs.unlink`、`safe_fs.rmtree`、`safe_fs.rename`、`safe_fs.replace`、`safe_fs.link`
     /// (T2;見 [`units_safe_fs`]);
     /// `project.constants`、`project.normalize_speed`、`project.normalize_pause`、`project.check_zhuyin`、
-    /// `project.check_pitch_points`、`project.py_json`(CHG-20261128-01 T1;見 [`units_project`]);
+    /// `project.check_pitch_points`、`project.py_json`(CHG-20261128-01 T1)與 `project.validate_text`(T2;見 [`units_project`]);
     /// 環境變數 `PARITY_TEST_SLEEP=1` 時另登錄測試專用的 `demo.sleep`。
     /// 路線圖第 2 筆起,各模組的 Rust 單元在此登錄。
     pub fn builtin() -> Self {
@@ -175,6 +175,10 @@ impl Registry {
             units_project::project_check_pitch_points,
         );
         r.register("project.py_json", units_project::project_py_json);
+        r.register(
+            "project.validate_text",
+            units_project::project_validate_text,
+        );
         if std::env::var_os("PARITY_TEST_SLEEP").is_some_and(|v| v == "1") {
             r.register("demo.sleep", demo::sleep);
         }

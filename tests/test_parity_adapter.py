@@ -12,7 +12,7 @@ L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Pytho
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
 轉接器 import 的 `value_checks`、`names`、`safe_fs` 是 repo 根目錄的產品模組。
-`project.*` 6 個單元(CHG-20261128-01 T1):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+`project.*` 7 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`;`validate_text` 案例結束後轉接器的暫存目錄不存在):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
 (`crates/parity/tests/data/project_expected.json`);轉接器載入的 `project`、`breezy_worker` 是 repo 根目錄的
 產品模組(`project.py` 頂層 import `fcntl`,這些測試在 Windows 略過)。
 約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs, project}`(CHG-20261124-01 代決 13、
@@ -460,7 +460,7 @@ def test_safe_fs_案例結束後工作目錄不存在():
 PROJECT_FIXTURES = ROOT / "crates" / "parity" / "fixtures" / "project"
 PROJECT_EXPECTED = ROOT / "crates" / "parity" / "tests" / "data" / "project_expected.json"
 PROJECT_UNITS = ["constants", "normalize_speed", "normalize_pause", "check_zhuyin", "check_pitch_points",
-                 "py_json"]
+                 "py_json", "validate_text"]
 needs_posix_project = pytest.mark.skipif(
     sys.platform == "win32", reason="project.py 頂層 import fcntl,在 Windows 無法載入(CHG-20261128-01 事實 H)")
 
@@ -498,6 +498,63 @@ def test_project_單元的錯誤訊息逐字放在_ok_的值內():
     got = [strip(r) for r in responses_split_on_newline(run_adapter("project.normalize_pause", reqs))]
     assert got == [ok({"class": "project_error", "errors": ["停頓必須是數字"]}),
                    ok({"value": -0.0, "repr": "-0.0"}), error("type")]
+
+
+def _project_work_dirs():
+    return {p.name for p in Path(tempfile.gettempdir()).glob("parity-project-*")}
+
+
+@needs_posix_project
+def test_project_validate_text_輸入格式與暫存目錄():
+    """T2:輸入為 JSON 原文字串或 `{"hex"}`,其他格式為 error type;案例結束後轉接器的暫存目錄不存在。"""
+    before = _project_work_dirs()
+    reqs = [{"id": "s", "input": "[]"}, {"id": "h", "input": {"hex": "ff"}},
+            {"id": "n", "input": 1}, {"id": "x", "input": {"hex": "zz"}},
+            {"id": "ok", "input": '{"schema_version": 1, "name": "v1"}'}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.validate_text", reqs))]
+    assert got[:4] == [ok({"class": "project_error", "errors": ["專案檔必須是 JSON 物件"]}),
+                       ok({"class": "project_error", "errors": ["專案檔內容損壞,無法讀取"]}),
+                       error("type"), error("type")]
+    assert got[4]["outcome"] == "ok"
+    assert got[4]["value"]["dump"].startswith('{\n "schema_version": 2,\n "name": "v1",')
+    assert _project_work_dirs() <= before
+
+
+def _parts_expand(parts):
+    return "".join(p if isinstance(p, str) else p["repeat"] * p["count"] for p in parts)
+
+
+@needs_posix_project
+def test_project_validate_text_的_parts_輸入():
+    """DIR-6 第 1 輪 F-1:`{"parts"}` 依序串接後以 UTF-8 編碼;不合格一律 error type。"""
+    head, tail = '{"schema_version": 2, "name": "x", "script": "', '"}'
+    good = [{"id": "p", "input": {"parts": [head, {"repeat": "字", "count": 3}, "", tail]}},
+            {"id": "s", "input": head + "字字字" + tail}]
+    bad = [[], "x", [1], [None], [{"repeat": "a"}], [{"repeat": "a", "count": 1, "x": 1}],
+           [{"repeat": "", "count": 1}], [{"repeat": 1, "count": 1}], [{"repeat": "a", "count": 0}],
+           [{"repeat": "a", "count": -1}], [{"repeat": "a", "count": 1.0}], [{"repeat": "a", "count": True}],
+           [{"repeat": "a", "count": 5242882}]]
+    reqs = good + [{"id": f"b{i}", "input": {"parts": b}} for i, b in enumerate(bad)]
+    reqs.append({"id": "both", "input": {"parts": [head, tail], "hex": ""}})
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.validate_text", reqs))]
+    assert got[0] == got[1] and got[0]["outcome"] == "ok" and isinstance(got[0]["value"]["dump"], str)
+    assert got[2:] == [error("type")] * (len(bad) + 1)
+
+
+@needs_posix_project
+def test_project_validate_text_的_dump_精簡門檻與可逆性():
+    """dump 的同一字元連續 999 個照舊為字串、1000 個改為 `{"parts"}`;展開即得原 dump。"""
+    head, tail = '{"schema_version": 2, "name": "x", "script": "', '"}'
+    reqs = [{"id": str(n), "input": {"parts": [head, {"repeat": "a", "count": n}, tail]}} for n in (999, 1000, 50000)]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.validate_text", reqs))]
+    assert isinstance(got[0]["value"]["dump"], str)
+    for n, r in zip((1000, 50000), got[1:]):
+        parts = r["value"]["dump"]["parts"]
+        assert {"repeat": "a", "count": n} in parts
+        assert all(isinstance(p, str) or (len(p["repeat"]) == 1 and p["count"] >= 1000) for p in parts)
+        assert not any(isinstance(a, str) and isinstance(b, str) for a, b in zip(parts, parts[1:])), "相鄰字串段須合併"
+        assert f'"script": "{"a" * n}",' in _parts_expand(parts)
+    assert _parts_expand(got[1]["value"]["dump"]["parts"]).replace("a" * 1000, "a" * 999) == got[0]["value"]["dump"]
 
 
 @needs_posix_project

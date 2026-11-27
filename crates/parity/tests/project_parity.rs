@@ -6,10 +6,11 @@
 //! - macOS / Linux:**Python 實際結果等於表**(表以 Python 為錨,由真轉接器產生,不能憑空寫);
 //! - 三平台:**Rust 實際結果等於表中該平台的預期**——`project.py` 頂層 import `fcntl`,Python 端在 Windows
 //!   無法執行(事實 H),Windows 的 Rust 行為因此經由表間接等於 macOS / Linux 上的 Python 行為;
-//! - 每個 fixture 案例都有預期;`windows` 欄只出現在「### 行為差異清單」列出的案例(T1 為 0 筆,以常數鎖住);
-//! - 每份 fixture 的案例數以常數寫明,且不低於 T1 L2 的下限;
+//! - 每個 fixture 案例都有預期;`windows` 欄只出現在「### 行為差異清單」列出的案例(T1、T2 為 0 筆,以常數鎖住);
+//! - 每份 fixture 的案例數以常數寫明,且不低於該 task L2 的下限;`project.validate_text`(T2)另固定接受 / 拒絕筆數;
 //! - L2(macOS / Linux):以真 `parity` 執行檔跑每份 `fixtures/project/*.json`,exit 0、最後一行「結論:一致」。
-//!   對應 `features/project_rust.feature`「數值四捨五入與錯誤訊息與 Python 相同」。
+//!   對應 `features/project_rust.feature`「數值四捨五入與錯誤訊息與 Python 相同」(T1)、
+//!   「專案檔驗證結果與錯誤訊息與 Python 相同」「Rust 寫出的位元組與 Python 相同」(T2,`validate_text.json`)。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -20,13 +21,13 @@ use parity::py::{self, Adapter, DEFAULT_TIMEOUT_SECS};
 use parity::{Fixture, Outcome, Registry};
 use serde_json::Value;
 
-/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1 沒有。
+/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1、T2 沒有。
 const WINDOWS_CASES: &[(&str, &str, &str)] = &[];
 
 /// `windows` 欄的筆數(與 `WINDOWS_CASES` 相同;改動差異清單時兩者一起改)。
 const WINDOWS_ENTRY_COUNT: usize = 0;
 
-/// 每份 fixture 的(單元、檔名、案例數、T1 L2 下限)。
+/// 每份 fixture 的(單元、檔名、案例數、該 task L2 的下限)。
 const FIXTURES: &[(&str, &str, usize, usize)] = &[
     ("project.constants", "constants.json", 1, 1),
     ("project.normalize_speed", "normalize_speed.json", 41, 30),
@@ -39,7 +40,12 @@ const FIXTURES: &[(&str, &str, usize, usize)] = &[
         20,
     ),
     ("project.py_json", "py_json.json", 47, 40),
+    ("project.validate_text", "validate_text.json", 265, 150),
 ];
+
+/// `project.validate_text`(T2)的接受 / 拒絕筆數(以預期結果表計)。
+const VALIDATE_TEXT_ACCEPTED: usize = 61;
+const VALIDATE_TEXT_REJECTED: usize = 204;
 
 fn platform() -> &'static str {
     if cfg!(target_os = "linux") {
@@ -161,6 +167,95 @@ fn fixture_case_counts_are_fixed_and_meet_the_minimum() {
     }
     let total: usize = FIXTURES.iter().map(|(_, _, n, _)| n).sum();
     println!("fixtures/project:{} 份、{total} 個案例", FIXTURES.len());
+}
+
+/// `project.validate_text` 的預期:接受時只有 `dump`(案例 id 以 `ok_` 開頭),拒絕時為 `{"class", "errors"}`;
+/// 接受 / 拒絕筆數固定。
+#[test]
+fn validate_text_expectations_split_into_accept_and_reject() {
+    let table = table();
+    let unit = &table["project.validate_text"];
+    let (mut accepted, mut rejected) = (0, 0);
+    for (id, entry) in unit {
+        let all = &entry["all"];
+        assert_eq!(all["outcome"], "ok", "{id}");
+        let obj = all["value"].as_object().expect("物件");
+        if obj.contains_key("dump") {
+            assert_eq!(obj.len(), 1, "{id}");
+            // dump 為字串,或精簡形式 {"parts"}(可展開)
+            let dump = &obj["dump"];
+            assert!(
+                dump.is_string() || parity::units_project::parts_text(&dump["parts"]).is_some(),
+                "{id}"
+            );
+            assert!(id.starts_with("ok_"), "接受案例 id 以 ok_ 開頭:{id}");
+            accepted += 1;
+        } else {
+            assert_eq!(obj["class"], "project_error", "{id}");
+            assert!(!id.starts_with("ok_"), "{id}");
+            rejected += 1;
+        }
+    }
+    assert_eq!(
+        (accepted, rejected),
+        (VALIDATE_TEXT_ACCEPTED, VALIDATE_TEXT_REJECTED)
+    );
+    println!("project.validate_text:接受 {accepted} 筆、拒絕 {rejected} 筆");
+}
+
+/// 審議轉送的上限(DIR-6 第 1 輪 F-1):每行最多字元數、同一字元最多連續數。
+const MAX_LINE_CHARS: usize = 12000;
+const MAX_RUN: usize = 999;
+
+/// 守門:`fixtures/project/*.json` 與預期結果表每行 ≤ 12000 字元、同一字元連續 ≤ 999 個——超長的重複內容
+/// 一律改用 `validate_text` 的 `{"parts"}` 精簡形式(輸入)與 `{"dump": {"parts"}}`(結果)。
+#[test]
+fn fixture_and_table_lines_stay_short() {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(fixture_dir())
+        .expect("讀取 fixtures/project")
+        .map(|e| e.expect("目錄項").path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.push(
+        manifest()
+            .join("tests")
+            .join("data")
+            .join("project_expected.json"),
+    );
+    files.sort();
+    for path in &files {
+        let text = std::fs::read_to_string(path).expect("讀取");
+        let (mut longest, mut run_max) = (0, 0);
+        for (n, line) in text.split('\n').enumerate() {
+            let chars: Vec<char> = line.chars().collect();
+            longest = longest.max(chars.len());
+            let mut run = 0;
+            for (i, c) in chars.iter().enumerate() {
+                run = if i > 0 && chars[i - 1] == *c {
+                    run + 1
+                } else {
+                    1
+                };
+                run_max = run_max.max(run);
+            }
+            assert!(
+                chars.len() <= MAX_LINE_CHARS,
+                "{} 第 {} 行 {} 字元",
+                path.display(),
+                n + 1,
+                chars.len()
+            );
+        }
+        assert!(
+            run_max <= MAX_RUN,
+            "{} 有 {run_max} 個連續相同字元",
+            path.display()
+        );
+        println!(
+            "{}:最長行 {longest} 字元、最長連續同字元 {run_max} 個",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
 }
 
 #[test]

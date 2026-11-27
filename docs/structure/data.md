@@ -69,9 +69,9 @@
 - 〔觀察〕`workflows/default.json` 入 git;其他檔案(使用者另存的工作流程與存檔暫存檔 `.wf-*.tmp`)由 `.gitignore` 的 `workflows/*`、`!workflows/default.json` 忽略(CHG-20261026-01 T3),存檔後 `git status --porcelain --untracked-files=all` 仍無輸出,`scripts/deploy_local.sh` 不因此中止。
 - 〔觀察〕從畫布覆寫 `default`(`overwrite: true`)會改到入 git 的 `workflows/default.json`:工作樹變髒(`deploy_local.sh` 中止);以 `git checkout -- workflows/default.json` 復原(CHG-20261026-01 代決 7,程式不擋)。CHG-20261022-04 起畫布存檔保留 `steps`(見上),覆寫後精靈步驟跟著畫布變更,不再遺失。
 
-### 專案資料(`projects/<名稱>/project.json`,`schema_version: 1`)〔觀察〕`project.py`(CHG-20261022-04 T2)
+### 專案資料(`projects/<名稱>/project.json`,`schema_version: 2`)〔觀察〕`project.py`(CHG-20261022-04 T2、CHG-20261029-01)
 
-JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,不猜測轉換。上限:文稿 50000 字、片段 2000 個、單句 500 字、`project.json` 5 MB、素材 200 個且合計 2 GB、音訊總長(變速後)60 分鐘。
+JSON 物件,未知鍵一律拒絕;`schema_version` 為 2,舊版 1 載入時在記憶體升級(補 v2 欄位的預設值,存檔才寫成 2;v1 檔不得含 v2 欄位),其他版本一律拒絕載入,不猜測轉換(CHG-20261029-01,見本檔「CHG-20261029-01」節;原標題的 `schema_version: 1` 由 CHG-20261128-01 T2 更正)。上限:文稿 50000 字、片段 2000 個、單句 500 字、`project.json` 5 MB、素材 200 個且合計 2 GB、音訊總長(變速後)60 分鐘。
 
 | 實體 | 欄位 | 約束 / 說明 |
 |------|------|-------------|
@@ -85,6 +85,7 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 不是 1 一律拒絕載入,�
 - 〔觀察〕寫入:每次存檔前把舊檔移入 `history/`,以暫存檔 + `os.replace` 原子寫入,載入到存檔全程持專案鎖(`project.update()`);還原版本也是一次存檔。合成結果在整批結束時一次寫回,一次合成最多新增一個 history 版本;合成中途已完成的句子只在伺服器記憶體中疊到專案檢視上,不存檔(DIR-5 修正 M-1)。
 - 〔觀察〕符號連結:`projects/`、`.trash/`、專案目錄、`tmp/`、`history/` 本身是符號連結時一律拒絕處理並記警告;`.trash/`、`tmp/` 內的符號連結不跟隨。
 - 〔觀察〕合成快取鍵 = SHA-256(JSON 陣列 [含標註的合成文字, 聲線檔 SHA-256, 聲線逐字稿 SHA-256, 模型名]);文字、標註、聲線檔、逐字稿或模型任一改變即不命中(修訂 3 R3-4)。
+- 〔觀察〕Rust 版(`crates/project`,CHG-20261128-01;目前沒有產品呼叫端):以相同規則讀取與驗證(錯誤訊息清單逐字相同、累積順序相同),接受的專案檔以與 Python `_dump`(`json.dumps(ensure_ascii=False, indent=1)` + 換行)相同的位元組寫出,5 MB 上限以同一份寫出位元組計(T2;寫入與 `history/` 見 T6)。已知差異只出現在手動編輯的檔案(CHG-20261128-01「### 行為差異清單」):D-1 原文 `-0` 在 Rust 是 `-0.0`(整數欄位拒絕、數值欄位寫出 `-0.0`);D-2 超出 64 位元的整數在 Rust 是浮點(整數欄位拒絕、`audio.seconds` / `post.seconds` / `post.trim` 寫成浮點表示);D-3 `NaN`、`Infinity`、超出範圍的浮點與 D-4 巢狀超過 128 層在 Rust 解析失敗(「專案檔內容損壞」,Python 由欄位檢查拒絕);D-5 Python 會當機的輸入(超過 1.8e308 的整數、不成對代理、四捨五入後超過 28 位數)Rust 明確拒絕;D-6 `audio`、`post`、素材的鍵以 Python 程式產生時的順序寫出(內容相同),`defaults` 多個欄位不合法時訊息依鍵的碼位順序;D-15 `schema_version` 為含 Unicode 未指派碼位的字串時,訊息中的 `repr` 顯示不同。
 
 ### 產出檔(`outputs/`,不入 git)〔觀察〕
 

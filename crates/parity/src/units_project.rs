@@ -14,12 +14,22 @@
 //! | `project.check_zhuyin` | 任意 JSON | `{"value": 字串}` |
 //! | `project.check_pitch_points` | `{"points", "where"}` | `{"value": [[位置, 半音], …], "repr"}` |
 //! | `project.py_json` | 任意 JSON 值 | `{"dump": _dump 字串, "sorted": 緊湊排序字串}` |
+//! | `project.validate_text` | JSON 原文字串(以 UTF-8 編碼)、`{"hex": 位元組的十六進位}` 或 `{"parts": [片段…]}` | `{"dump": _dump(validate(…)) 字串或 {"parts"}}` |
+//!
+//! `project.validate_text`(T2):兩邊各自解析原文——Rust 以 [`project::validate::parse_project_json`]
+//! (= Python `_read_project_file` 讀到位元組之後的部分:5 MB 上限、UTF-8、JSON、須為物件),Python 端把位元組寫進
+//! 自己建立的暫存目錄後呼叫真的 `_read_project_file`——所以 JSON 層的差異也測得到;接著 `validate` 與 `_dump`。
+//!
+//! 精簡形式(DIR-6 第 1 輪 F-1):超長的重複內容不直接寫進 fixture 與預期結果表。輸入 `{"parts": [片段…]}` 的片段為
+//! 字串或 `{"repeat": 非空字串, "count": 1~5242881}`,依序串接後以 UTF-8 編碼([`parts_text`]);接受時的 dump 有同一
+//! 字元連續 1000 個以上時改回 `{"dump": {"parts": […]}}`([`compact_dump`],以 [`parts_text`] 展開即得原字串)。
+//! 轉接器的 `_project_parts_text`、`_project_compact_dump` 是同一規則。
 //!
 //! `project.py_json` 的物件鍵:fixture 經 `serde_json` 解析後鍵已依碼位排序,送給 Python 的請求也是排序後的鍵,
 //! 兩邊收到同一個鍵順序(依建構順序寫出由 `crates/project/tests/pyjson.rs` 的 `Entries` 與結構測試鎖住)。
 
 use project::pyjson::{self, Entries};
-use project::{Error, checks, constants, pystr};
+use project::{Error, checks, constants, pystr, validate};
 use serde_json::{Map, Value, json};
 
 use crate::Outcome;
@@ -217,6 +227,98 @@ pub fn project_py_json(input: &Value) -> Outcome {
     Outcome::Ok(json!({"dump": pyjson::dump(input), "sorted": pyjson::dumps_sorted(input)}))
 }
 
+/// `{"repeat", "count"}` 的 `count` 上限(5 MB + 1)。
+pub const REPEAT_MAX: u64 = 5_242_881;
+/// dump 中同一字元連續達此長度才改用 `parts`。
+pub const RUN_MIN: usize = 1000;
+
+/// `{"parts": [片段…]}` 的片段陣列展開成字串;空陣列、未知鍵、布林、0、超過上限等回 `None`(→ `error type`)。
+pub fn parts_text(parts: &Value) -> Option<String> {
+    let list = parts.as_array().filter(|l| !l.is_empty())?;
+    let mut out = String::new();
+    for part in list {
+        match part {
+            Value::String(s) => out.push_str(s),
+            Value::Object(obj) if obj.len() == 2 => {
+                let rep = obj.get("repeat")?.as_str().filter(|r| !r.is_empty())?;
+                let count = obj.get("count")?;
+                let n = count
+                    .as_u64()
+                    .filter(|n| count.is_u64() && (1..=REPEAT_MAX).contains(n))?;
+                out.push_str(&rep.repeat(usize::try_from(n).ok()?));
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// 接受時的 dump:沒有同一字元連續 [`RUN_MIN`] 個以上時為字串;否則為 `{"parts": […]}`——每一段最長的同字元連續
+/// (≥ [`RUN_MIN`])寫成 `{"repeat": 字元, "count": 長度}`,其餘相鄰字元合併為字串段。[`parts_text`] 展開即得原字串。
+pub fn compact_dump(text: &str) -> Value {
+    let chars: Vec<char> = text.chars().collect();
+    let mut parts: Vec<Value> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let mut j = i;
+        while j < chars.len() && chars[j] == chars[i] {
+            j += 1;
+        }
+        if j - i >= RUN_MIN {
+            if !buf.is_empty() {
+                parts.push(Value::String(std::mem::take(&mut buf)));
+            }
+            parts.push(json!({"repeat": chars[i].to_string(), "count": j - i}));
+        } else {
+            buf.extend(&chars[i..j]);
+        }
+        i = j;
+    }
+    if !parts.iter().any(Value::is_object) {
+        return Value::String(text.to_string());
+    }
+    if !buf.is_empty() {
+        parts.push(Value::String(buf));
+    }
+    json!({ "parts": parts })
+}
+
+/// `project.validate_text` 的輸入位元組;格式不符回 `None`(→ `error type`)。
+fn text_bytes(input: &Value) -> Option<Vec<u8>> {
+    match input {
+        Value::String(s) => Some(s.as_bytes().to_vec()),
+        Value::Object(obj) if obj.len() == 1 && obj.contains_key("parts") => {
+            parts_text(&obj["parts"]).map(String::into_bytes)
+        }
+        Value::Object(obj) if obj.len() == 1 => {
+            let hex = obj.get("hex")?.as_str()?;
+            if hex.len() % 2 != 0 || !hex.is_ascii() {
+                return None;
+            }
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+                .collect()
+        }
+        _ => None,
+    }
+}
+
+/// `project.validate_text`。
+pub fn project_validate_text(input: &Value) -> Outcome {
+    let Some(raw) = text_bytes(input) else {
+        return type_error();
+    };
+    match validate::parse_project_json(&raw).and_then(|data| validate::dump_validated(&data)) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(dump) => Outcome::Ok(json!({ "dump": compact_dump(&dump) })),
+            Err(_) => type_error(),
+        },
+        Err(e) => error_result(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! L1:輸入格式與結果轉換。
@@ -244,6 +346,111 @@ mod tests {
             json!({"where": "w"}),
         ] {
             assert_eq!(project_check_pitch_points(&input), type_error(), "{input}");
+        }
+    }
+
+    #[test]
+    fn validate_text_input_forms() {
+        for input in [
+            json!(1),
+            json!(null),
+            json!({"hex": "0"}),
+            json!({"hex": "zz"}),
+            json!({"hex": "00", "x": 1}),
+            json!({"text": "{}"}),
+        ] {
+            assert_eq!(project_validate_text(&input), type_error(), "{input}");
+        }
+        assert_eq!(
+            project_validate_text(&json!("[]")),
+            Outcome::Ok(json!({"class": "project_error", "errors": ["專案檔必須是 JSON 物件"]}))
+        );
+        assert_eq!(
+            project_validate_text(&json!({"hex": "ff"})),
+            Outcome::Ok(json!({"class": "project_error", "errors": ["專案檔內容損壞,無法讀取"]}))
+        );
+    }
+
+    #[test]
+    fn parts_input_valid_and_invalid() {
+        assert_eq!(
+            parts_text(&json!(["ab", {"repeat": "字x", "count": 2}, ""])),
+            Some("ab字x字x".to_string())
+        );
+        assert_eq!(
+            parts_text(&json!([{"repeat": "a", "count": REPEAT_MAX}])).map(|s| s.len()),
+            Some(5_242_881)
+        );
+        for bad in [
+            json!([]),
+            json!("x"),
+            json!([1]),
+            json!([null]),
+            json!([{"repeat": "a"}]),
+            json!([{"repeat": "a", "count": 1, "x": 1}]),
+            json!([{"repeat": "", "count": 1}]),
+            json!([{"repeat": 1, "count": 1}]),
+            json!([{"repeat": "a", "count": 0}]),
+            json!([{"repeat": "a", "count": -1}]),
+            json!([{"repeat": "a", "count": 1.0}]),
+            json!([{"repeat": "a", "count": true}]),
+            json!([{"repeat": "a", "count": REPEAT_MAX + 1}]),
+        ] {
+            assert_eq!(parts_text(&bad), None, "{bad}");
+            assert_eq!(project_validate_text(&json!({"parts": bad})), type_error());
+        }
+        assert_eq!(
+            project_validate_text(&json!({"parts": [], "hex": ""})),
+            type_error()
+        );
+        // parts 與等價的字串輸入結果相同
+        let text = format!(
+            r#"{{"schema_version": 1, "name": "v1", "script": "{}"}}"#,
+            "b".repeat(20)
+        );
+        assert_eq!(
+            project_validate_text(
+                &json!({"parts": [r#"{"schema_version": 1, "name": "v1", "script": ""#, {"repeat": "b", "count": 20}, r#""}"#]})
+            ),
+            project_validate_text(&json!(text))
+        );
+    }
+
+    #[test]
+    fn compact_dump_threshold_and_reversibility() {
+        let under = format!("x{}y", "a".repeat(RUN_MIN - 1));
+        assert_eq!(compact_dump(&under), json!(under));
+        let at = format!("x{}y\n", "a".repeat(RUN_MIN));
+        let c = compact_dump(&at);
+        assert_eq!(
+            c,
+            json!({"parts": ["x", {"repeat": "a", "count": RUN_MIN}, "y\n"]})
+        );
+        assert_eq!(parts_text(&c["parts"]), Some(at));
+        // 多段、非 ASCII、開頭與結尾就是連續段
+        let multi = format!(
+            "{}中{}{}",
+            "字".repeat(1500),
+            " ".repeat(999),
+            "z".repeat(RUN_MIN + 7)
+        );
+        let c = compact_dump(&multi);
+        assert_eq!(c["parts"].as_array().map(Vec::len), Some(3));
+        assert_eq!(parts_text(&c["parts"]), Some(multi.clone()));
+        assert_eq!(compact_dump(&multi), c, "確定性");
+        assert_eq!(compact_dump(""), json!(""));
+        // 實際的 validate_text:script 999 個字元照舊為字串、1000 個改為 parts
+        for (n, compact) in [(RUN_MIN - 1, false), (RUN_MIN, true)] {
+            let input = json!({"parts": [r#"{"schema_version": 2, "name": "x", "script": ""#, {"repeat": "a", "count": n}, r#""}"#]});
+            let Outcome::Ok(v) = project_validate_text(&input) else {
+                panic!("預期 ok");
+            };
+            assert_eq!(v["dump"].is_object(), compact, "{n}");
+            let full = match &v["dump"] {
+                Value::String(s) => s.clone(),
+                other => parts_text(&other["parts"]).expect("可展開"),
+            };
+            assert!(full.contains(&format!("\"script\": \"{}\",", "a".repeat(n))));
         }
     }
 

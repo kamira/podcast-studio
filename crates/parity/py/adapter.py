@@ -33,7 +33,10 @@ CHG-20261125-01 代決 11;
 所以**不在檔頂 import**,只在 `project_*` / `_project_*` 函式內延後 `import project`(事實 H;
 `tests/test_parity_adapter.py` 以 AST 斷言);Windows 上這些單元回報 import 失敗的錯誤類別,
 其他單元不受影響。T1 六個單元:`project.constants`、`project.normalize_speed`、`project.normalize_pause`、
-`project.check_zhuyin`、`project.check_pitch_points`、`project.py_json`;結果一律以 `ok` 回傳——
+`project.check_zhuyin`、`project.check_pitch_points`、`project.py_json`;T2 加 `project.validate_text`(輸入 JSON 原文,
+在自己以 `tempfile.mkdtemp` 建立的暫存目錄寫一個檔案,以 `_read_project_file` 讀回後 `validate`,接受時回
+`{"dump": _dump 字串}`,案例結束即刪除;輸入另可寫成 `{"hex"}` 或精簡形式 `{"parts"}`,dump 有同一字元連續
+1000 個以上時改回 `{"dump": {"parts": […]}}`,見 `_project_compact_dump`);結果一律以 `ok` 回傳——
 接受時 `{"value", "repr"?}`(`repr` 為 `json.dumps(值, ensure_ascii=False, sort_keys=True)`,
 連 `-0.0` 與整數 / 浮點的寫法一起比對),拒絕時 `{"class", "errors"}`(錯誤類別與逐字的錯誤訊息清單)。
 """
@@ -681,6 +684,92 @@ def project_py_json(value):
     return {"dump": pj._dump(value).decode("utf-8"), "sorted": _sorted_json(value)}
 
 
+# 精簡形式(CHG-20261128-01 T2 DIR-6 第 1 輪 F-1):超長的重複內容不直接寫進 fixture 與預期結果表。
+PROJECT_REPEAT_MAX = 5242881      # `{"repeat", "count"}` 的 count 上限(= 5 MB + 1)
+PROJECT_RUN_MIN = 1000            # dump 中同一字元連續達此長度才改用 parts
+
+
+def _project_parts_text(parts):
+    """`{"parts": [片段…]}` 展開成字串:片段為字串,或 `{"repeat": 非空字串, "count": 1~PROJECT_REPEAT_MAX 的整數}`;
+    空陣列、未知鍵、布林、0、超過上限等一律 error type(與 Rust `units_project::parts_text` 同一規則)。"""
+    if not isinstance(parts, list) or not parts:
+        raise _type_error()
+    out = []
+    for part in parts:
+        if isinstance(part, str):
+            out.append(part)
+            continue
+        if not isinstance(part, dict) or set(part) != {"repeat", "count"}:
+            raise _type_error()
+        rep, count = part["repeat"], part["count"]
+        if (not isinstance(rep, str) or rep == "" or not isinstance(count, int) or isinstance(count, bool)
+                or not 1 <= count <= PROJECT_REPEAT_MAX):
+            raise _type_error()
+        out.append(rep * count)
+    return "".join(out)
+
+
+def _project_compact_dump(text):
+    """接受時的 dump:沒有同一字元連續 PROJECT_RUN_MIN 個以上時原樣回字串;否則回 `{"parts": […]}`——
+    每一段最長的同字元連續(≥ PROJECT_RUN_MIN)寫成 `{"repeat": 字元, "count": 長度}`,其餘相鄰字元合併為字串段。
+    以 `_project_parts_text` 展開即得原字串(與 Rust `units_project::compact_dump` 同一規則)。"""
+    parts, buf, i, n = [], [], 0, len(text)
+    while i < n:
+        j = i
+        while j < n and text[j] == text[i]:
+            j += 1
+        if j - i >= PROJECT_RUN_MIN:
+            if buf:
+                parts.append("".join(buf))
+                buf = []
+            parts.append({"repeat": text[i], "count": j - i})
+        else:
+            buf.append(text[i:j])
+        i = j
+    if not any(isinstance(p, dict) for p in parts):
+        return text
+    if buf:
+        parts.append("".join(buf))
+    return {"parts": parts}
+
+
+def _project_text_bytes(value):
+    """`project.validate_text` 的輸入:JSON 原文字串(以 UTF-8 編碼)、`{"hex": 位元組的十六進位}`,
+    或 `{"parts": [片段…]}`(展開後以 UTF-8 編碼,見 `_project_parts_text`)。"""
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, dict) and set(value) == {"hex"} and isinstance(value["hex"], str):
+        try:
+            return bytes.fromhex(value["hex"])
+        except ValueError:
+            raise _type_error() from None
+    if isinstance(value, dict) and set(value) == {"parts"}:
+        return _project_parts_text(value["parts"]).encode("utf-8")
+    raise _type_error()
+
+
+def project_validate_text(value):
+    """project.validate_text(T2):把原文位元組寫進自己以 `tempfile.mkdtemp` 建立的暫存目錄,以
+    `project._read_project_file`(讀檔、5 MB 上限、UTF-8、`json.loads`、須為物件)讀回,再 `validate` 與 `_dump`;
+    接受 → `{"dump": _dump 字串}`,拒絕 → `{"class", "errors"}`。案例結束即刪除暫存目錄。"""
+    import project as pj
+    raw = _project_text_bytes(value)
+    work = tempfile.mkdtemp(prefix="parity-project-")
+    try:
+        with open(os.path.join(work, pj.PROJECT_FILE), "wb") as f:
+            f.write(raw)
+        dirfd = os.open(work, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            data = pj._read_project_file(dirfd, pj.PROJECT_FILE)
+            return {"dump": _project_compact_dump(pj._dump(pj.validate(data)).decode("utf-8"))}
+        except pj.ProjectError as e:
+            return _project_error_result(e, pj)
+        finally:
+            os.close(dirfd)
+    finally:
+        shutil.rmtree(work)
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -712,6 +801,7 @@ def build_units(environ=None):
         "project.check_zhuyin": project_check_zhuyin,
         "project.check_pitch_points": project_check_pitch_points,
         "project.py_json": project_py_json,
+        "project.validate_text": project_validate_text,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep
