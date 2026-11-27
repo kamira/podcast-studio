@@ -1,0 +1,6 @@
+{
+  "unit": "project.constants",
+  "cases": [
+    {"id": "null_input", "input": null}
+  ]
+}

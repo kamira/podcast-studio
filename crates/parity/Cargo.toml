@@ -8,7 +8,8 @@ description = "Rust 遷移的並行比對工具:同一組 fixture 交給 Python 
 publish = false
 
 # 外部相依只限 serde(derive)與 serde_json(CHG-20261123-01 代決 4);
-# 另以 path 相依 workspace 內的 studio-core(CHG-20261124-01 代決 4)與 safe-fs(CHG-20261125-01 代決 3),供比對單元呼叫;
+# 另以 path 相依 workspace 內的 studio-core(CHG-20261124-01 代決 4)、safe-fs(CHG-20261125-01 代決 3)與 project
+# (CHG-20261128-01 代決 10),供比對單元呼叫;
 # 命令列以標準函式庫解析,測試只用內建 #[test]。
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
@@ -17,6 +18,8 @@ serde_json = "1.0.154"
 studio-core = { path = "../studio-core", version = "=0.0.0" }
 # 比對單元 safe_fs.* 呼叫 safe-fs(CHG-20261125-01 代決 3);同樣帶 version(H-5)
 safe-fs = { path = "../safe-fs", version = "=0.0.0" }
+# 比對單元 project.* 呼叫 project(CHG-20261128-01 代決 10);同樣帶 version
+project = { path = "../project", version = "=0.0.0" }
 
 [[bin]]
 name = "parity"

@@ -12,8 +12,12 @@ L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Pytho
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
 轉接器 import 的 `value_checks`、`names`、`safe_fs` 是 repo 根目錄的產品模組。
-約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs}`(CHG-20261124-01 代決 13、
-CHG-20261125-01 代決 11)。
+`project.*` 6 個單元(CHG-20261128-01 T1):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+(`crates/parity/tests/data/project_expected.json`);轉接器載入的 `project`、`breezy_worker` 是 repo 根目錄的
+產品模組(`project.py` 頂層 import `fcntl`,這些測試在 Windows 略過)。
+約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs, project}`(CHG-20261124-01 代決 13、
+CHG-20261125-01 代決 11、CHG-20261128-01 代決 10);`project` 只能在 `project_*` / `_project_*` 函式內延後 import,
+不得在檔頂 import(事實 H)。
 
 轉接器以子程序執行(與 `parity` 比對器相同的呼叫方式),不 import 進測試行程。
 """
@@ -451,11 +455,105 @@ def test_safe_fs_案例結束後工作目錄不存在():
     assert _safe_fs_work_dirs() <= before
 
 
+# ---------- L1:產品模組單元 project.*(CHG-20261128-01 T1) ----------
+
+PROJECT_FIXTURES = ROOT / "crates" / "parity" / "fixtures" / "project"
+PROJECT_EXPECTED = ROOT / "crates" / "parity" / "tests" / "data" / "project_expected.json"
+PROJECT_UNITS = ["constants", "normalize_speed", "normalize_pause", "check_zhuyin", "check_pitch_points",
+                 "py_json"]
+needs_posix_project = pytest.mark.skipif(
+    sys.platform == "win32", reason="project.py 頂層 import fcntl,在 Windows 無法載入(CHG-20261128-01 事實 H)")
+
+
+def responses_split_on_newline(proc):
+    """同 `responses`,但只以 `\\n` 分行:project.* 的結果字串可含 U+2028、U+001C 等,
+    `str.splitlines` 會在這些字元切開(協定只以 `\\n` 分行)。"""
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    raw = proc.stdout
+    assert b"\r" not in raw, "換行須為 \\n"
+    text = raw.decode("utf-8")
+    assert text == "" or text.endswith("\n")
+    return [json.loads(line) for line in text.split("\n") if line]
+
+
+@needs_posix_project
+@pytest.mark.parametrize("name", PROJECT_UNITS)
+def test_project_各案例等於預期結果表(name):
+    fixture = json.loads((PROJECT_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    unit = f"project.{name}"
+    assert fixture["unit"] == unit
+    table = json.loads(PROJECT_EXPECTED.read_text(encoding="utf-8"))[unit]
+    assert set(table) == {c["id"] for c in fixture["cases"]}
+    got = responses_split_on_newline(run_adapter(unit, fixture["cases"]))
+    assert [r["id"] for r in got] == [c["id"] for c in fixture["cases"]]
+    for case, resp in zip(fixture["cases"], got):
+        entry = table[case["id"]]
+        assert strip(resp) == entry.get("linux", entry["all"]), case["id"]
+
+
+@needs_posix_project
+def test_project_單元的錯誤訊息逐字放在_ok_的值內():
+    reqs = [{"id": "s", "input": {"v": "x"}}, {"id": "p", "input": {"v": -0.01}},
+            {"id": "bad", "input": 5}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.normalize_pause", reqs))]
+    assert got == [ok({"class": "project_error", "errors": ["停頓必須是數字"]}),
+                   ok({"value": -0.0, "repr": "-0.0"}), error("type")]
+
+
+@needs_posix_project
+def test_轉接器延後_import_的_project_是_repo_根目錄的產品模組():
+    probe = (
+        "import runpy, sys\n"
+        "g = runpy.run_path(sys.argv[1], run_name='adapter_probe')\n"
+        "assert 'project' not in sys.modules, '不得在檔頂 import project'\n"
+        "g['project_constants'](None)\n"
+        "print(sys.modules['project'].__file__)\n"
+        "print(sys.modules['breezy_worker'].__file__)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe, str(ADAPTER)],
+        capture_output=True, timeout=60, check=False, cwd=str(ADAPTER.parent),
+        env=dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1"),
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    files = [Path(line).resolve() for line in proc.stdout.decode("utf-8").splitlines()]
+    assert files == [ROOT / "project.py", ROOT / "breezy_worker.py"]
+
+
+def project_imports_outside_units(source):
+    """回傳 `import project` 出現在 `project_*` / `_project_*` 函式以外的行號(含檔頂)。"""
+    tree = ast.parse(source)
+    allowed = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name.startswith(("project_", "_project_")):
+            allowed.update(id(n) for n in ast.walk(node))
+    bad = []
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names = [node.module.split(".")[0]]
+        if "project" in names and id(node) not in allowed:
+            bad.append(node.lineno)
+    return bad
+
+
+def test_project_只在_project_單元內延後_import():
+    source = ADAPTER.read_text(encoding="utf-8")
+    assert project_imports_outside_units(source) == []
+    assert "import project as pj" in source
+    # 反向確認:在暫存副本(只在記憶體中)的檔頂或其他函式加 import project,斷言會被找出
+    assert project_imports_outside_units("import project\n" + source) == [1]
+    assert project_imports_outside_units(source + "\ndef other():\n    import project\n") != []
+
+
 # ---------- 約束:只 import 標準函式庫與明列的產品模組 ----------
 
 # 轉接器可 import 的產品模組(CHG-20261124-01 代決 13、CHG-20261125-01 代決 11;
-# 只放三平台都能載入、不依賴 fcntl 等的模組)。
-ALLOWED_PRODUCT_MODULES = frozenset({"names", "value_checks", "safe_fs"})
+# 只放三平台都能載入、不依賴 fcntl 等的模組)。`project` 依賴 fcntl,只能在 project.* 單元內延後 import
+# (CHG-20261128-01 代決 10,由 test_project_只在_project_單元內延後_import 斷言)。
+ALLOWED_PRODUCT_MODULES = frozenset({"names", "value_checks", "safe_fs", "project"})
 
 
 def imports_outside_allowed(source):

@@ -11,6 +11,8 @@
 //! L4 以真執行檔跑 14 個 `safe_fs.*` fixture(T1 五個開啟類、T2 九個);**Windows 上略過
 //! `fixtures/safe_fs/`**(Python `safe_fs` 在 Windows 無法執行,事實 D)並印出原因,其他 fixture
 //! 照舊比對——Windows 的對照改由 `safe_fs_expected.rs` 進行。
+//! `project.*`(CHG-20261128-01 T1):同理,Windows 上略過 `fixtures/project/`(`project.py` 頂層 import `fcntl`),
+//! 改由 `project_parity.rs` 的預期結果表對照;macOS / Linux 照常以真轉接器比對。
 //!
 //! 直譯器沿用比對工具的取得順序:環境變數 `PARITY_PYTHON` → 平台預設值。
 
@@ -38,10 +40,20 @@ fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Windows 上略過的 fixture 目錄(Python 端無法在 Windows 執行)。
-const SKIP_ON_WINDOWS: &str = "safe_fs";
+/// Windows 上略過的 fixture 目錄(Python 端無法在 Windows 執行)與改用的對照測試:
+/// `safe_fs/`(CHG-20261125-01 代決 10)、`project/`(`project.py` 頂層 import `fcntl`,CHG-20261128-01 事實 H)。
+const SKIP_ON_WINDOWS: &[(&str, &str)] = &[
+    (
+        "safe_fs",
+        "Python safe_fs 在 Windows 無法執行(CHG-20261125-01 代決 10),改由 safe_fs_expected.rs 對照",
+    ),
+    (
+        "project",
+        "project.py 在 Windows 無法執行(CHG-20261128-01 事實 H),改由 project_parity.rs 對照",
+    ),
+];
 
-/// `fixtures/` 下 `demo/` 以外的全部 fixture(依路徑排序);Windows 上另略過 `safe_fs/` 並印出原因。
+/// `fixtures/` 下 `demo/` 以外的全部 fixture(依路徑排序);Windows 上另略過 `SKIP_ON_WINDOWS` 並印出原因。
 fn module_fixtures() -> Vec<PathBuf> {
     let root = fixtures_root();
     let mut out = Vec::new();
@@ -52,10 +64,11 @@ fn module_fixtures() -> Vec<PathBuf> {
         if !path.is_dir() || path.file_name().is_none_or(|n| n == "demo") {
             continue;
         }
-        if cfg!(windows) && path.file_name().is_some_and(|n| n == SKIP_ON_WINDOWS) {
-            println!(
-                "略過 fixtures/{SKIP_ON_WINDOWS}/:Python safe_fs 在 Windows 無法執行(CHG-20261125-01 代決 10),改由 safe_fs_expected.rs 對照"
-            );
+        let skipped = SKIP_ON_WINDOWS
+            .iter()
+            .find(|(dir, _)| path.file_name().is_some_and(|n| n == *dir));
+        if let (true, Some((dir, reason))) = (cfg!(windows), skipped) {
+            println!("略過 fixtures/{dir}/:{reason}");
             continue;
         }
         collect_json(&path, &mut out);

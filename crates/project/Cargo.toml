@@ -1,0 +1,22 @@
+[package]
+name = "project"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "專案資料模型:專案檔 schema 2、history/ 與專案鎖(project.py 的 Rust 版,CHG-20261128-01)"
+# 不發佈;授權宣告與路線圖第 24 筆一併決定。cargo-deny 的 [licenses.private] 依此略過本 crate
+publish = false
+
+# 相依(CHG-20261128-01 代決 4、5):workspace 內的 studio-core(names、value_checks)與 safe-fs(檔案系統,T4 起使用),
+# 以及 Cargo.lock 既有的 serde(derive)、serde_json;不引入其他第三方 crate。
+# serde_json 另開 float_roundtrip(浮點解析正確捨入,與 Python float() 相同;不新增 package,代決 5)。
+# path 相依須帶 version(cargo-deny bans.wildcards = "deny";CHG-20261124-01 合併 PR #174 的教訓)。
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+studio-core = { path = "../studio-core", version = "=0.0.0" }
+safe-fs = { path = "../safe-fs", version = "=0.0.0" }
+
+[lib]
+name = "project"
+path = "src/lib.rs"
