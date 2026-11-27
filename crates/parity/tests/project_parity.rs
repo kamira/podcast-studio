@@ -182,6 +182,12 @@ fn validate_text_expectations_split_into_accept_and_reject() {
         let obj = all["value"].as_object().expect("物件");
         if obj.contains_key("dump") {
             assert_eq!(obj.len(), 1, "{id}");
+            // dump 為字串,或精簡形式 {"parts"}(可展開)
+            let dump = &obj["dump"];
+            assert!(
+                dump.is_string() || parity::units_project::parts_text(&dump["parts"]).is_some(),
+                "{id}"
+            );
             assert!(id.starts_with("ok_"), "接受案例 id 以 ok_ 開頭:{id}");
             accepted += 1;
         } else {
@@ -195,6 +201,61 @@ fn validate_text_expectations_split_into_accept_and_reject() {
         (VALIDATE_TEXT_ACCEPTED, VALIDATE_TEXT_REJECTED)
     );
     println!("project.validate_text:接受 {accepted} 筆、拒絕 {rejected} 筆");
+}
+
+/// 審議轉送的上限(DIR-6 第 1 輪 F-1):每行最多字元數、同一字元最多連續數。
+const MAX_LINE_CHARS: usize = 12000;
+const MAX_RUN: usize = 999;
+
+/// 守門:`fixtures/project/*.json` 與預期結果表每行 ≤ 12000 字元、同一字元連續 ≤ 999 個——超長的重複內容
+/// 一律改用 `validate_text` 的 `{"parts"}` 精簡形式(輸入)與 `{"dump": {"parts"}}`(結果)。
+#[test]
+fn fixture_and_table_lines_stay_short() {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(fixture_dir())
+        .expect("讀取 fixtures/project")
+        .map(|e| e.expect("目錄項").path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.push(
+        manifest()
+            .join("tests")
+            .join("data")
+            .join("project_expected.json"),
+    );
+    files.sort();
+    for path in &files {
+        let text = std::fs::read_to_string(path).expect("讀取");
+        let (mut longest, mut run_max) = (0, 0);
+        for (n, line) in text.split('\n').enumerate() {
+            let chars: Vec<char> = line.chars().collect();
+            longest = longest.max(chars.len());
+            let mut run = 0;
+            for (i, c) in chars.iter().enumerate() {
+                run = if i > 0 && chars[i - 1] == *c {
+                    run + 1
+                } else {
+                    1
+                };
+                run_max = run_max.max(run);
+            }
+            assert!(
+                chars.len() <= MAX_LINE_CHARS,
+                "{} 第 {} 行 {} 字元",
+                path.display(),
+                n + 1,
+                chars.len()
+            );
+        }
+        assert!(
+            run_max <= MAX_RUN,
+            "{} 有 {run_max} 個連續相同字元",
+            path.display()
+        );
+        println!(
+            "{}:最長行 {longest} 字元、最長連續同字元 {run_max} 個",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
 }
 
 #[test]

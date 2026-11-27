@@ -520,6 +520,43 @@ def test_project_validate_text_輸入格式與暫存目錄():
     assert _project_work_dirs() <= before
 
 
+def _parts_expand(parts):
+    return "".join(p if isinstance(p, str) else p["repeat"] * p["count"] for p in parts)
+
+
+@needs_posix_project
+def test_project_validate_text_的_parts_輸入():
+    """DIR-6 第 1 輪 F-1:`{"parts"}` 依序串接後以 UTF-8 編碼;不合格一律 error type。"""
+    head, tail = '{"schema_version": 2, "name": "x", "script": "', '"}'
+    good = [{"id": "p", "input": {"parts": [head, {"repeat": "字", "count": 3}, "", tail]}},
+            {"id": "s", "input": head + "字字字" + tail}]
+    bad = [[], "x", [1], [None], [{"repeat": "a"}], [{"repeat": "a", "count": 1, "x": 1}],
+           [{"repeat": "", "count": 1}], [{"repeat": 1, "count": 1}], [{"repeat": "a", "count": 0}],
+           [{"repeat": "a", "count": -1}], [{"repeat": "a", "count": 1.0}], [{"repeat": "a", "count": True}],
+           [{"repeat": "a", "count": 5242882}]]
+    reqs = good + [{"id": f"b{i}", "input": {"parts": b}} for i, b in enumerate(bad)]
+    reqs.append({"id": "both", "input": {"parts": [head, tail], "hex": ""}})
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.validate_text", reqs))]
+    assert got[0] == got[1] and got[0]["outcome"] == "ok" and isinstance(got[0]["value"]["dump"], str)
+    assert got[2:] == [error("type")] * (len(bad) + 1)
+
+
+@needs_posix_project
+def test_project_validate_text_的_dump_精簡門檻與可逆性():
+    """dump 的同一字元連續 999 個照舊為字串、1000 個改為 `{"parts"}`;展開即得原 dump。"""
+    head, tail = '{"schema_version": 2, "name": "x", "script": "', '"}'
+    reqs = [{"id": str(n), "input": {"parts": [head, {"repeat": "a", "count": n}, tail]}} for n in (999, 1000, 50000)]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.validate_text", reqs))]
+    assert isinstance(got[0]["value"]["dump"], str)
+    for n, r in zip((1000, 50000), got[1:]):
+        parts = r["value"]["dump"]["parts"]
+        assert {"repeat": "a", "count": n} in parts
+        assert all(isinstance(p, str) or (len(p["repeat"]) == 1 and p["count"] >= 1000) for p in parts)
+        assert not any(isinstance(a, str) and isinstance(b, str) for a, b in zip(parts, parts[1:])), "相鄰字串段須合併"
+        assert f'"script": "{"a" * n}",' in _parts_expand(parts)
+    assert _parts_expand(got[1]["value"]["dump"]["parts"]).replace("a" * 1000, "a" * 999) == got[0]["value"]["dump"]
+
+
 @needs_posix_project
 def test_轉接器延後_import_的_project_是_repo_根目錄的產品模組():
     probe = (
