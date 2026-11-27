@@ -460,7 +460,7 @@ def test_safe_fs_案例結束後工作目錄不存在():
 PROJECT_FIXTURES = ROOT / "crates" / "parity" / "fixtures" / "project"
 PROJECT_EXPECTED = ROOT / "crates" / "parity" / "tests" / "data" / "project_expected.json"
 PROJECT_UNITS = ["constants", "normalize_speed", "normalize_pause", "check_zhuyin", "check_pitch_points",
-                 "py_json"]
+                 "py_json", "validate_text"]
 needs_posix_project = pytest.mark.skipif(
     sys.platform == "win32", reason="project.py 頂層 import fcntl,在 Windows 無法載入(CHG-20261128-01 事實 H)")
 
@@ -498,6 +498,26 @@ def test_project_單元的錯誤訊息逐字放在_ok_的值內():
     got = [strip(r) for r in responses_split_on_newline(run_adapter("project.normalize_pause", reqs))]
     assert got == [ok({"class": "project_error", "errors": ["停頓必須是數字"]}),
                    ok({"value": -0.0, "repr": "-0.0"}), error("type")]
+
+
+def _project_work_dirs():
+    return {p.name for p in Path(tempfile.gettempdir()).glob("parity-project-*")}
+
+
+@needs_posix_project
+def test_project_validate_text_輸入格式與暫存目錄():
+    """T2:輸入為 JSON 原文字串或 `{"hex"}`,其他格式為 error type;案例結束後轉接器的暫存目錄不存在。"""
+    before = _project_work_dirs()
+    reqs = [{"id": "s", "input": "[]"}, {"id": "h", "input": {"hex": "ff"}},
+            {"id": "n", "input": 1}, {"id": "x", "input": {"hex": "zz"}},
+            {"id": "ok", "input": '{"schema_version": 1, "name": "v1"}'}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.validate_text", reqs))]
+    assert got[:4] == [ok({"class": "project_error", "errors": ["專案檔必須是 JSON 物件"]}),
+                       ok({"class": "project_error", "errors": ["專案檔內容損壞,無法讀取"]}),
+                       error("type"), error("type")]
+    assert got[4]["outcome"] == "ok"
+    assert got[4]["value"]["dump"].startswith('{\n "schema_version": 2,\n "name": "v1",')
+    assert _project_work_dirs() <= before
 
 
 @needs_posix_project

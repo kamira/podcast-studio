@@ -26,7 +26,7 @@ const WINDOWS_CASES: &[(&str, &str, &str)] = &[];
 /// `windows` 欄的筆數(與 `WINDOWS_CASES` 相同;改動差異清單時兩者一起改)。
 const WINDOWS_ENTRY_COUNT: usize = 0;
 
-/// 每份 fixture 的(單元、檔名、案例數、T1 L2 下限)。
+/// 每份 fixture 的(單元、檔名、案例數、該 task L2 的下限)。
 const FIXTURES: &[(&str, &str, usize, usize)] = &[
     ("project.constants", "constants.json", 1, 1),
     ("project.normalize_speed", "normalize_speed.json", 41, 30),
@@ -39,7 +39,12 @@ const FIXTURES: &[(&str, &str, usize, usize)] = &[
         20,
     ),
     ("project.py_json", "py_json.json", 47, 40),
+    ("project.validate_text", "validate_text.json", 265, 150),
 ];
+
+/// `project.validate_text`(T2)的接受 / 拒絕筆數(以預期結果表計)。
+const VALIDATE_TEXT_ACCEPTED: usize = 61;
+const VALIDATE_TEXT_REJECTED: usize = 204;
 
 fn platform() -> &'static str {
     if cfg!(target_os = "linux") {
@@ -161,6 +166,34 @@ fn fixture_case_counts_are_fixed_and_meet_the_minimum() {
     }
     let total: usize = FIXTURES.iter().map(|(_, _, n, _)| n).sum();
     println!("fixtures/project:{} 份、{total} 個案例", FIXTURES.len());
+}
+
+/// `project.validate_text` 的預期:接受時只有 `dump`(案例 id 以 `ok_` 開頭),拒絕時為 `{"class", "errors"}`;
+/// 接受 / 拒絕筆數固定。
+#[test]
+fn validate_text_expectations_split_into_accept_and_reject() {
+    let table = table();
+    let unit = &table["project.validate_text"];
+    let (mut accepted, mut rejected) = (0, 0);
+    for (id, entry) in unit {
+        let all = &entry["all"];
+        assert_eq!(all["outcome"], "ok", "{id}");
+        let obj = all["value"].as_object().expect("物件");
+        if obj.contains_key("dump") {
+            assert_eq!(obj.len(), 1, "{id}");
+            assert!(id.starts_with("ok_"), "接受案例 id 以 ok_ 開頭:{id}");
+            accepted += 1;
+        } else {
+            assert_eq!(obj["class"], "project_error", "{id}");
+            assert!(!id.starts_with("ok_"), "{id}");
+            rejected += 1;
+        }
+    }
+    assert_eq!(
+        (accepted, rejected),
+        (VALIDATE_TEXT_ACCEPTED, VALIDATE_TEXT_REJECTED)
+    );
+    println!("project.validate_text:接受 {accepted} 筆、拒絕 {rejected} 筆");
 }
 
 #[test]

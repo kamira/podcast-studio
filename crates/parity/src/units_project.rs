@@ -14,12 +14,17 @@
 //! | `project.check_zhuyin` | 任意 JSON | `{"value": 字串}` |
 //! | `project.check_pitch_points` | `{"points", "where"}` | `{"value": [[位置, 半音], …], "repr"}` |
 //! | `project.py_json` | 任意 JSON 值 | `{"dump": _dump 字串, "sorted": 緊湊排序字串}` |
+//! | `project.validate_text` | JSON 原文字串(以 UTF-8 編碼),或 `{"hex": 位元組的十六進位}` | `{"dump": _dump(validate(…)) 字串}` |
+//!
+//! `project.validate_text`(T2):兩邊各自解析原文——Rust 以 [`project::validate::parse_project_json`]
+//! (= Python `_read_project_file` 讀到位元組之後的部分:5 MB 上限、UTF-8、JSON、須為物件),Python 端把位元組寫進
+//! 自己建立的暫存目錄後呼叫真的 `_read_project_file`——所以 JSON 層的差異也測得到;接著 `validate` 與 `_dump`。
 //!
 //! `project.py_json` 的物件鍵:fixture 經 `serde_json` 解析後鍵已依碼位排序,送給 Python 的請求也是排序後的鍵,
 //! 兩邊收到同一個鍵順序(依建構順序寫出由 `crates/project/tests/pyjson.rs` 的 `Entries` 與結構測試鎖住)。
 
 use project::pyjson::{self, Entries};
-use project::{Error, checks, constants, pystr};
+use project::{Error, checks, constants, pystr, validate};
 use serde_json::{Map, Value, json};
 
 use crate::Outcome;
@@ -217,6 +222,38 @@ pub fn project_py_json(input: &Value) -> Outcome {
     Outcome::Ok(json!({"dump": pyjson::dump(input), "sorted": pyjson::dumps_sorted(input)}))
 }
 
+/// `project.validate_text` 的輸入位元組;格式不符回 `None`(→ `error type`)。
+fn text_bytes(input: &Value) -> Option<Vec<u8>> {
+    match input {
+        Value::String(s) => Some(s.as_bytes().to_vec()),
+        Value::Object(obj) if obj.len() == 1 => {
+            let hex = obj.get("hex")?.as_str()?;
+            if hex.len() % 2 != 0 || !hex.is_ascii() {
+                return None;
+            }
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+                .collect()
+        }
+        _ => None,
+    }
+}
+
+/// `project.validate_text`。
+pub fn project_validate_text(input: &Value) -> Outcome {
+    let Some(raw) = text_bytes(input) else {
+        return type_error();
+    };
+    match validate::parse_project_json(&raw).and_then(|data| validate::dump_validated(&data)) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(dump) => Outcome::Ok(json!({ "dump": dump })),
+            Err(_) => type_error(),
+        },
+        Err(e) => error_result(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! L1:輸入格式與結果轉換。
@@ -245,6 +282,28 @@ mod tests {
         ] {
             assert_eq!(project_check_pitch_points(&input), type_error(), "{input}");
         }
+    }
+
+    #[test]
+    fn validate_text_input_forms() {
+        for input in [
+            json!(1),
+            json!(null),
+            json!({"hex": "0"}),
+            json!({"hex": "zz"}),
+            json!({"hex": "00", "x": 1}),
+            json!({"text": "{}"}),
+        ] {
+            assert_eq!(project_validate_text(&input), type_error(), "{input}");
+        }
+        assert_eq!(
+            project_validate_text(&json!("[]")),
+            Outcome::Ok(json!({"class": "project_error", "errors": ["專案檔必須是 JSON 物件"]}))
+        );
+        assert_eq!(
+            project_validate_text(&json!({"hex": "ff"})),
+            Outcome::Ok(json!({"class": "project_error", "errors": ["專案檔內容損壞,無法讀取"]}))
+        );
     }
 
     #[test]
