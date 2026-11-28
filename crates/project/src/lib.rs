@@ -3,7 +3,7 @@
 //! 路線圖第 5 筆:專案檔 schema 2 的讀取 / 驗證 / 以 Python 相同位元組寫出、`history/` 與專案鎖。
 //! 依 task 逐步加入(T1~T7);本筆沒有任何產品呼叫端,Python 版行為不變。
 //!
-//! 目前的模組(T1~T5):
+//! 目前的模組(T1~T6):
 //! - [`error`]:[`Error`]、[`ErrorKind`]——錯誤類別與逐字與 Python 相同的錯誤訊息清單(代決 9)。
 //! - [`pyjson`]:與 Python `_dump`(`json.dumps(ensure_ascii=False, indent=1)` + 換行)逐位元組相同的寫出器,
 //!   以及 `post_key` 用的緊湊、鍵排序寫法;浮點依 Python `repr`(代決 6)。
@@ -27,6 +27,10 @@
 //! - [`lock`]:專案鎖 [`lock::ProjectLock`](Python `_project_lock`;T5)——專案目錄內 `.lock` 的阻塞排他鎖
 //!   (標準函式庫 `File::lock`:Unix `flock`、Windows `LockFileEx`;沒有逾時),與 Python 網頁版互斥(代決 11)。
 //!
+//! - [`write`]:寫入——`save`(注入 [`ids::Clock`])、`update`、`restore`、`create`(新名稱經 `normalize_new_name`)、
+//!   `open_project_create` / `open_subdir_create`(建立分支)、`rotate`,以及版本時間戳的 `format_ms` / `stamp_ms`(T6):
+//!   原子寫入(暫存檔 → `sync_all` → `replace`)、以硬連結封存舊檔到 `history/`(時間戳嚴格遞增)、只留最近 10 版。
+//!
 //! 執行檔 `project-readonly-dump`(`src/bin/project-readonly-dump.rs`,T4):使用者 Mac 唯讀比對用,只呼叫 [`read`]
 //! 的讀取 API(代決 19、20)。
 //!
@@ -48,6 +52,7 @@ pub mod round;
 pub mod sha256;
 pub mod text;
 pub mod validate;
+pub mod write;
 
 pub use error::{Error, ErrorKind, Result};
 pub use model::Project;

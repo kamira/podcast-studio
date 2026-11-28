@@ -53,12 +53,17 @@ T4 加讀取 5 個單元:`project.load`、`project.load_version`、`project.list
 (前綴 `parity-project-fs-py-`)下建立 `root/`(暫時設為 `project.ROOT`)與 `outside/` 的合成檔案樹,呼叫前後各取快照,
 回 `{"result", "tree", "changed"}`(`changed` 為前後有任何不同的路徑,讀取不得改動任何東西);案例結束即刪除工作目錄、
 還原 `project.ROOT`。
+T6 加寫入 2 個單元:`project.save_sequence`(`{"tree", "outside"?, "clock", "ops"}`:依序執行 `save`、`update`、`restore`、
+`create`、讀取與 `fs` 操作)與 `project.create`——同一種工作目錄;案例期間暫時把 `project.time`、`project.secrets` 換成
+依序取用 `clock` 序列的替身(`now` / `rand4` / `hex8`,用完後重複最後一個)、在 `project` logger 掛上收集警告的 handler,
+回每步結果與最後帶內容的樹;案例結束一律還原 `project.ROOT`、`project.time`、`project.secrets` 並刪除工作目錄。
 """
 from __future__ import annotations
 
 import argparse
 import errno
 import json
+import logging
 import os
 import shutil
 import stat
@@ -1113,6 +1118,255 @@ def project_disk_usage(value):
     return _project_fs_case(value, lambda pj, v: _project_value_call(pj, pj.disk_usage, _project_str_arg(v, "name")))
 
 
+# ---------- project.* T6:寫入(合成檔案樹 + 注入的時鐘與隨機碼;Rust 端 units_project.rs「T6:寫入」) ----------
+# `project.save_sequence` 輸入 `{"tree", "outside"?, "clock", "ops"}`、`project.create` 輸入 `{"tree", "outside"?, "clock",
+# "name", "script"?, "defaults"?}`;工作目錄同 T4。`clock` 的三個序列依呼叫順序取用、用完後重複最後一個:案例期間
+# 暫時把 `project.time` 換成 `time()` 回 `now / 1000` 的替身、`project.secrets` 換成 `token_hex(2)` / `token_hex(8)`
+# 取用 `rand4` / `hex8` 的替身,並在 `project` logger 掛上收集警告的 handler;案例結束一律還原並刪除工作目錄。
+
+PROJECT_NOW_MAX_MS = 4_102_444_799_999     # 2099-12-31T23:59:59.999Z(此範圍內 fromtimestamp(ms / 1000) 取回同一毫秒)
+PROJECT_CHANGE_FAILED = "修改中途失敗"
+_PROJECT_HEX = frozenset("0123456789abcdef")
+
+
+class _ProjectSeqClock:
+    """依序取用固定序列的時鐘與隨機碼(用完後重複最後一個;與 Rust `SeqClock` 同一規則)。"""
+
+    def __init__(self, spec):
+        if not isinstance(spec, dict) or set(spec) != {"now", "rand4", "hex8"}:
+            raise _type_error()
+        for key in spec:
+            if not isinstance(spec[key], list) or not spec[key]:
+                raise _type_error()
+        for n in spec["now"]:
+            if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= PROJECT_NOW_MAX_MS:
+                raise _type_error()
+        for key, size in (("rand4", 4), ("hex8", 16)):
+            for s in spec[key]:
+                if not isinstance(s, str) or len(s) != size or not set(s) <= _PROJECT_HEX:
+                    raise _type_error()
+        self.items = {k: list(v) for k, v in spec.items()}
+        self.pos = {k: 0 for k in spec}
+
+    def _take(self, key):
+        items = self.items[key]
+        value = items[min(self.pos[key], len(items) - 1)]
+        self.pos[key] += 1
+        return value
+
+    def time(self):
+        """`project.time.time()` 的替身。"""
+        return self._take("now") / 1000
+
+    def token_hex(self, nbytes):
+        """`project.secrets.token_hex()` 的替身:`_rand4()` 取 2 位元組、`new_id()` 與暫存檔名取 8 位元組。"""
+        if nbytes == 2:
+            return self._take("rand4")
+        if nbytes == 8:
+            return self._take("hex8")
+        raise AssertionError(f"未預期的 token_hex({nbytes})")
+
+
+class _ProjectWarnings(logging.Handler):
+    """收集 `project` logger 的警告(Python `_warn` 以 log.warning 記錄;Rust 以回傳值交出,D-10)。"""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _project_is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _project_only(op, allowed):
+    if not set(op) <= set(allowed):
+        raise _type_error()
+
+
+def _project_create_defaults(v):
+    """`create` 的 `defaults`:四鍵的子集、值為數字;格式不符 → error type。"""
+    if v is None:
+        return None
+    if not isinstance(v, dict) or not set(v) <= {"speed", "pause_comma", "pause_sentence", "pause_paragraph"}:
+        raise _type_error()
+    if not all(_project_is_number(x) for x in v.values()):
+        raise _type_error()
+    return dict(v)
+
+
+def _project_dump_value(pj, p):
+    return _project_compact_dump(pj._dump(pj.validate(p.to_dict())).decode("utf-8"))
+
+
+def _project_create_step(pj, op):
+    name = _project_str_arg(op, "name")
+    script = _project_text_value(op["script"]) if "script" in op else ""
+    defaults = _project_create_defaults(op.get("defaults"))
+    try:
+        p = pj.create(name, script, defaults)
+    except (pj.ProjectError, OSError) as e:
+        return _project_read_error(e, pj)
+    return {"value": {"dump": _project_dump_value(pj, p)}}
+
+
+def _project_change(spec):
+    if not isinstance(spec, dict) or not set(spec) <= {"script", "name", "speed", "fail", "return"}:
+        raise _type_error()
+    script = _project_text_value(spec["script"]) if "script" in spec else None
+    if "name" in spec and not isinstance(spec["name"], str):
+        raise _type_error()
+    if "speed" in spec and not _project_is_number(spec["speed"]):
+        raise _type_error()
+    if "fail" in spec and not isinstance(spec["fail"], bool):
+        raise _type_error()
+    return script, spec
+
+
+def _project_remove(work, items):
+    """`fs` 操作的 `remove`:相對 `root/` 的路徑,不跟隨連結刪除(目錄連同內容)。"""
+    if items is None:
+        return
+    if not isinstance(items, list):
+        raise _type_error()
+    for item in items:
+        path = os.path.join(work.root, *_rel_parts(item))
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+
+
+def _project_run_op(pj, work, op, warns):
+    if not isinstance(op, dict):
+        raise _type_error()
+    kind = op.get("op")
+    warns.messages = []
+    errors = (pj.ProjectError, OSError)
+    if kind == "save":
+        _project_only(op, ("op", "project", "script"))
+        data = op.get("project")
+        if not isinstance(data, dict):
+            raise _type_error()
+        script = _project_text_value(op["script"]) if "script" in op else None
+        try:
+            p = pj.Project.from_dict(data)
+            if script is not None:
+                p.script = script
+            vid = pj.save(p)
+        except errors as e:
+            return _project_read_error(e, pj)
+        return {"value": vid, "warnings": list(warns.messages)}
+    if kind == "update":
+        _project_only(op, ("op", "name", "change"))
+        name = _project_str_arg(op, "name")
+        script, spec = _project_change(op.get("change"))
+
+        def change(p):
+            if script is not None:
+                p.script = script
+            if "name" in spec:
+                p.name = spec["name"]
+            if "speed" in spec:
+                p.defaults["speed"] = spec["speed"]
+            if spec.get("fail"):
+                raise pj.ProjectError(PROJECT_CHANGE_FAILED)
+            return spec.get("return")
+
+        try:
+            got, vid, extra = pj.update(name, change)
+        except errors as e:
+            return _project_read_error(e, pj)
+        return {"value": {"version": vid, "extra": extra, "dump": _project_dump_value(pj, got)},
+                "warnings": list(warns.messages)}
+    if kind == "restore":
+        _project_only(op, ("op", "name", "vid"))
+        name, vid = _project_str_arg(op, "name"), _project_str_arg(op, "vid")
+        try:
+            v = pj.restore(name, vid)
+        except errors as e:
+            return _project_read_error(e, pj)
+        return {"value": v, "warnings": list(warns.messages)}
+    if kind == "create":
+        _project_only(op, ("op", "name", "script", "defaults"))
+        return _project_create_step(pj, op)
+    if kind == "load":
+        _project_only(op, ("op", "name"))
+        return _project_loaded(pj, pj.load, _project_str_arg(op, "name"))
+    if kind == "load_version":
+        _project_only(op, ("op", "name", "vid"))
+        return _project_loaded(pj, pj.load_version, _project_str_arg(op, "name"), _project_str_arg(op, "vid"))
+    if kind == "list_history":
+        _project_only(op, ("op", "name"))
+        return _project_value_call(pj, pj.list_history, _project_str_arg(op, "name"))
+    if kind == "fs":
+        _project_only(op, ("op", "add", "remove"))
+        work.build(work.root, op.get("add"))
+        _project_remove(work, op.get("remove"))
+        return {"value": None}
+    raise _type_error()
+
+
+def _project_content_tree(work):
+    """帶內容的快照:一般檔為字串(同字元連續 ≥ 65 改為 `{"parts"}`)或 `{"hex"}`(非 UTF-8)。"""
+    rows = []
+    for rel, row, state in work.snapshot():
+        if state[0] == "file":
+            try:
+                content = _project_compact_dump(state[2].decode("utf-8"))
+            except UnicodeDecodeError:
+                content = {"hex": state[2].hex()}
+            rows.append([rel, "file", content])
+        else:
+            rows.append(row)
+    return rows
+
+
+def _project_write_case(value, allowed, action):
+    """建樹 → 依序執行(注入時鐘與隨機碼、收集警告)→ 帶內容的快照;一律還原並刪除工作目錄。"""
+    import project as pj
+    if not isinstance(value, dict) or not set(value) <= set(allowed) or not isinstance(value.get("tree"), list):
+        raise _type_error()
+    clock = _ProjectSeqClock(value.get("clock"))
+    work = _ProjectFsWork()
+    saved = (pj.ROOT, pj.time, pj.secrets)
+    warns = _ProjectWarnings()
+    logger = logging.getLogger("project")
+    try:
+        work.build(work.root, value["tree"])
+        work.build(work.outside, value.get("outside"))
+        pj.ROOT, pj.time, pj.secrets = Path(work.root), clock, clock
+        logger.addHandler(warns)
+        try:
+            result = action(pj, work, value, warns)
+        finally:
+            logger.removeHandler(warns)
+            pj.ROOT, pj.time, pj.secrets = saved
+        result["tree"] = _project_content_tree(work)
+        return result
+    finally:
+        work.close()
+
+
+def project_save_sequence(value):
+    """project.save_sequence(T6):`{"tree", "outside"?, "clock", "ops"}` → `{"steps", "tree"}`。"""
+    def action(pj, work, v, warns):
+        ops = v.get("ops")
+        if not isinstance(ops, list) or not ops:
+            raise _type_error()
+        return {"steps": [_project_run_op(pj, work, op, warns) for op in ops]}
+    return _project_write_case(value, ("tree", "outside", "clock", "ops"), action)
+
+
+def project_create(value):
+    """project.create(T6):`{"tree", "outside"?, "clock", "name", "script"?, "defaults"?}` → `{"result", "tree"}`。"""
+    return _project_write_case(value, ("tree", "outside", "clock", "name", "script", "defaults"),
+                               lambda pj, work, v, warns: {"result": _project_create_step(pj, v)})
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -1161,6 +1415,8 @@ def build_units(environ=None):
         "project.list_history": project_list_history,
         "project.list_projects": project_list_projects,
         "project.disk_usage": project_disk_usage,
+        "project.save_sequence": project_save_sequence,
+        "project.create": project_create,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep

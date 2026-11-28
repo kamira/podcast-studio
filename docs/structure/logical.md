@@ -14,6 +14,7 @@
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):`project`、`settings` 新增相依 `value_checks`(共用 `is_int`);相依方向補記 `settings` → `safe_fs`;DIR-5 一次修正時,分層表 `settings.py` 依賴欄補 `safe_fs`、「單向、無循環」段改寫 `settings` 的相依說法,三處同步。
 > 2026-11-23 依 CHG-20261123-01 結構文件更新(T3):開發流程節的架構圖加 `rust-platform`(三平台矩陣)、`rust`(彙總)與 ruleset 五項;checkout 說明改為四個治理相關 job 取 `pr/` 與 `trusted/`、`rust-platform` 只取 PR head;ruleset 列改五項;「CI 四項」改「CI 五項」並補 `rust` 說明。
 > 2026-11-28 依 CHG-20261128-01 結構文件更新(T4):相依方向補 Rust `project` → `studio-core`、`safe-fs`(目前沒有產品呼叫端、Python 流程不變);新增「CHG-20261128-01:使用者 Mac 唯讀比對」節(只讀、只印數量)。
+> 2026-11-28 依 CHG-20261128-01 結構文件更新(T6):Rust workspace 段補 `project` 的寫入 API(`project::write`)同樣沒有產品呼叫端、只在測試與比對單元的暫存目錄內寫入;新增「CHG-20261128-01:Rust 存檔流程」流程圖(與 Python `save` 逐步相同)。
 
 ## 分層 / 模組
 
@@ -314,7 +315,7 @@ flowchart LR
 
 〔觀察〕CHG-20261022-02 新增的相依:`studio_server` → `mcp_registry`(單向);`mcp_registry` 不匯入 repo 內任何模組(自有 `scrub()`,規則同 `studio_server.scrub()`,避免循環匯入),只以子程序呼叫外部 CLI `~/.local/bin/claude`、`~/.local/bin/codex`。
 
-〔觀察〕Rust workspace(CHG-20261128-01 T4):`project`(`crates/project`,`project.py` 的 Rust 版)→ `studio-core`(`names`、`value_checks`)、`safe-fs`;`parity` → `project`。Rust `project` **目前沒有產品呼叫端**——網頁、MCP 伺服器與上列 Python 流程都不變,仍只經 `project.py` 存取 `projects/`;唯一的執行檔 `project-readonly-dump` 只供下節的唯讀比對使用。
+〔觀察〕Rust workspace(CHG-20261128-01 T4):`project`(`crates/project`,`project.py` 的 Rust 版)→ `studio-core`(`names`、`value_checks`)、`safe-fs`;`parity` → `project`。Rust `project` **目前沒有產品呼叫端**——網頁、MCP 伺服器與上列 Python 流程都不變,仍只經 `project.py` 存取 `projects/`;唯一的執行檔 `project-readonly-dump` 只供下節的唯讀比對使用。T6 起 `project` 也有寫入 API(`project::write`:`save`、`update`、`restore`、`create`),同樣沒有產品呼叫端,目前只在測試與比對單元自己排他建立的暫存目錄內寫入;流程見「CHG-20261128-01:Rust 存檔流程」。
 
 〔觀察〕耦合點:`media.py` 直接讀 `taiwan_ai` 的模組層常數(`OUT`、`MFLUX`)與函式(`role_config`、`reserve`、`unload_llms`);`roles.image` 的讀取端是 `media.generate_image()`、`roles.voice` 的讀取端是 `taiwan_ai.speak()`,兩者每次呼叫經 `taiwan_ai.role_config()` → `settings.load()` 讀一次,網頁與 MCP 兩個行程都經這兩個函式(CHG-20261026-01 T1、T2);設定資料(`config/studio.db`)是網頁與 MCP 兩個行程共享的**資料契約**,只經 `settings.py` 存取(CHG-20261022-01 Global Constraints)。
 
@@ -455,3 +456,18 @@ sequenceDiagram
 - 〔觀察〕所有 CLI 子程序環境沿用伺服器行程(含 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`),另一律帶 `UV_OFFLINE=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`DISABLE_TELEMETRY=1`(只加在子程序,不寫入註冊內容)。
 - 〔觀察〕`status` / `plan` / `apply` 共用 `mcp_registry` 的行程內非阻塞鎖,任一執行中時其他呼叫回 409;不進 `heavy_lock`,不受合成或匯出影響。
 - 〔觀察〕Claude 的 `MCP_TOOL_TIMEOUT`、Codex 的 `tool_timeout_sec` 只讀取並提醒,不寫入;Codex 註冊後沒有 `tool_timeout_sec` 時畫面給手動補的 TOML 片段。
+
+## CHG-20261128-01:Rust 存檔流程
+
+〔觀察〕`project::write::save`(T6)與 Python `save` 逐步相同;時間與隨機碼取自注入的 `Clock`。目前沒有產品呼叫端。
+
+```mermaid
+flowchart TD
+  S["save(root, project, clock)"] --> V["validate(to_dict) → 寫出位元組(5 MB 上限)"]
+  V --> O["open_project_create:不存在時 normalize_new_name 後建立(保留名稱拒絕、不建立任何目錄)"]
+  O --> L["ProjectLock(阻塞,與 Python 互斥)"]
+  L --> A["history/:鎖內讀最新時間戳 → 嚴格遞增 → hard_link 封存舊 project.json(撞名換 rand4)"]
+  A --> W["create_excl .project-<token_hex8>.tmp → 寫入 → sync_all → 關閉 → replace(失敗時刪暫存檔)"]
+  W --> R["rotate:只刪符合 HISTORY_RE 的一般檔中最舊、超出 10 個者;連結、目錄、名稱不符不動"]
+  R --> U["Drop:unlock → 關閉"]
+```

@@ -27,6 +27,8 @@
 //! | `project.is_default_post` | `{"segment"}` | `{"value": 布林}` |
 //! | `project.effective` | `{"segment", "defaults"?}` | `{"value": {"speed", "pause"}, "repr"}` |
 //! | `project.load`、`project.load_version`、`project.list_history`、`project.list_projects`、`project.disk_usage` | `{"tree", "outside"?, "name"?, "vid"?}`(合成檔案樹,T4) | `{"result", "tree", "changed"}`(見「T4:讀取」) |
+//! | `project.save_sequence` | `{"tree", "outside"?, "clock", "ops"}`(合成檔案樹、注入的時鐘與隨機碼、操作序列,T6) | `{"steps", "tree"}`(見「T6:寫入」) |
+//! | `project.create` | `{"tree", "outside"?, "clock", "name", "script"?, "defaults"?}`(T6) | `{"result", "tree"}` |
 //!
 //! 片段類單元(T3):兩邊都把 `segment` 放進 `{"schema_version": 2, "name": "p", "segments": [segment]}`(`effective` 另把
 //! 給定的 `defaults` 放進去)以 `validate` 驗證——Python 呼叫端傳入的就是驗證後的片段;驗證失敗時回 `validate` 的
@@ -894,6 +896,432 @@ pub fn project_disk_usage(input: &Value) -> Outcome {
     })
 }
 
+// ---------- T6:寫入(合成檔案樹 + 注入的時鐘與隨機碼) ----------
+//
+// `project.save_sequence` 輸入 `{"tree", "outside"?, "clock", "ops": [操作…]}`;工作目錄同 T4(建立、`canonicalize`、
+// 案例結束即刪除)。`clock` 為 `{"now": [毫秒…], "rand4": [4 碼…], "hex8": [16 碼…]}`(三者皆為非空陣列;`now` 為
+// 0~[`NOW_MAX_MS`] 的整數、`rand4` / `hex8` 為小寫十六進位),寫入 API 依呼叫順序逐一取用,**用完後一直重複最後一個**
+// (撞名重試用盡的案例因此可決定)——Rust 以 [`SeqClock`] 注入 [`project::ids::Clock`],Python 端暫時把 `project.time`
+// 換成 `time()` 回 `毫秒 / 1000` 的替身、`project.secrets` 換成 `token_hex(2)` / `token_hex(8)` 取用 `rand4` / `hex8` 的
+// 替身(案例結束還原)。操作:
+//
+// | `op` | 欄位 | 呼叫 | 接受時的結果 |
+// |------|------|------|--------------|
+// | `save` | `project`(物件)、`script`?(文字) | `Project.from_dict(project)`(失敗即為結果),有 `script` 時改寫文稿後 `save` | `{"value": 版本 id 或 null, "warnings"}` |
+// | `update` | `name`、`change`:`{"script"?, "name"?, "speed"?, "fail"?, "return"?}` | `update(name, change)`;change 依序改寫文稿、名稱、`defaults.speed`,`fail` 為真時回 `ProjectError("修改中途失敗")`,否則回 `return`(未給為 null) | `{"value": {"version", "extra", "dump"}, "warnings"}` |
+// | `restore` | `name`、`vid` | `restore` | 同 `save` |
+// | `create` | `name`、`script`?(文字)、`defaults`?(`speed` 等四鍵的子集,值為數字) | `create` | `{"value": {"dump"}}` |
+// | `load` / `load_version` / `list_history` | 同 T4 | 讀取 API | 同 T4 |
+// | `fs` | `add`?(項目,同 `tree`)、`remove`?(相對 `root/` 的路徑;不跟隨連結刪除) | 在兩次操作之間改動檔案樹 | `{"value": null}` |
+//
+// 拒絕時為 `{"class", "errors"}`(`os_error` 只有類別;失敗時 Python 另記的警告不比對,行為差異 D-10 T6 補記)。
+// 輸出 `{"steps": [每步結果…], "tree": [[相對路徑, 型別, 內容]…]}`:`tree` 為最後的快照,一般檔的內容為字串
+// (UTF-8;同字元連續 ≥ 65 改為 `{"parts"}`)或 `{"hex"}`,連結為連結記號,目錄與其他為 null(修改時間不比對——
+// 寫入的檔案的修改時間是執行當下的時間)。`project.create` 為只有一個 `create` 操作的簡寫:輸入 `{"tree", "outside"?,
+// "clock", "name", "script"?, "defaults"?}`,輸出 `{"result", "tree"}`。
+
+/// 注入時鐘的 `now` 上限(2099-12-31T23:59:59.999Z):Python 端以 `毫秒 / 1000` 的浮點秒數注入 `time.time()`,
+/// 此範圍內 `datetime.fromtimestamp` 取回的毫秒與整數相同(施工時以 CPython 3.11 抽樣 20 萬筆確認)。
+pub const NOW_MAX_MS: i64 = 4_102_444_799_999;
+
+/// `update` 的 `change.fail` 為真時 change 回傳的錯誤(Python 端丟出同訊息的 `ProjectError`)。
+pub const CHANGE_FAILED: &str = "修改中途失敗";
+
+/// 依序取用固定序列的 [`project::ids::Clock`](用完後重複最後一個)。
+struct SeqClock {
+    now: Vec<i64>,
+    rand4: Vec<String>,
+    hex8: Vec<String>,
+    pos: std::cell::Cell<[usize; 3]>,
+}
+
+impl SeqClock {
+    fn take<T: Clone>(&self, items: &[T], slot: usize) -> T {
+        let mut pos = self.pos.get();
+        let k = pos[slot].min(items.len() - 1);
+        pos[slot] = pos[slot].saturating_add(1);
+        self.pos.set(pos);
+        items[k].clone()
+    }
+}
+
+impl project::ids::Clock for SeqClock {
+    fn now_ms(&self) -> i64 {
+        self.take(&self.now, 0)
+    }
+    fn rand4(&self) -> String {
+        self.take(&self.rand4, 1)
+    }
+    fn token_hex8(&self) -> String {
+        self.take(&self.hex8, 2)
+    }
+}
+
+fn lower_hex_len(v: &Value, n: usize) -> Option<String> {
+    let s = v.as_str()?;
+    (s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| s.to_string())
+}
+
+/// `clock` 欄位;格式不符回 `None`(→ `error type`)。
+fn seq_clock(v: Option<&Value>) -> Option<SeqClock> {
+    let obj = v?.as_object()?;
+    if obj.len() != 3 {
+        return None;
+    }
+    let list = |k: &str| obj.get(k)?.as_array().filter(|a| !a.is_empty());
+    let now = list("now")?
+        .iter()
+        .map(|x| {
+            x.as_i64()
+                .filter(|n| x.is_i64() && (0..=NOW_MAX_MS).contains(n))
+        })
+        .collect::<Option<Vec<i64>>>()?;
+    let rand4 = list("rand4")?
+        .iter()
+        .map(|x| lower_hex_len(x, 4))
+        .collect::<Option<Vec<String>>>()?;
+    let hex8 = list("hex8")?
+        .iter()
+        .map(|x| lower_hex_len(x, 16))
+        .collect::<Option<Vec<String>>>()?;
+    Some(SeqClock {
+        now,
+        rand4,
+        hex8,
+        pos: std::cell::Cell::new([0; 3]),
+    })
+}
+
+/// 物件 `v` 的鍵都在 `allowed` 內。
+fn keys_within(v: &Map<String, Value>, allowed: &[&str]) -> bool {
+    v.keys().all(|k| allowed.contains(&k.as_str()))
+}
+
+/// JSON 數字(不含布林)→ `f64`(Python 端接受 `int` 與 `float`)。
+fn number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        _ => None,
+    }
+}
+
+/// `create` 的 `defaults`:`speed`、`pause_comma`、`pause_sentence`、`pause_paragraph` 的子集,值為數字;
+/// 未給的鍵用 `DEFAULTS`(與 Python `validate` 補預設的結果相同)。格式不符回 `None`。
+fn create_defaults(v: Option<&Value>) -> Option<Option<project::model::Defaults>> {
+    let Some(v) = v else {
+        return Some(None);
+    };
+    let obj = v.as_object()?;
+    let mut d = project::model::Defaults::default();
+    for (k, x) in obj {
+        let x = number(x)?;
+        match k.as_str() {
+            "speed" => d.speed = x,
+            "pause_comma" => d.pause_comma = x,
+            "pause_sentence" => d.pause_sentence = x,
+            "pause_paragraph" => d.pause_paragraph = x,
+            _ => return None,
+        }
+    }
+    Some(if obj.is_empty() { None } else { Some(d) })
+}
+
+/// 寫入 API 的錯誤 → 結果(同讀取類)。
+fn write_error(e: &Error) -> Value {
+    read_error(e)
+}
+
+fn dump_value(p: &Project) -> Value {
+    match p.dump_bytes() {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(dump) => compact_dump(&dump),
+            Err(_) => Value::Null,
+        },
+        Err(e) => write_error(&e),
+    }
+}
+
+fn saved_result(r: project::Result<project::write::Saved>) -> Value {
+    match r {
+        Ok(s) => json!({"value": s.version, "warnings": s.warnings}),
+        Err(e) => write_error(&e),
+    }
+}
+
+impl FsWork {
+    /// `fs` 操作的 `remove`:相對 `root/` 的路徑,不跟隨連結刪除(目錄連同內容)。
+    fn remove(&self, items: Option<&Value>) -> Result<(), Outcome> {
+        let items = match items {
+            None => return Ok(()),
+            Some(Value::Array(items)) => items,
+            Some(_) => return Err(type_error()),
+        };
+        for item in items {
+            let path = fs_join(&self.root, &fs_rel(Some(item))?);
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| fs_setup_error(&e))?;
+            let r = if meta.is_dir() && !meta.file_type().is_symlink() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                // Windows 上指向目錄的連結要以 remove_dir 刪除連結本身
+                std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path))
+            };
+            r.map_err(|e| fs_setup_error(&e))?;
+        }
+        Ok(())
+    }
+
+    /// 帶內容的快照(`save_sequence` 的輸出):一般檔為字串(同字元連續 ≥ 65 改為 `{"parts"}`)或 `{"hex"}`。
+    fn content_tree(&self) -> Result<Vec<Value>, Outcome> {
+        let rows = self.snapshot().map_err(|e| fs_setup_error(&e))?;
+        Ok(rows
+            .into_iter()
+            .map(|(rel, row, (kind, _, data))| match (kind.as_str(), data) {
+                ("file", Some(bytes)) => {
+                    let content = match String::from_utf8(bytes) {
+                        Ok(s) => compact_dump(&s),
+                        Err(e) => {
+                            let hex: String =
+                                e.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+                            json!({ "hex": hex })
+                        }
+                    };
+                    json!([rel, "file", content])
+                }
+                _ => row,
+            })
+            .collect())
+    }
+}
+
+/// `update` 的 `change`;格式不符回 `None`。
+struct Change {
+    script: Option<String>,
+    name: Option<String>,
+    speed: Option<f64>,
+    fail: bool,
+    ret: Value,
+}
+
+fn parse_change(v: Option<&Value>) -> Option<Change> {
+    let obj = v?.as_object()?;
+    if !keys_within(obj, &["script", "name", "speed", "fail", "return"]) {
+        return None;
+    }
+    Some(Change {
+        script: match obj.get("script") {
+            None => None,
+            Some(t) => Some(text_value(t)?),
+        },
+        name: match obj.get("name") {
+            None => None,
+            Some(n) => Some(n.as_str()?.to_string()),
+        },
+        speed: match obj.get("speed") {
+            None => None,
+            Some(x) => Some(number(x)?),
+        },
+        fail: match obj.get("fail") {
+            None => false,
+            Some(b) => b.as_bool()?,
+        },
+        ret: obj.get("return").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// 執行一個操作,回傳該步的結果;操作格式不符回 `Err(error type)`。
+fn run_op(work: &FsWork, clock: &SeqClock, op: &Value) -> Result<Value, Outcome> {
+    use project::write;
+    let Some(op) = op.as_object() else {
+        return Err(type_error());
+    };
+    let root = work.root.as_path();
+    let kind = op
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(type_error)?;
+    let only = |allowed: &[&str]| {
+        if keys_within(op, allowed) {
+            Ok(())
+        } else {
+            Err(type_error())
+        }
+    };
+    Ok(match kind {
+        "save" => {
+            only(&["op", "project", "script"])?;
+            let data = op
+                .get("project")
+                .filter(|v| v.is_object())
+                .ok_or_else(type_error)?;
+            let script = match op.get("script") {
+                None => None,
+                Some(t) => Some(text_value(t).ok_or_else(type_error)?),
+            };
+            match Project::from_dict(data) {
+                Ok(mut p) => {
+                    if let Some(s) = script {
+                        p.script = s;
+                    }
+                    saved_result(write::save(root, &p, clock))
+                }
+                Err(e) => write_error(&e),
+            }
+        }
+        "update" => {
+            only(&["op", "name", "change"])?;
+            let name = str_arg(op, "name")?;
+            let change = parse_change(op.get("change")).ok_or_else(type_error)?;
+            let r = write::update(root, name, clock, move |p| {
+                if let Some(s) = change.script {
+                    p.script = s;
+                }
+                if let Some(n) = change.name {
+                    p.name = n;
+                }
+                if let Some(x) = change.speed {
+                    p.defaults.speed = x;
+                }
+                if change.fail {
+                    return Err(Error::invalid(CHANGE_FAILED));
+                }
+                Ok(change.ret)
+            });
+            match r {
+                Ok(u) => json!({
+                    "value": {"version": u.version, "extra": u.extra, "dump": dump_value(&u.project)},
+                    "warnings": u.warnings,
+                }),
+                Err(e) => write_error(&e),
+            }
+        }
+        "restore" => {
+            only(&["op", "name", "vid"])?;
+            let (name, vid) = (str_arg(op, "name")?, str_arg(op, "vid")?);
+            saved_result(write::restore(root, name, vid, clock))
+        }
+        "create" => {
+            only(&["op", "name", "script", "defaults"])?;
+            create_step(root, op, clock)?
+        }
+        "load" => {
+            only(&["op", "name"])?;
+            loaded(project::read::load(root, str_arg(op, "name")?))
+        }
+        "load_version" => {
+            only(&["op", "name", "vid"])?;
+            let (name, vid) = (str_arg(op, "name")?, str_arg(op, "vid")?);
+            loaded(project::read::load_version(root, name, vid))
+        }
+        "list_history" => {
+            only(&["op", "name"])?;
+            match project::read::list_history(root, str_arg(op, "name")?) {
+                Ok(v) => json!({ "value": v }),
+                Err(e) => read_error(&e),
+            }
+        }
+        "fs" => {
+            only(&["op", "add", "remove"])?;
+            work.build(&work.root, op.get("add"))?;
+            work.remove(op.get("remove"))?;
+            json!({ "value": null })
+        }
+        _ => return Err(type_error()),
+    })
+}
+
+/// `create` 操作(`save_sequence` 與 `project.create` 共用)。
+fn create_step(root: &Path, op: &Map<String, Value>, clock: &SeqClock) -> Result<Value, Outcome> {
+    let name = str_arg(op, "name")?;
+    let script = match op.get("script") {
+        None => String::new(),
+        Some(t) => text_value(t).ok_or_else(type_error)?,
+    };
+    let defaults = create_defaults(op.get("defaults")).ok_or_else(type_error)?;
+    Ok(
+        match project::write::create(root, name, &script, defaults, clock) {
+            Ok(p) => json!({"value": {"dump": dump_value(&p)}}),
+            Err(e) => write_error(&e),
+        },
+    )
+}
+
+/// 建樹 → 依序執行 → 帶內容的快照;案例結束一律刪除工作目錄。
+fn run_write_case(
+    input: &Value,
+    action: impl FnOnce(&FsWork, &SeqClock, &Map<String, Value>) -> Result<Value, Outcome>,
+) -> Outcome {
+    let Some(obj) = input.as_object() else {
+        return type_error();
+    };
+    if !matches!(obj.get("tree"), Some(Value::Array(_))) {
+        return type_error();
+    }
+    let Some(clock) = seq_clock(obj.get("clock")) else {
+        return type_error();
+    };
+    let work = match FsWork::new() {
+        Ok(w) => w,
+        Err(o) => return o,
+    };
+    if let Err(o) = work
+        .build(&work.root, obj.get("tree"))
+        .and_then(|()| work.build(&work.outside, obj.get("outside")))
+    {
+        return o;
+    }
+    let result = match action(&work, &clock, obj) {
+        Ok(v) => v,
+        Err(o) => return o,
+    };
+    match work.content_tree() {
+        Ok(tree) => {
+            let mut out = result;
+            if let Value::Object(m) = &mut out {
+                m.insert("tree".to_string(), Value::Array(tree));
+            }
+            Outcome::Ok(out)
+        }
+        Err(o) => o,
+    }
+}
+
+/// `project.save_sequence`。
+pub fn project_save_sequence(input: &Value) -> Outcome {
+    if let Some(obj) = input.as_object()
+        && !keys_within(obj, &["tree", "outside", "clock", "ops"])
+    {
+        return type_error();
+    }
+    run_write_case(input, |work, clock, obj| {
+        let ops = obj
+            .get("ops")
+            .and_then(Value::as_array)
+            .filter(|a| !a.is_empty())
+            .ok_or_else(type_error)?;
+        let mut steps = Vec::with_capacity(ops.len());
+        for op in ops {
+            steps.push(run_op(work, clock, op)?);
+        }
+        Ok(json!({ "steps": steps }))
+    })
+}
+
+/// `project.create`。
+pub fn project_create(input: &Value) -> Outcome {
+    if let Some(obj) = input.as_object()
+        && !keys_within(
+            obj,
+            &["tree", "outside", "clock", "name", "script", "defaults"],
+        )
+    {
+        return type_error();
+    }
+    run_write_case(input, |work, clock, obj| {
+        Ok(json!({ "result": create_step(&work.root, obj, clock)? }))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! L1:輸入格式與結果轉換。
@@ -1098,6 +1526,64 @@ mod tests {
             json!({"parts": [{"repeat": "字", "count": 500}]})
         );
         assert_eq!(v["value"][0]["end"], json!(500));
+    }
+
+    #[test]
+    fn write_units_reject_malformed_input_as_type_error() {
+        let clock =
+            json!({"now": [1_793_102_400_000i64], "rand4": ["abcd"], "hex8": ["0000000000000001"]});
+        let ok_ops = json!([{"op": "list_history", "name": "p"}]);
+        let with = |k: &str, v: Value| {
+            let mut c = clock.clone();
+            c[k] = v;
+            json!({"tree": [], "clock": c, "ops": ok_ops})
+        };
+        for input in [
+            json!({"tree": [], "ops": ok_ops}),
+            with("now", json!([])),
+            with("now", json!([NOW_MAX_MS + 1])),
+            with("now", json!([-1])),
+            with("now", json!([true])),
+            with("now", json!([1.5])),
+            with("rand4", json!(["ABCD"])),
+            with("rand4", json!(["abc"])),
+            with("hex8", json!(["0"])),
+            with("x", json!(1)),
+            json!({"tree": [], "clock": clock, "ops": []}),
+            json!({"tree": [], "clock": clock, "ops": [{"op": "nope"}]}),
+            json!({"tree": [], "clock": clock, "ops": [{"op": "save", "project": [1]}]}),
+            json!({"tree": [], "clock": clock, "ops": [{"op": "save", "project": {}, "x": 1}]}),
+            json!({"tree": [], "clock": clock, "ops": [{"op": "update", "name": "p", "change": {"x": 1}}]}),
+            json!({"tree": [], "clock": clock, "ops": [{"op": "update", "name": "p", "change": {"speed": true}}]}),
+            json!({"tree": [], "clock": clock, "ops": ok_ops, "extra": 1}),
+        ] {
+            assert_eq!(project_save_sequence(&input), type_error(), "{input}");
+        }
+        for input in [
+            json!({"tree": [], "clock": clock, "name": "p", "defaults": {"x": 1}}),
+            json!({"tree": [], "clock": clock, "name": 1}),
+            json!({"tree": [], "clock": clock, "name": "p", "defaults": {"speed": "1"}}),
+        ] {
+            assert_eq!(project_create(&input), type_error(), "{input}");
+        }
+        assert_eq!(
+            project_save_sequence(&json!({"tree": [], "clock": clock, "ops": ok_ops})),
+            Outcome::Ok(
+                json!({"steps": [{"value": []}], "tree": [["outside", "dir", null], ["root", "dir", null]]})
+            )
+        );
+    }
+
+    #[test]
+    fn seq_clock_repeats_the_last_item() {
+        use project::ids::Clock;
+        let c = seq_clock(Some(&json!({"now": [1, 2], "rand4": ["aaaa"], "hex8": ["0000000000000001", "0000000000000002"]})))
+            .expect("合格");
+        assert_eq!([c.now_ms(), c.now_ms(), c.now_ms()], [1, 2, 2]);
+        assert_eq!([c.rand4(), c.rand4()], ["aaaa", "aaaa"]);
+        assert_eq!(c.token_hex8(), "0000000000000001");
+        assert_eq!(c.token_hex8(), "0000000000000002");
+        assert_eq!(c.token_hex8(), "0000000000000002");
     }
 
     #[test]

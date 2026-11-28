@@ -18,6 +18,11 @@
 # T5 · 對應測試:crates/project/tests/cross_lang_lock.rs(Unix,「Python 持專案鎖時 Rust 等待,反之亦然」:Python
 # _project_lock 持鎖時 Rust 在 0.5 秒觀察期內不返回、Python 寫出 releasing 後才取得,反向相同;Python 被終止後 Rust 取得;
 # Linux 區辨測試),Rust 對 Rust 跨行程見 crates/project/tests/cross_process_lock.rs(三平台),同行程與鎖檔見 crates/project/tests/lock.rs
+# T6 · 對應測試:crates/project/tests/roundtrip.rs(Unix,「Rust 存檔後 Python 能載入且內容相同,反之亦然」:語料為
+# validate_text.json 的全部接受案例與 save_sequence / create 的 Python 寫出檔,兩個方向逐位元組比對,另含 history 往返)、
+# crates/parity/tests/project_parity.rs(fixture crates/parity/fixtures/project/save_sequence.json、create.json)與
+# crates/project/tests/history.rs(「同一毫秒連續存檔版本時間戳嚴格遞增、只留最近 10 版」,輪替的刪除選取規則)、
+# crates/project/tests/names_rules.rs(「以保留名稱建立新專案被拒」,行為差異 D-7),原子寫入與 update 見 crates/project/tests/write.rs
 # T1 新增第一個場景;T2~T7 各補場景(CHG-20261128-01「### Behaviour spec」)
 功能: 專案資料模型的 Rust 移植
 
@@ -56,3 +61,17 @@
     當 Rust 取同一專案的鎖
     那麼 Rust 等到 Python 釋放後才取得
     而且 反過來 Rust 持鎖時 Python 也等待
+
+  場景: Rust 存檔後 Python 能載入且內容相同,反之亦然
+    假設 Rust 把一個專案存檔
+    那麼 Python 載入後寫出的位元組與 Rust 的檔案相同
+    而且 Python 存檔後 Rust 載入的結果也與 Python 的檔案相同
+
+  場景: 同一毫秒連續存檔版本時間戳嚴格遞增、只留最近 10 版
+    假設 時鐘固定在同一毫秒
+    當 Rust 連續存檔 12 次
+    那麼 history 的版本時間戳依序遞增 1 毫秒,只留最近 10 版,被刪的是最舊的
+
+  場景: 以保留名稱建立新專案被拒
+    當 以 CON 建立新專案
+    那麼 Rust 回報名稱不合格,沒有建立任何目錄
