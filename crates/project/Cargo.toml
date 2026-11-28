@@ -20,3 +20,8 @@ safe-fs = { path = "../safe-fs", version = "=0.0.0" }
 [lib]
 name = "project"
 path = "src/lib.rs"
+
+# 使用者 Mac 唯讀比對用的執行檔(CHG-20261128-01 代決 19、20;T4):只呼叫讀取 API,結果寫到 stdout
+[[bin]]
+name = "project-readonly-dump"
+path = "src/bin/project-readonly-dump.rs"

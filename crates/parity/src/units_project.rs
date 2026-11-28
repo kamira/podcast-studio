@@ -26,6 +26,7 @@
 //! | `project.is_post_fresh` | `{"segment"}` | `{"value": 布林}` |
 //! | `project.is_default_post` | `{"segment"}` | `{"value": 布林}` |
 //! | `project.effective` | `{"segment", "defaults"?}` | `{"value": {"speed", "pause"}, "repr"}` |
+//! | `project.load`、`project.load_version`、`project.list_history`、`project.list_projects`、`project.disk_usage` | `{"tree", "outside"?, "name"?, "vid"?}`(合成檔案樹,T4) | `{"result", "tree", "changed"}`(見「T4:讀取」) |
 //!
 //! 片段類單元(T3):兩邊都把 `segment` 放進 `{"schema_version": 2, "name": "p", "segments": [segment]}`(`effective` 另把
 //! 給定的 `defaults` 放進去)以 `validate` 驗證——Python 呼叫端傳入的就是驗證後的片段;驗證失敗時回 `validate` 的
@@ -51,6 +52,10 @@
 //!
 //! `project.py_json` 的物件鍵:fixture 經 `serde_json` 解析後鍵已依碼位排序,送給 Python 的請求也是排序後的鍵,
 //! 兩邊收到同一個鍵順序(依建構順序寫出由 `crates/project/tests/pyjson.rs` 的 `Entries` 與結構測試鎖住)。
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use project::model::Segment;
 use project::pyjson::{self, Entries};
@@ -496,6 +501,397 @@ pub fn project_effective(input: &Value) -> Outcome {
         }),
         Err(o) => o,
     }
+}
+
+// ---------- T4:讀取(合成檔案樹) ----------
+//
+// 輸入 `{"tree": [項目…], "outside"?: [項目…], "name"?, "vid"?}`:單元在系統暫存目錄**排他建立唯一名稱的工作目錄**
+// (前綴 [`FS_WORK_PREFIX`];Python 端 `parity-project-fs-py-`),其下放 `root/`(資料根目錄,= Python `project.ROOT`,
+// 依 `tree` 建立)與 `outside/`(依 `outside` 建立);先 `canonicalize`(Windows 為 `\\?\` 形式,才建得出
+// `CON` 等保留裝置名的目錄)。**案例結束即刪除**(`Drop` 守衛)。項目:
+// `{"path", "type": "dir"}`、`{"path", "type": "file", "content"?: 字串 | {"parts"} | {"hex"}, "mtime"?: 毫秒}`
+// (未給 `mtime` 為 [`DEFAULT_MTIME_MS`])、`{"path", "type": "symlink", "target": "@root/…" | "@outside/…" | "@missing",
+// "kind": "dir" | "file"}`。輸出 `{"result": 結果, "tree": [[相對路徑, 型別, 連結記號或 null]…], "changed": [相對路徑…]}`:
+// `tree` 為呼叫後的快照(工作目錄下、依相對路徑排序),`changed` 為呼叫前後型別、修改時間、內容或連結目標有任何不同的
+// 路徑(含新增與消失;讀取 API 不得改動任何東西,預期為空)。結果:接受時 `{"dump"}` 或 `{"value"}`,拒絕時
+// `{"class", "errors"}`(檔案系統錯誤只有 `{"class": "os_error"}`)。`name`、`vid` 須為字串,否則 `error type`
+// (Rust API 收 `&str`,D-12)。Windows 無法建立符號連結時回 `error symlink_privilege`(只會出現在 Windows,
+// `tests/project_parity.rs` 依此略過並先 `assert!(!in_ci())`)。
+//
+// | 單元 | 欄位 | 接受時的結果 |
+// |------|------|--------------|
+// | `project.load` | `name` | `{"dump": Project::dump_bytes 的字串或 {"parts"}}` |
+// | `project.load_version` | `name`、`vid` | 同上 |
+// | `project.list_history` | `name` | `{"value": [版本 id…]}` |
+// | `project.list_projects` | — | `{"value": [{"name", "updated": 修改時間(秒,浮點)}…]}` |
+// | `project.disk_usage` | `name` | `{"value": 位元組數}` |
+
+/// 讀取類單元的工作目錄名稱前綴(Python 端為 `parity-project-fs-py-`)。
+pub const FS_WORK_PREFIX: &str = "parity-project-fs-rs-";
+
+/// 合成檔案樹中未指定 `mtime` 的檔案的修改時間(2026-01-01T00:00:00Z,毫秒)。
+pub const DEFAULT_MTIME_MS: i64 = 1_767_225_600_000;
+
+/// Windows 無法建立符號連結時的錯誤類別(與 `safe_fs.*` 相同)。
+pub const FS_SYMLINK_PRIVILEGE: &str = "symlink_privilege";
+
+static FS_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn fs_error(class: &str) -> Outcome {
+    Outcome::Error {
+        class: class.to_string(),
+    }
+}
+
+fn fs_setup_error(e: &std::io::Error) -> Outcome {
+    if safe_fs::support::is_symlink_privilege_error(e) {
+        fs_error(FS_SYMLINK_PRIVILEGE)
+    } else {
+        fs_error("setup")
+    }
+}
+
+/// fixture 內的相對路徑(以 `/` 分隔);不合法(非字串、空段、`.`、`..`、反斜線)→ `error type`。
+fn fs_rel(v: Option<&Value>) -> Result<Vec<String>, Outcome> {
+    let Some(Value::String(s)) = v else {
+        return Err(type_error());
+    };
+    let parts: Vec<String> = s.split('/').map(str::to_string).collect();
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || p == "." || p == ".." || p.contains('\\'))
+    {
+        return Err(type_error());
+    }
+    Ok(parts)
+}
+
+fn fs_join(base: &Path, parts: &[String]) -> PathBuf {
+    parts.iter().fold(base.to_path_buf(), |p, s| p.join(s))
+}
+
+/// 快照中一個項目的狀態(型別、修改時間、內容或連結目標)。
+type FsState = (String, i128, Option<Vec<u8>>);
+
+/// 讀取類單元的暫存工作目錄;`Drop` 時刪除(`remove_dir_all` 不跟隨連結)。
+struct FsWork {
+    base: PathBuf,
+    root: PathBuf,
+    outside: PathBuf,
+    missing: PathBuf,
+}
+
+impl Drop for FsWork {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+impl FsWork {
+    fn new() -> Result<FsWork, Outcome> {
+        let tmp = std::env::temp_dir();
+        loop {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let made = tmp.join(format!(
+                "{FS_WORK_PREFIX}{}-{}-{nanos}",
+                std::process::id(),
+                FS_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&made) {
+                Ok(()) => {
+                    // 先建立守衛(以建立時的路徑),之後的任何失敗都會刪除工作目錄
+                    let mut w = FsWork {
+                        root: made.join("root"),
+                        outside: made.join("outside"),
+                        missing: made.join("missing"),
+                        base: made,
+                    };
+                    let base = std::fs::canonicalize(&w.base).map_err(|e| fs_setup_error(&e))?;
+                    w.root = base.join("root");
+                    w.outside = base.join("outside");
+                    w.missing = base.join("missing");
+                    w.base = base;
+                    std::fs::create_dir(&w.root).map_err(|e| fs_setup_error(&e))?;
+                    std::fs::create_dir(&w.outside).map_err(|e| fs_setup_error(&e))?;
+                    return Ok(w);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(fs_setup_error(&e)),
+            }
+        }
+    }
+
+    fn target(&self, token: Option<&Value>) -> Result<PathBuf, Outcome> {
+        let Some(Value::String(t)) = token else {
+            return Err(type_error());
+        };
+        if t == "@missing" {
+            return Ok(self.missing.clone());
+        }
+        for (prefix, base) in [("@root", &self.root), ("@outside", &self.outside)] {
+            if t == prefix {
+                return Ok(base.clone());
+            }
+            if let Some(rest) = t.strip_prefix(prefix).and_then(|r| r.strip_prefix('/')) {
+                let rest = Value::String(rest.to_string());
+                return Ok(fs_join(base, &fs_rel(Some(&rest))?));
+            }
+        }
+        Err(type_error())
+    }
+
+    fn token(&self, target: &Path) -> String {
+        if target == self.missing {
+            return "@missing".to_string();
+        }
+        for (prefix, base) in [("@root", &self.root), ("@outside", &self.outside)] {
+            if target == base.as_path() {
+                return prefix.to_string();
+            }
+            if let Ok(rest) = target.strip_prefix(base) {
+                let rel: Vec<String> = rest
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect();
+                return format!("{prefix}/{}", rel.join("/"));
+            }
+        }
+        "@other".to_string()
+    }
+
+    fn build(&self, base: &Path, items: Option<&Value>) -> Result<(), Outcome> {
+        let items = match items {
+            None => return Ok(()),
+            Some(Value::Array(items)) => items,
+            Some(_) => return Err(type_error()),
+        };
+        let io = |r: std::io::Result<()>| r.map_err(|e| fs_setup_error(&e));
+        for item in items {
+            let Value::Object(item) = item else {
+                return Err(type_error());
+            };
+            let path = fs_join(base, &fs_rel(item.get("path"))?);
+            let parent = path.parent().map(Path::to_path_buf);
+            match item.get("type").and_then(Value::as_str) {
+                Some("dir") => io(std::fs::create_dir_all(&path))?,
+                Some("file") => {
+                    let content = match item.get("content") {
+                        None => Vec::new(),
+                        Some(v) => text_bytes(v).ok_or_else(type_error)?,
+                    };
+                    let mtime = match item.get("mtime") {
+                        None => DEFAULT_MTIME_MS,
+                        Some(v) => v.as_i64().filter(|_| v.is_i64()).ok_or_else(type_error)?,
+                    };
+                    let when = if mtime >= 0 {
+                        UNIX_EPOCH + std::time::Duration::from_millis(mtime.unsigned_abs())
+                    } else {
+                        UNIX_EPOCH - std::time::Duration::from_millis(mtime.unsigned_abs())
+                    };
+                    if let Some(p) = &parent {
+                        io(std::fs::create_dir_all(p))?;
+                    }
+                    io(std::fs::write(&path, &content))?;
+                    io(std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .and_then(|f| f.set_modified(when)))?;
+                }
+                Some("symlink") => {
+                    let dir = match item.get("kind").and_then(Value::as_str) {
+                        Some("dir") => true,
+                        Some("file") => false,
+                        _ => return Err(type_error()),
+                    };
+                    let target = self.target(item.get("target"))?;
+                    if let Some(p) = &parent {
+                        io(std::fs::create_dir_all(p))?;
+                    }
+                    io(safe_fs::support::symlink(&target, &path, dir))?;
+                }
+                _ => return Err(type_error()),
+            }
+        }
+        Ok(())
+    }
+
+    /// 工作目錄下的快照(不跟隨連結):相對路徑 → 狀態;另回傳輸出用的列。
+    fn snapshot(&self) -> std::io::Result<Vec<(String, Value, FsState)>> {
+        let mut out = Vec::new();
+        let mut stack = vec![(self.base.clone(), String::new())];
+        while let Some((dir, rel)) = stack.pop() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let r = if rel.is_empty() {
+                    name
+                } else {
+                    format!("{rel}/{name}")
+                };
+                let path = entry.path();
+                let meta = std::fs::symlink_metadata(&path)?;
+                let mtime = meta
+                    .modified()
+                    .map(project::read::mtime_ns)
+                    .unwrap_or_default();
+                let (row, state) = if meta.file_type().is_symlink() {
+                    let target = std::fs::read_link(&path)?;
+                    let token = self.token(&target);
+                    (
+                        json!([r, "symlink", token]),
+                        ("symlink".to_string(), mtime, Some(token.into_bytes())),
+                    )
+                } else if meta.is_dir() {
+                    stack.push((path, r.clone()));
+                    (json!([r, "dir", null]), ("dir".to_string(), mtime, None))
+                } else if meta.is_file() {
+                    let bytes = std::fs::read(&path)?;
+                    (
+                        json!([r, "file", null]),
+                        ("file".to_string(), mtime, Some(bytes)),
+                    )
+                } else {
+                    (
+                        json!([r, "other", null]),
+                        ("other".to_string(), mtime, None),
+                    )
+                };
+                out.push((r, row, state));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+}
+
+/// 讀取 API 的錯誤 → 結果(`os_error` 只有類別)。
+fn read_error(e: &Error) -> Value {
+    if e.class() == "os_error" {
+        json!({"class": "os_error"})
+    } else {
+        json!({"class": e.class(), "errors": e.errors()})
+    }
+}
+
+fn loaded(r: project::Result<Project>) -> Value {
+    match r.and_then(|p| p.dump_bytes()) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(dump) => json!({ "dump": compact_dump(&dump) }),
+            Err(_) => json!({"class": "os_error"}),
+        },
+        Err(e) => read_error(&e),
+    }
+}
+
+fn str_arg<'a>(input: &'a Map<String, Value>, key: &str) -> Result<&'a str, Outcome> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(type_error)
+}
+
+/// 建樹 → 快照 → 呼叫 → 快照;案例結束一律刪除工作目錄。
+fn run_fs_case(
+    input: &Value,
+    action: impl FnOnce(&Path, &Map<String, Value>) -> Result<Value, Outcome>,
+) -> Outcome {
+    let Some(obj) = input.as_object() else {
+        return type_error();
+    };
+    if !matches!(obj.get("tree"), Some(Value::Array(_))) {
+        return type_error();
+    }
+    let work = match FsWork::new() {
+        Ok(w) => w,
+        Err(o) => return o,
+    };
+    if let Err(o) = work
+        .build(&work.root, obj.get("tree"))
+        .and_then(|()| work.build(&work.outside, obj.get("outside")))
+    {
+        return o;
+    }
+    let Ok(before) = work.snapshot() else {
+        return fs_error("setup");
+    };
+    let result = match action(&work.root, obj) {
+        Ok(v) => v,
+        Err(o) => return o,
+    };
+    let Ok(after) = work.snapshot() else {
+        return fs_error("setup");
+    };
+    let map = |s: &[(String, Value, FsState)]| -> std::collections::BTreeMap<String, FsState> {
+        s.iter().map(|(r, _, st)| (r.clone(), st.clone())).collect()
+    };
+    let (b, a) = (map(&before), map(&after));
+    let keys: std::collections::BTreeSet<&String> = b.keys().chain(a.keys()).collect();
+    let changed: Vec<&String> = keys
+        .into_iter()
+        .filter(|k| b.get(*k) != a.get(*k))
+        .collect();
+    let tree: Vec<Value> = after.into_iter().map(|(_, row, _)| row).collect();
+    Outcome::Ok(json!({"result": result, "tree": tree, "changed": changed}))
+}
+
+/// `project.load`。
+pub fn project_load(input: &Value) -> Outcome {
+    run_fs_case(input, |root, obj| {
+        Ok(loaded(project::read::load(root, str_arg(obj, "name")?)))
+    })
+}
+
+/// `project.load_version`。
+pub fn project_load_version(input: &Value) -> Outcome {
+    run_fs_case(input, |root, obj| {
+        let (name, vid) = (str_arg(obj, "name")?, str_arg(obj, "vid")?);
+        Ok(loaded(project::read::load_version(root, name, vid)))
+    })
+}
+
+/// `project.list_history`。
+pub fn project_list_history(input: &Value) -> Outcome {
+    run_fs_case(input, |root, obj| {
+        Ok(
+            match project::read::list_history(root, str_arg(obj, "name")?) {
+                Ok(v) => json!({ "value": v }),
+                Err(e) => read_error(&e),
+            },
+        )
+    })
+}
+
+/// `project.list_projects`(`updated` 為 Python `st_mtime` 同一算式的秒數)。
+pub fn project_list_projects(input: &Value) -> Outcome {
+    run_fs_case(input, |root, _| {
+        Ok(match project::read::list_projects(root) {
+            Ok(list) => {
+                let v: Vec<Value> = list
+                    .iter()
+                    .map(|p| {
+                        json!({"name": p.name, "updated": project::read::mtime_seconds(p.updated)})
+                    })
+                    .collect();
+                json!({ "value": v })
+            }
+            Err(e) => read_error(&e),
+        })
+    })
+}
+
+/// `project.disk_usage`。
+pub fn project_disk_usage(input: &Value) -> Outcome {
+    run_fs_case(input, |root, obj| {
+        Ok(
+            match project::read::disk_usage(root, str_arg(obj, "name")?) {
+                Ok(n) => json!({ "value": n }),
+                Err(e) => read_error(&e),
+            },
+        )
+    })
 }
 
 #[cfg(test)]

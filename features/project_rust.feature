@@ -11,6 +11,10 @@
 # tts_text、fused_out、model_units、shift_marks(「分句與合成文字與 Python 相同」)與 post_params、post_key、is_post_fresh、
 # is_default_post、effective(「後製鍵與 Python 相同」);片段類單元兩邊都先以 validate 驗證),
 # 移植的 Python 案例與未驗證片段的重新檢查見 crates/project/tests/text.rs、post.rs,自寫 SHA-256 見 crates/project/tests/sha256.rs
+# T4 · 對應測試:crates/parity/tests/project_parity.rs(fixture crates/parity/fixtures/project/ 的 load、load_version、
+# list_history、list_projects、disk_usage;合成檔案樹,結果另含呼叫後的樹與 changed(須為空))與 crates/project/tests/read.rs
+# (「Rust 載入既有專案的結果與 Python 相同且不改動任何檔案」);crates/project/tests/readonly_tool.rs(Unix,「唯讀比對只回報數量」:
+# 六行輸出與前後雜湊清單),非 UTF-8 目錄項見 crates/project/tests/non_utf8.rs,Windows 保留裝置名見 crates/project/tests/windows.rs
 # T1 新增第一個場景;T2~T7 各補場景(CHG-20261128-01「### Behaviour spec」)
 功能: 專案資料模型的 Rust 移植
 
@@ -33,3 +37,13 @@
   場景: 後製鍵與 Python 相同
     假設 同一個片段的後製參數
     那麼 兩邊算出的後製鍵相同
+
+  場景: Rust 載入既有專案的結果與 Python 相同且不改動任何檔案
+    假設 projects/ 內有一般專案、v1 專案、損壞的專案與 history 版本
+    當 Rust 以唯讀方式列出並載入全部專案與版本
+    那麼 每一筆結果與 Python 相同
+    而且 載入前後 projects/ 內每個檔案的雜湊不變、沒有新增任何檔案
+
+  場景: 唯讀比對只回報數量
+    當 唯讀比對工具跑完
+    那麼 輸出只有專案數、版本數、一致與不一致的筆數與雜湊是否一致,沒有任何專案名稱或內容
