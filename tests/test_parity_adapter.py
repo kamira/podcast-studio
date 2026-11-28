@@ -469,7 +469,9 @@ PROJECT_UNITS = ["constants", "normalize_speed", "normalize_pause", "check_zhuyi
                  # T4:讀取(合成檔案樹)
                  "load", "load_version", "list_history", "list_projects", "disk_usage",
                  # T6:寫入(合成檔案樹 + 注入的時鐘與隨機碼)
-                 "save_sequence", "create"]
+                 "save_sequence", "create",
+                 # T7:回收與清理(合成檔案樹)
+                 "trash", "startup_cleanup", "unlink_in", "check_quota"]
 needs_posix_project = pytest.mark.skipif(
     sys.platform == "win32", reason="project.py 頂層 import fcntl,在 Windows 無法載入(CHG-20261128-01 事實 H)")
 
@@ -712,6 +714,76 @@ def test_project_寫入類單元的輸入格式():
             {"id": "s", "input": {"tree": [], "clock": T6_CLOCK, "name": "p", "defaults": {"speed": "1"}}}]
     got = [strip(r) for r in responses_split_on_newline(run_adapter("project.create", creq))]
     assert got == [error("type")] * 3
+
+
+@needs_posix_project
+def test_project_回收與清理單元_工作目錄刪除且替身還原():
+    """T7:四個單元結束後(含中途 error type)工作目錄不存在,`project.ROOT`、`project.time`、`project.secrets` 與 logger 的
+    handler 還原。"""
+    probe = (
+        "import json, runpy, sys, logging\n"
+        "g = runpy.run_path(sys.argv[1], run_name='adapter_probe')\n"
+        "import project as pj\n"
+        "saved = (pj.ROOT, pj.time, pj.secrets, list(logging.getLogger('project').handlers))\n"
+        "clock = json.loads(sys.argv[2])\n"
+        "out = [g['project_trash']({'tree': [{'path': 'projects/p/project.json', 'type': 'file'}],\n"
+        "                          'clock': clock, 'name': 'p', 'confirm': True})['result']]\n"
+        "out.append(g['project_startup_cleanup']({'tree': [], 'now_us': 0})['result'])\n"
+        "for fn, bad in (('project_trash', {'tree': [], 'clock': clock, 'name': 'p'}),\n"
+        "                ('project_startup_cleanup', {'tree': [], 'now_us': -1}),\n"
+        "                ('project_unlink_in', {'tree': [], 'name': 'p', 'sub': 'history', 'filename': 'x'}),\n"
+        "                ('project_check_quota', {'tree': [], 'name': 'p', 'incoming': True})):\n"
+        "    try:\n"
+        "        g[fn](bad)\n"
+        "        raise AssertionError(fn)\n"
+        "    except g['UnitError'] as e:\n"
+        "        assert e.cls == 'type', fn\n"
+        "now = (pj.ROOT, pj.time, pj.secrets, list(logging.getLogger('project').handlers))\n"
+        "assert now == saved, '替身須還原'\n"
+        "print(json.dumps(out, ensure_ascii=False))\n"
+    )
+    before = _project_fs_work_dirs()
+    proc = subprocess.run(
+        [sys.executable, "-c", probe, str(ADAPTER), json.dumps(T6_CLOCK)],
+        capture_output=True, timeout=60, check=False, cwd=str(ADAPTER.parent),
+        env=dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1"),
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert json.loads(proc.stdout.decode("utf-8")) == [
+        {"value": "p-20261027-120000-000-abcd"},
+        {"value": {"trash_removed": [], "tmp_cleared": 0, "warnings": []}}]
+    assert _project_fs_work_dirs() <= before
+
+
+@needs_posix_project
+def test_project_回收與清理單元的輸入格式():
+    """T7:多餘的鍵、缺少的欄位、型別不符(布林、浮點、超出範圍)一律 error type;`confirm` 原樣交給 Python。"""
+    cases = {
+        "project.trash": [{"tree": [], "clock": T6_CLOCK, "name": "p"},
+                          {"tree": [], "clock": T6_CLOCK, "name": 1, "confirm": True},
+                          {"tree": [], "name": "p", "confirm": True},
+                          {"tree": [], "clock": T6_CLOCK, "name": "p", "confirm": True, "x": 1}],
+        "project.startup_cleanup": [{"tree": []}, {"tree": [], "now_us": 1.0}, {"tree": [], "now_us": True},
+                                    {"tree": [], "now_us": -1}, {"tree": [], "now_us": 4102444800000000},
+                                    {"tree": [], "now_us": 0, "x": 1}, {"now_us": 0}],
+        "project.unlink_in": [{"tree": [], "name": "p", "sub": "history", "filename": "x"},
+                              {"tree": [], "name": "p", "sub": "assets"},
+                              {"tree": [], "name": "p", "sub": "assets", "filename": 1},
+                              {"tree": [], "name": "p", "sub": "assets", "filename": "x", "x": 1}],
+        "project.check_quota": [{"tree": [], "name": "p"}, {"tree": [], "name": "p", "incoming": -1},
+                                {"tree": [], "name": "p", "incoming": 2 ** 64},
+                                {"tree": [], "name": "p", "incoming": 1.0},
+                                {"tree": [], "name": "p", "incoming": False},
+                                {"tree": [], "name": "p", "incoming": 0, "x": 1}],
+    }
+    for unit, bad in cases.items():
+        reqs = [{"id": str(i), "input": b} for i, b in enumerate(bad)]
+        got = [strip(r) for r in responses_split_on_newline(run_adapter(unit, reqs))]
+        assert got == [error("type")] * len(bad), unit
+    reqs = [{"id": "t", "input": {"tree": [{"path": "projects/p/project.json", "type": "file"}],
+                                  "clock": T6_CLOCK, "name": "p", "confirm": 1}}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.trash", reqs))]
+    assert got[0]["value"]["result"] == {"class": "project_error", "errors": ["刪除專案需要確認(confirm: true)"]}
 
 
 @needs_posix_project

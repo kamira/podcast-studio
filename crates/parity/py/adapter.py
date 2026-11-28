@@ -57,6 +57,9 @@ T6 加寫入 2 個單元:`project.save_sequence`(`{"tree", "outside"?, "clock", 
 `create`、讀取與 `fs` 操作)與 `project.create`——同一種工作目錄;案例期間暫時把 `project.time`、`project.secrets` 換成
 依序取用 `clock` 序列的替身(`now` / `rand4` / `hex8`,用完後重複最後一個)、在 `project` logger 掛上收集警告的 handler,
 回每步結果與最後帶內容的樹;案例結束一律還原 `project.ROOT`、`project.time`、`project.secrets` 並刪除工作目錄。
+T7 加回收與清理 4 個單元:`project.trash`(同 T6 的時鐘替身)、`project.startup_cleanup`(`now_us` 微秒)、
+`project.unlink_in`、`project.check_quota`——同一種工作目錄,回呼叫結果與最後帶內容的樹(`check_quota` 同 T4 讀取類,
+另回 `changed`);案例結束一律還原並刪除工作目錄。
 """
 from __future__ import annotations
 
@@ -1367,6 +1370,109 @@ def project_create(value):
                                lambda pj, work, v, warns: {"result": _project_create_step(pj, v)})
 
 
+# ---------- project.* T7:回收與清理(合成檔案樹;Rust 端 units_project.rs「T7:回收與清理」) ----------
+# `project.trash` 輸入 `{"tree", "outside"?, "clock", "name", "confirm"}`(`confirm` 原樣傳入,`True` 以外一律被拒;
+# 時鐘與隨機碼同 T6 的替身),輸出 `{"result", "tree"}`(帶內容的樹);`project.startup_cleanup` 輸入
+# `{"tree", "outside"?, "now_us"}`(`now_us` 為 UNIX 紀元起的微秒,0~`PROJECT_NOW_MAX_US` 的整數,以
+# `datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=now_us)` 傳入——與 `studio_server` 傳入
+# `datetime.now(timezone.utc)` 同一條路徑),接受時 `{"value": {"trash_removed", "tmp_cleared", "warnings"}}`,
+# 輸出 `{"result", "tree"}`;`project.unlink_in` 輸入 `{"tree", "outside"?, "name", "sub", "filename"}`(`sub` 為
+# `audio` / `assets` / `tmp`),輸出 `{"result", "tree"}`;`project.check_quota` 輸入 `{"tree", "outside"?, "name",
+# "incoming"}`(`incoming` 為 0~2**64-1 的整數),輸出同 T4 讀取類的 `{"result", "tree", "changed"}`。
+# 接受時 `{"value": …}`(`unlink_in` / `check_quota` 為 null),拒絕時 `{"class", "errors"}`(`os_error` 只有類別)。
+
+PROJECT_NOW_MAX_US = 4_102_444_799_999_999     # 2099-12-31T23:59:59.999999Z
+PROJECT_INCOMING_MAX = 2 ** 64 - 1
+PROJECT_SUBDIRS = ("audio", "assets", "tmp")
+
+
+def _project_int_in(v, lo, hi):
+    if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
+        raise _type_error()
+    return v
+
+
+def project_trash(value):
+    """project.trash(T7):`{"tree", "outside"?, "clock", "name", "confirm"}` → `{"result", "tree"}`。"""
+    def action(pj, work, v, warns):
+        name = _project_str_arg(v, "name")
+        if "confirm" not in v:
+            raise _type_error()
+        try:
+            dest = pj.trash(name, confirm=v["confirm"])
+        except (pj.ProjectError, OSError) as e:
+            return {"result": _project_read_error(e, pj)}
+        return {"result": {"value": dest}}
+    return _project_write_case(value, ("tree", "outside", "clock", "name", "confirm"), action)
+
+
+def _project_tree_case(value, allowed, action):
+    """建樹 → 呼叫(`project.ROOT` 指向 root/)→ 帶內容的快照;一律還原 `project.ROOT` 並刪除工作目錄。"""
+    import project as pj
+    if not isinstance(value, dict) or not set(value) <= set(allowed) or not isinstance(value.get("tree"), list):
+        raise _type_error()
+    work = _ProjectFsWork()
+    saved = pj.ROOT
+    try:
+        work.build(work.root, value["tree"])
+        work.build(work.outside, value.get("outside"))
+        pj.ROOT = Path(work.root)
+        try:
+            result = action(pj, value)
+        finally:
+            pj.ROOT = saved
+        return {"result": result, "tree": _project_content_tree(work)}
+    finally:
+        work.close()
+
+
+def project_startup_cleanup(value):
+    """project.startup_cleanup(T7):`{"tree", "outside"?, "now_us"}` → `{"result", "tree"}`。"""
+    from datetime import datetime, timedelta, timezone
+
+    def action(pj, v):
+        us = _project_int_in(v.get("now_us"), 0, PROJECT_NOW_MAX_US)
+        now = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=us)
+        try:
+            r = pj.startup_cleanup(now)
+        except (pj.ProjectError, OSError) as e:
+            return _project_read_error(e, pj)
+        return {"value": {"trash_removed": list(r["trash_removed"]), "tmp_cleared": r["tmp_cleared"],
+                          "warnings": list(r["warnings"])}}
+    return _project_tree_case(value, ("tree", "outside", "now_us"), action)
+
+
+def project_unlink_in(value):
+    """project.unlink_in(T7):`{"tree", "outside"?, "name", "sub", "filename"}` → `{"result", "tree"}`。"""
+    def action(pj, v):
+        name, filename = _project_str_arg(v, "name"), _project_str_arg(v, "filename")
+        sub = v.get("sub")
+        if sub not in PROJECT_SUBDIRS:
+            raise _type_error()
+        try:
+            pj.unlink_in(name, sub, filename)
+        except (pj.ProjectError, OSError) as e:
+            return _project_read_error(e, pj)
+        return {"value": None}
+    return _project_tree_case(value, ("tree", "outside", "name", "sub", "filename"), action)
+
+
+def project_check_quota(value):
+    """project.check_quota(T7):`{"tree", "outside"?, "name", "incoming"}` → `{"result", "tree", "changed"}`。"""
+    if not isinstance(value, dict) or not set(value) <= {"tree", "outside", "name", "incoming"}:
+        raise _type_error()
+
+    def action(pj, v):
+        name = _project_str_arg(v, "name")
+        incoming = _project_int_in(v.get("incoming"), 0, PROJECT_INCOMING_MAX)
+        try:
+            pj.check_quota(name, incoming)
+        except (pj.ProjectError, OSError) as e:
+            return _project_read_error(e, pj)
+        return {"value": None}
+    return _project_fs_case(value, action)
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -1417,6 +1523,10 @@ def build_units(environ=None):
         "project.disk_usage": project_disk_usage,
         "project.save_sequence": project_save_sequence,
         "project.create": project_create,
+        "project.trash": project_trash,
+        "project.startup_cleanup": project_startup_cleanup,
+        "project.unlink_in": project_unlink_in,
+        "project.check_quota": project_check_quota,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep

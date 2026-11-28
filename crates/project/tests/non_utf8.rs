@@ -7,6 +7,10 @@
 //! 結果(代決 16):`list_projects` 略過、`case_variant` 略過(摺疊鍵不可能相等)、`list_history` 略過(`HISTORY_RE`
 //! 不會符合)、`disk_usage` 照常計入一般檔的大小(Python 以 `surrogateescape` 名稱同樣計入);呼叫前後樹快照相同。
 //! Linux 另以 Python 子程序對同一棵樹確認結果相同。`--nocapture` 印出每個 API 的處理結果。
+//!
+//! T7(`startup_cleanup`,代決 16、D-11):非 UTF-8 名稱的專案目錄記「名稱不合規則」警告並略過(其 `tmp/` 不清空);
+//! 回收項目名稱以替代字元(`to_string_lossy`)比對 `TRASH_RE`——前段非 UTF-8、後段時間戳有效且滿 30 天者以原始名稱刪除,
+//! `trash_removed` 與警告以替代字元顯示;時間戳段含非 UTF-8 者記「名稱不含時間戳」警告並略過。
 
 mod common;
 
@@ -16,7 +20,7 @@ use std::ffi::{OsStr, OsString};
 #[cfg(any(target_os = "linux", windows))]
 use common::{ProjectsGuard, TempTree};
 #[cfg(any(target_os = "linux", windows))]
-use project::read;
+use project::{cleanup, read};
 #[cfg(target_os = "linux")]
 use serde_json::json;
 
@@ -75,6 +79,54 @@ fn check_apis(bad: &OsStr, platform: &str) -> TempTree {
     t
 }
 
+/// T7:啟動清理對非 UTF-8 名稱的處理(代決 16、D-11)。
+#[cfg(any(target_os = "linux", windows))]
+fn check_cleanup(bad: &OsStr, platform: &str) {
+    use std::time::{Duration, UNIX_EPOCH};
+    let t = TempTree::new("project-t7-nonutf8-");
+    let trash = t.path.join("projects").join(".trash");
+    // 2026-09-26T12:00:00Z:對 2026-10-27T12:00:00Z 已滿 30 天
+    let old = "20260926-120000-000";
+    let mut expired = bad.to_os_string();
+    expired.push(format!("-{old}-abcd"));
+    std::fs::create_dir_all(trash.join(&expired).join("audio")).expect("建立回收項目");
+    std::fs::write(trash.join(&expired).join("project.json"), b"{}").expect("寫入");
+    let mut no_stamp = OsString::from("x-2026");
+    no_stamp.push(bad);
+    no_stamp.push("926-120000-000-abcd");
+    std::fs::create_dir(trash.join(&no_stamp)).expect("建立");
+    let project = t.path.join("projects").join(bad);
+    std::fs::create_dir_all(project.join("tmp")).expect("建立");
+    std::fs::write(project.join("tmp").join("x"), b"x").expect("寫入");
+    t.file("projects/a/tmp/y", b"y");
+    let r = cleanup::startup_cleanup(
+        &t.path,
+        UNIX_EPOCH + Duration::from_millis(1_793_102_400_000),
+    )
+    .expect("startup_cleanup");
+    let shown = bad.to_string_lossy();
+    assert!(shown.contains('\u{fffd}'));
+    assert_eq!(r.trash_removed, [format!("{shown}-{old}-abcd")]);
+    assert!(!trash.join(&expired).exists(), "以原始名稱刪除");
+    assert_eq!(r.tmp_cleared, 1, "只清空名稱合規則的專案");
+    assert!(
+        project.join("tmp").join("x").exists(),
+        "非 UTF-8 名稱的專案不處理"
+    );
+    assert_eq!(
+        r.warnings,
+        [
+            format!("回收區項目「x-2026{shown}926-120000-000-abcd」名稱不含時間戳,略過"),
+            cleanup::BAD_PROJECT_NAME.to_string(),
+        ]
+    );
+    assert!(trash.join(&no_stamp).exists());
+    println!(
+        "非 UTF-8({platform}):startup_cleanup 刪除前段非 UTF-8 的過期回收項目(顯示為替代字元)、時間戳段非 UTF-8 者記警告略過"
+    );
+    println!("非 UTF-8({platform}):非 UTF-8 名稱的專案記「名稱不合規則」警告並略過(tmp/ 不清空)");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_non_utf8_bytes_are_skipped_and_python_agrees() {
@@ -83,6 +135,7 @@ fn linux_non_utf8_bytes_are_skipped_and_python_agrees() {
     use common::PyOut;
 
     let _g = ProjectsGuard::new();
+    check_cleanup(OsStr::from_bytes(b"\xff\xfe"), "linux");
     let t = check_apis(OsStr::from_bytes(b"\xff\xfe"), "linux");
     let before = t.snapshot();
     let py = common::call_in(
@@ -113,6 +166,7 @@ fn windows_unpaired_surrogates_are_skipped() {
     let _g = ProjectsGuard::new();
     let bad = OsString::from_wide(&[0xD800, 0x61]);
     drop(check_apis(&bad, "windows"));
+    check_cleanup(&bad, "windows");
 }
 
 /// macOS(APFS)拒絕建立非 UTF-8 名稱(〔推論〕,CI 證明)。
