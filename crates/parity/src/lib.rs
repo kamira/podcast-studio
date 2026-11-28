@@ -10,8 +10,8 @@
 //!   `code` / `class` 字串相同才算一致;人看的訊息文字不比對。`project.*` 單元把錯誤訊息清單放進
 //!   `ok` 的值,因此逐字比對(CHG-20261128-01 代決 9,見 [`units_project`])。
 //!
-//! 本 crate 不使用網路;唯一的子程序是 Python 轉接器(見 [`py`])。只有 `safe_fs.*` 單元與 `project.*` 的讀取類單元
-//! (CHG-20261128-01 T4)會在系統暫存目錄建立唯一名稱的工作目錄、放合成檔案樹,案例結束即刪除(見 [`units_safe_fs`]、
+//! 本 crate 不使用網路;唯一的子程序是 Python 轉接器(見 [`py`])。只有 `safe_fs.*` 單元與 `project.*` 的讀取類、寫入類單元
+//! (CHG-20261128-01 T4、T6)會在系統暫存目錄建立唯一名稱的工作目錄、放合成檔案樹,案例結束即刪除(見 [`units_safe_fs`]、
 //! [`units_project`];CHG-20261125-01 代決 11);不寫其他任何位置。
 #![forbid(unsafe_code)]
 
@@ -135,7 +135,8 @@ impl Registry {
     /// `project.split_segments`、`project.escape_text`、`project.tts_text`、`project.fused_out`、`project.model_units`、
     /// `project.shift_marks`、`project.post_params`、`project.post_key`、`project.is_post_fresh`、
     /// `project.is_default_post`、`project.effective`(T3)與 `project.load`、`project.load_version`、
-    /// `project.list_history`、`project.list_projects`、`project.disk_usage`(T4;見 [`units_project`]);
+    /// `project.list_history`、`project.list_projects`、`project.disk_usage`(T4)與 `project.save_sequence`、
+    /// `project.create`(T6;見 [`units_project`]);
     /// 環境變數 `PARITY_TEST_SLEEP=1` 時另登錄測試專用的 `demo.sleep`。
     /// 路線圖第 2 筆起,各模組的 Rust 單元在此登錄。
     pub fn builtin() -> Self {
@@ -211,6 +212,11 @@ impl Registry {
             units_project::project_list_projects,
         );
         r.register("project.disk_usage", units_project::project_disk_usage);
+        r.register(
+            "project.save_sequence",
+            units_project::project_save_sequence,
+        );
+        r.register("project.create", units_project::project_create);
         if std::env::var_os("PARITY_TEST_SLEEP").is_some_and(|v| v == "1") {
             r.register("demo.sleep", demo::sleep);
         }

@@ -12,8 +12,9 @@ L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Pytho
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
 轉接器 import 的 `value_checks`、`names`、`safe_fs` 是 repo 根目錄的產品模組。
-`project.*` 23 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`、T3 純函式 11 個、T4 讀取 5 個;`validate_text` 與
-T4 讀取類案例結束後轉接器的暫存目錄不存在、`project.ROOT` 還原,讀取前後合成檔案樹沒有任何改變):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+`project.*` 25 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`、T3 純函式 11 個、T4 讀取 5 個、T6 寫入 2 個;
+`validate_text` 與 T4 讀取類案例結束後轉接器的暫存目錄不存在、`project.ROOT` 還原,讀取前後合成檔案樹沒有任何改變;
+T6 寫入類案例結束後 `project.ROOT`、`project.time`、`project.secrets` 與 `project` logger 的 handler 還原、工作目錄不存在):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
 (`crates/parity/tests/data/project_expected.json`);轉接器載入的 `project`、`breezy_worker` 是 repo 根目錄的
 產品模組(`project.py` 頂層 import `fcntl`,這些測試在 Windows 略過)。
 約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs, project}`(CHG-20261124-01 代決 13、
@@ -466,7 +467,9 @@ PROJECT_UNITS = ["constants", "normalize_speed", "normalize_pause", "check_zhuyi
                  "split_segments", "escape_text", "tts_text", "fused_out", "model_units", "shift_marks",
                  "post_params", "post_key", "is_post_fresh", "is_default_post", "effective",
                  # T4:讀取(合成檔案樹)
-                 "load", "load_version", "list_history", "list_projects", "disk_usage"]
+                 "load", "load_version", "list_history", "list_projects", "disk_usage",
+                 # T6:寫入(合成檔案樹 + 注入的時鐘與隨機碼)
+                 "save_sequence", "create"]
 needs_posix_project = pytest.mark.skipif(
     sys.platform == "win32", reason="project.py 頂層 import fcntl,在 Windows 無法載入(CHG-20261128-01 事實 H)")
 
@@ -641,6 +644,74 @@ def test_project_讀取類單元的輸入格式():
     assert got[:6] == [error("type")] * 6
     assert got[6] == ok({"result": {"class": "not_found", "errors": ["找不到這個專案"]},
                          "tree": [["outside", "dir", None], ["root", "dir", None]], "changed": []})
+
+
+T6_CLOCK = {"now": [1793102400000], "rand4": ["abcd"], "hex8": ["0000000000000001", "0000000000000002"]}
+
+
+@needs_posix_project
+def test_project_寫入類單元_替身還原且工作目錄刪除():
+    """T6:案例結束後(含中途 error type)`project.ROOT`、`project.time`、`project.secrets` 與 logger 的 handler 還原,
+    工作目錄不存在;時鐘序列用完後重複最後一個。"""
+    probe = (
+        "import json, runpy, sys, logging\n"
+        "g = runpy.run_path(sys.argv[1], run_name='adapter_probe')\n"
+        "import project as pj\n"
+        "saved = (pj.ROOT, pj.time, pj.secrets, list(logging.getLogger('project').handlers))\n"
+        "clock = json.loads(sys.argv[2])\n"
+        "ok = g['project_save_sequence']({'tree': [], 'clock': clock, 'ops': [\n"
+        "    {'op': 'save', 'project': {'schema_version': 2, 'name': 'p'}},\n"
+        "    {'op': 'save', 'project': {'schema_version': 2, 'name': 'p'}, 'script': 'a'},\n"
+        "    {'op': 'save', 'project': {'schema_version': 2, 'name': 'p'}, 'script': 'b'}]})\n"
+        "try:\n"
+        "    g['project_save_sequence']({'tree': [], 'clock': clock, 'ops': [\n"
+        "        {'op': 'save', 'project': {'schema_version': 2, 'name': 'p'}}, {'op': 'nope'}]})\n"
+        "except g['UnitError'] as e:\n"
+        "    assert e.cls == 'type'\n"
+        "now = (pj.ROOT, pj.time, pj.secrets, list(logging.getLogger('project').handlers))\n"
+        "assert now == saved, '替身須還原'\n"
+        "print(json.dumps([s.get('value') for s in ok['steps']]))\n"
+    )
+    before = _project_fs_work_dirs()
+    proc = subprocess.run(
+        [sys.executable, "-c", probe, str(ADAPTER), json.dumps(T6_CLOCK)],
+        capture_output=True, timeout=60, check=False, cwd=str(ADAPTER.parent),
+        env=dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1"),
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert json.loads(proc.stdout.decode("utf-8")) == [None, "20261027-120000-000-abcd", "20261027-120000-001-abcd"]
+    assert _project_fs_work_dirs() <= before
+
+
+@needs_posix_project
+def test_project_寫入類單元的輸入格式():
+    ok_ops = [{"op": "list_history", "name": "p"}]
+    bad = [
+        {"tree": [], "ops": ok_ops},
+        {"tree": [], "clock": {**T6_CLOCK, "now": []}, "ops": ok_ops},
+        {"tree": [], "clock": {**T6_CLOCK, "now": [4102444800000]}, "ops": ok_ops},
+        {"tree": [], "clock": {**T6_CLOCK, "now": [True]}, "ops": ok_ops},
+        {"tree": [], "clock": {**T6_CLOCK, "rand4": ["ABCD"]}, "ops": ok_ops},
+        {"tree": [], "clock": {**T6_CLOCK, "hex8": ["0"]}, "ops": ok_ops},
+        {"tree": [], "clock": {**T6_CLOCK, "x": 1}, "ops": ok_ops},
+        {"tree": [], "clock": T6_CLOCK, "ops": []},
+        {"tree": [], "clock": T6_CLOCK, "ops": [{"op": "nope"}]},
+        {"tree": [], "clock": T6_CLOCK, "ops": [{"op": "save", "project": [1]}]},
+        {"tree": [], "clock": T6_CLOCK, "ops": [{"op": "save", "project": {}, "x": 1}]},
+        {"tree": [], "clock": T6_CLOCK, "ops": [{"op": "update", "name": "p", "change": {"x": 1}}]},
+        {"tree": [], "clock": T6_CLOCK, "ops": [{"op": "update", "name": "p", "change": {"speed": True}}]},
+        {"tree": [], "clock": T6_CLOCK, "ops": ok_ops, "extra": 1},
+    ]
+    reqs = [{"id": str(i), "input": b} for i, b in enumerate(bad)]
+    reqs.append({"id": "ok", "input": {"tree": [], "clock": T6_CLOCK, "ops": ok_ops}})
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.save_sequence", reqs))]
+    assert got[:-1] == [error("type")] * len(bad)
+    assert got[-1] == ok({"steps": [{"value": []}], "tree": [["outside", "dir", None], ["root", "dir", None]]})
+    creq = [{"id": "d", "input": {"tree": [], "clock": T6_CLOCK, "name": "p", "defaults": {"x": 1}}},
+            {"id": "n", "input": {"tree": [], "clock": T6_CLOCK, "name": 1}},
+            {"id": "s", "input": {"tree": [], "clock": T6_CLOCK, "name": "p", "defaults": {"speed": "1"}}}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.create", creq))]
+    assert got == [error("type")] * 3
 
 
 @needs_posix_project

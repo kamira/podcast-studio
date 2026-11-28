@@ -19,6 +19,9 @@
 //! 以測試執行檔自己重新執行自己的持鎖輔助行程(`--exact project_lock_helper --nocapture`,角色與工作目錄以環境變數傳入;
 //! 做法沿用 CHG-20261127-01 代決 10)。啟動輔助行程的測試執行檔要定義 `#[test] fn project_lock_helper()` 呼叫
 //! [`run_helper_if_requested`]。
+//!
+//! **寫入類**([`TestClock`]、[`BASE_MS`]、[`call_each`];T6):可控制的時鐘與隨機碼;Python 子程序另有四個特殊函式名
+//! (`@save_dict`、`@save_text`、`@set_script`、`@file`),每一筆請求各自指定 `project.ROOT`。
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -51,7 +54,18 @@ try:
         req = json.loads(line)
         pj.ROOT = pathlib.Path(os.path.realpath(req["root"])) if "root" in req else default_root
         try:
-            v = getattr(pj, req["fn"])(*req["args"])
+            fn, args = req["fn"], req["args"]
+            if fn == "@save_dict":      # T6:save(Project.from_dict(專案 dict)),回版本 id
+                v = pj.save(pj.Project.from_dict(args[0]))
+            elif fn == "@save_text":    # T6:save(Project.from_dict(json.loads(原文))),鍵順序依原文
+                v = pj.save(pj.Project.from_dict(json.loads(args[0])))
+            elif fn == "@set_script":   # T6:update(名稱, 改寫文稿),回 [版本 id, 存檔後的 dump]
+                got, vid, _ = pj.update(args[0], lambda p: setattr(p, "script", args[1]))
+                v = [vid, pj._dump(pj.validate(got.to_dict())).decode("utf-8")]
+            elif fn == "@file":         # T6:讀 ROOT 下的檔案(相對路徑以 / 分隔),回十六進位
+                v = (pj.ROOT / args[0]).read_bytes().hex()
+            else:
+                v = getattr(pj, fn)(*args)
             if isinstance(v, pj.Project):
                 v = {"dump": pj._dump(pj.validate(v.to_dict())).decode("utf-8")}
             r = {"value": sorted(v) if isinstance(v, set) else v}
@@ -190,6 +204,21 @@ pub fn call(requests: &[(&str, Vec<Value>)]) -> Vec<PyOut> {
     run_python(&reqs)
 }
 
+/// 同 [`call`],但每一筆各自指定 `project.ROOT`(T6 往返測試:每個語料一個暫存根目錄)。另有四個特殊函式名:
+/// `@save_dict`(`save(Project.from_dict(參數 0))`)、`@save_text`(`save(Project.from_dict(json.loads(參數 0)))`,
+/// 鍵順序依原文)、`@set_script`(`update(參數 0, 文稿改為參數 1)`,回
+/// `[版本 id, dump]`)、`@file`(讀 `ROOT/參數 0` 的位元組,回十六進位)。
+pub fn call_each(requests: &[(&Path, &str, Vec<Value>)]) -> Vec<PyOut> {
+    let reqs: Vec<Value> = requests
+        .iter()
+        .map(|(root, f, args)| {
+            let root = root.to_str().expect("暫存目錄須為 UTF-8 路徑");
+            json!({"fn": f, "args": args, "root": root})
+        })
+        .collect();
+    run_python(&reqs)
+}
+
 /// 同 [`call`],但 `project.ROOT` 指向 `root`(測試自己建立的暫存樹;T4)。
 pub fn call_in(root: &Path, requests: &[(&str, Vec<Value>)]) -> Vec<PyOut> {
     let root = root.to_str().expect("暫存目錄須為 UTF-8 路徑");
@@ -199,6 +228,76 @@ pub fn call_in(root: &Path, requests: &[(&str, Vec<Value>)]) -> Vec<PyOut> {
         .collect();
     run_python(&reqs)
 }
+
+/// 寫入類測試用的 [`project::ids::Clock`](T6):`now_ms` 為可改的固定值;`rand4` 依序取用給定的序列、用完後重複
+/// 最後一個;`token_hex8` 為遞增計數器(`0000000000000001` 起),取用前先執行一次性的掛勾(模擬「暫存檔建立前」
+/// 的外部改動)。單一執行緒使用(跨執行緒的測試用 `SystemClock`)。
+pub struct TestClock {
+    now: std::cell::Cell<i64>,
+    rand4: std::cell::RefCell<Vec<String>>,
+    rand_pos: std::cell::Cell<usize>,
+    hex: std::cell::Cell<u64>,
+    hex_fixed: std::cell::RefCell<Option<String>>,
+    hook: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+}
+
+impl TestClock {
+    pub fn at(now_ms: i64) -> Self {
+        Self::with_rand(now_ms, &["abcd"])
+    }
+
+    pub fn with_rand(now_ms: i64, rand4: &[&str]) -> Self {
+        TestClock {
+            now: std::cell::Cell::new(now_ms),
+            rand4: std::cell::RefCell::new(rand4.iter().map(|s| s.to_string()).collect()),
+            rand_pos: std::cell::Cell::new(0),
+            hex: std::cell::Cell::new(0),
+            hex_fixed: std::cell::RefCell::new(None),
+            hook: std::cell::RefCell::new(None),
+        }
+    }
+
+    pub fn set(&self, now_ms: i64) {
+        self.now.set(now_ms);
+    }
+
+    /// 之後的 `token_hex8` 一律回 `hex`(撞名用盡的測試)。
+    pub fn fix_hex8(&self, hex: &str) {
+        *self.hex_fixed.borrow_mut() = Some(hex.to_string());
+    }
+
+    /// 下一次 `token_hex8` 取用前執行 `f` 一次。
+    pub fn before_next_hex8(&self, f: impl FnOnce() + 'static) {
+        *self.hook.borrow_mut() = Some(Box::new(f));
+    }
+}
+
+impl project::ids::Clock for TestClock {
+    fn now_ms(&self) -> i64 {
+        self.now.get()
+    }
+
+    fn rand4(&self) -> String {
+        let items = self.rand4.borrow();
+        let k = self.rand_pos.get();
+        self.rand_pos.set(k + 1);
+        items[k.min(items.len() - 1)].clone()
+    }
+
+    fn token_hex8(&self) -> String {
+        if let Some(f) = self.hook.borrow_mut().take() {
+            f();
+        }
+        if let Some(h) = self.hex_fixed.borrow().clone() {
+            return h;
+        }
+        self.hex.set(self.hex.get() + 1);
+        format!("{:016x}", self.hex.get())
+    }
+}
+
+/// `2026-10-27T12:00:00Z`(毫秒;`tests/test_project.py` 的 `BASE`)。
+pub const BASE_MS: i64 = 1_793_102_400_000;
 
 static TREE_COUNTER: AtomicU32 = AtomicU32::new(0);
 

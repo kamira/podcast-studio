@@ -17,7 +17,9 @@
 //!   「分句與合成文字與 Python 相同」(T3,`split_segments`、`escape_text`、`tts_text`、`fused_out`、`model_units`、
 //!   `shift_marks`)、「後製鍵與 Python 相同」(T3,`post_params`、`post_key`、`is_post_fresh`、`is_default_post`、
 //!   `effective`)、「Rust 載入既有專案的結果與 Python 相同且不改動任何檔案」(T4,`load`、`load_version`、
-//!   `list_history`、`list_projects`、`disk_usage`;結果另含呼叫後的樹與 `changed`(呼叫前後有任何不同的路徑,須為空))。
+//!   `list_history`、`list_projects`、`disk_usage`;結果另含呼叫後的樹與 `changed`(呼叫前後有任何不同的路徑,須為空))、
+//!   「同一毫秒連續存檔版本時間戳嚴格遞增、只留最近 10 版」(T6,`save_sequence`:注入的時鐘與隨機碼、操作序列,結果另含
+//!   最後帶內容的樹——輪替刪除的選取規則因此逐案與 Python 比對)與 `create`。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -29,7 +31,8 @@ use parity::{Fixture, Outcome, Registry};
 use serde_json::Value;
 
 /// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1~T3 沒有(T3 純函式不碰檔案系統),
-/// T4 為 D-8:Windows 上名稱為保留裝置名的既有專案開啟時明確失敗、`list_projects` 略過。
+/// T4 為 D-8:Windows 上名稱為保留裝置名的既有專案開啟時明確失敗、`list_projects` 略過。T6 的寫入類案例沒有
+/// `windows` 欄(不含保留名稱;D-7 的刻意差異不進 fixture,由 `crates/project/tests/names_rules.rs` 鎖住)。
 const WINDOWS_CASES: &[(&str, &str, &str)] = &[
     ("project.load", "ok_reserved_con", "D-8"),
     ("project.load", "ok_reserved_nul", "D-8"),
@@ -75,6 +78,9 @@ const FIXTURES: &[(&str, &str, usize, usize)] = &[
     ("project.list_history", "list_history.json", 22, 15),
     ("project.list_projects", "list_projects.json", 17, 15),
     ("project.disk_usage", "disk_usage.json", 18, 15),
+    // T6:寫入(L2 下限:`save_sequence` ≥ 25、`create` ≥ 10)
+    ("project.save_sequence", "save_sequence.json", 38, 25),
+    ("project.create", "create.json", 16, 10),
 ];
 
 /// `project.validate_text`(T2)的接受 / 拒絕筆數(以預期結果表計)。
