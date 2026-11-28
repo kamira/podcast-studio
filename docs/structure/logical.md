@@ -13,6 +13,7 @@
 > 2026-11-01 依 CHG-20261101-02 修訂 1 結構文件更新:「一個 PR 的流程」第 2 步 Opus 席改為每份 prompt 上限 20000 字、超過時分組逐份交接。
 > 2026-11-22 依 CHG-20261103-01 結構文件更新(T1):`project`、`settings` 新增相依 `value_checks`(共用 `is_int`);相依方向補記 `settings` → `safe_fs`;DIR-5 一次修正時,分層表 `settings.py` 依賴欄補 `safe_fs`、「單向、無循環」段改寫 `settings` 的相依說法,三處同步。
 > 2026-11-23 依 CHG-20261123-01 結構文件更新(T3):開發流程節的架構圖加 `rust-platform`(三平台矩陣)、`rust`(彙總)與 ruleset 五項;checkout 說明改為四個治理相關 job 取 `pr/` 與 `trusted/`、`rust-platform` 只取 PR head;ruleset 列改五項;「CI 四項」改「CI 五項」並補 `rust` 說明。
+> 2026-11-28 依 CHG-20261128-01 結構文件更新(T4):相依方向補 Rust `project` → `studio-core`、`safe-fs`(目前沒有產品呼叫端、Python 流程不變);新增「CHG-20261128-01:使用者 Mac 唯讀比對」節(只讀、只印數量)。
 
 ## 分層 / 模組
 
@@ -313,7 +314,25 @@ flowchart LR
 
 〔觀察〕CHG-20261022-02 新增的相依:`studio_server` → `mcp_registry`(單向);`mcp_registry` 不匯入 repo 內任何模組(自有 `scrub()`,規則同 `studio_server.scrub()`,避免循環匯入),只以子程序呼叫外部 CLI `~/.local/bin/claude`、`~/.local/bin/codex`。
 
+〔觀察〕Rust workspace(CHG-20261128-01 T4):`project`(`crates/project`,`project.py` 的 Rust 版)→ `studio-core`(`names`、`value_checks`)、`safe-fs`;`parity` → `project`。Rust `project` **目前沒有產品呼叫端**——網頁、MCP 伺服器與上列 Python 流程都不變,仍只經 `project.py` 存取 `projects/`;唯一的執行檔 `project-readonly-dump` 只供下節的唯讀比對使用。
+
 〔觀察〕耦合點:`media.py` 直接讀 `taiwan_ai` 的模組層常數(`OUT`、`MFLUX`)與函式(`role_config`、`reserve`、`unload_llms`);`roles.image` 的讀取端是 `media.generate_image()`、`roles.voice` 的讀取端是 `taiwan_ai.speak()`,兩者每次呼叫經 `taiwan_ai.role_config()` → `settings.load()` 讀一次,網頁與 MCP 兩個行程都經這兩個函式(CHG-20261026-01 T1、T2);設定資料(`config/studio.db`)是網頁與 MCP 兩個行程共享的**資料契約**,只經 `settings.py` 存取(CHG-20261022-01 Global Constraints)。
+
+## CHG-20261128-01:使用者 Mac 唯讀比對
+
+〔觀察〕退出條件 (2)(代決 19、20;合併 PR 合入 main 後、驗收時由使用者在自己的 Mac 執行)。前置:確認備份可用(無法確認就停下、不執行),比對期間關閉 Python 網頁與 MCP 伺服器(確認閘 Q3)。只讀、只印數量,不送出本機,agent 不經手資料。
+
+```mermaid
+flowchart LR
+  U["使用者:python3 -I -B -X utf8 crates/project/py/readonly_check.py --repo . --rust target/release/project-readonly-dump"] --> M1["比對前:走訪 projects/(不跟隨連結)<br/>清單、大小、修改時間、SHA-256(只在記憶體)"]
+  M1 --> R["project-readonly-dump --root repo<br/>只呼叫讀取 API,JSON 行寫到 stdout"]
+  R --> P["project.py 的 list_projects / load / list_history / load_version<br/>(攔下寫入的替身;不取鎖、不建立任何東西)"]
+  P --> C["逐筆比對兩邊的 _dump(validate(...)) 或錯誤類別與訊息"]
+  C --> M2["比對後再走訪一次,與比對前逐項比較"]
+  M2 --> O["只印六行:專案數、版本數、一致 / 不一致筆數、序號、檔案清單與雜湊是否一致、結論"]
+```
+
+任何不一致或「一致:否」時停下,不重跑、不自行還原,交使用者決定;`crates/project/tests/readonly_tool.rs`(Unix)以合成 repo 驗證六行與前後雜湊清單。
 
 ## 開發流程(CI/CD)
 

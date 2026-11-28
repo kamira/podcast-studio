@@ -14,6 +14,8 @@
 
 > 2026-11-27 依 CHG-20261127-01 結構文件更新(T1):檔案表 `.heavy.lock` 列補 Rust `heavy-lock` 共用同一鎖檔。
 
+> 2026-11-28 依 CHG-20261128-01 結構文件更新(T4):「專案資料」節補 Rust 讀取規則(與 Python 相同的開啟順序與錯誤訊息、`history/` 排序鍵、`list_projects` 的略過規則)、D-7 摘要與 D-8(Windows 保留裝置名的既有專案)、非 UTF-8 目錄項的處置,以及使用者 Mac 唯讀比對只讀、只回報數量。
+
 〔觀察〕持久化資料有五類:設定資料庫 `config/studio.db`(使用者資料,不入 git)、工作流程 JSON(`workflows/`)、專案資料 `projects/`(使用者資料,不入 git;CHG-20261022-04)、`outputs/` 下的產出檔與上傳檔、程式內常數。流程執行中的文字(文案、標題、prompt)只存在伺服器記憶體中的執行事件(最近 20 次 run)與瀏覽器畫布上,另存工作流程時隨節點參數或釘住的編輯值寫入 JSON。
 
 ## 實體 / 資料表
@@ -86,6 +88,7 @@ JSON 物件,未知鍵一律拒絕;`schema_version` 為 2,舊版 1 載入時在�
 - 〔觀察〕符號連結:`projects/`、`.trash/`、專案目錄、`tmp/`、`history/` 本身是符號連結時一律拒絕處理並記警告;`.trash/`、`tmp/` 內的符號連結不跟隨。
 - 〔觀察〕合成快取鍵 = SHA-256(JSON 陣列 [含標註的合成文字, 聲線檔 SHA-256, 聲線逐字稿 SHA-256, 模型名]);文字、標註、聲線檔、逐字稿或模型任一改變即不命中(修訂 3 R3-4)。
 - 〔觀察〕Rust 版(`crates/project`,CHG-20261128-01;目前沒有產品呼叫端):以相同規則讀取與驗證(錯誤訊息清單逐字相同、累積順序相同),接受的專案檔以與 Python `_dump`(`json.dumps(ensure_ascii=False, indent=1)` + 換行)相同的位元組寫出,5 MB 上限以同一份寫出位元組計(T2;寫入與 `history/` 見 T6)。已知差異只出現在手動編輯的檔案(CHG-20261128-01「### 行為差異清單」):D-1 原文 `-0` 在 Rust 是 `-0.0`(整數欄位拒絕、數值欄位寫出 `-0.0`);D-2 超出 64 位元的整數在 Rust 是浮點(整數欄位拒絕、`audio.seconds` / `post.seconds` / `post.trim` 寫成浮點表示);D-3 `NaN`、`Infinity`、超出範圍的浮點與 D-4 巢狀超過 128 層在 Rust 解析失敗(「專案檔內容損壞」,Python 由欄位檢查拒絕);D-5 Python 會當機的輸入(超過 1.8e308 的整數、不成對代理、四捨五入後超過 28 位數)Rust 明確拒絕;D-6 `audio`、`post`、素材的鍵以 Python 程式產生時的順序寫出(內容相同),`defaults` 多個欄位不合法時訊息依鍵的碼位順序;D-15 `schema_version` 為含 Unicode 未指派碼位的字串時,訊息中的 `repr` 顯示不同。
+- 〔觀察〕Rust 讀取(`project::read`,CHG-20261128-01 T4):`root` 之下 `projects/<名稱>/` 經 `safe-fs` 逐層、不跟隨連結、唯讀開啟,不取專案鎖、不建立 `.lock`、`history/`、`tmp/` 或 `projects/`;名稱先 `normalize_name`(既有名稱),`_case_variant` 對 `projects/` 的全部目錄項以 `fold_name` 比對(點開頭除外),只差大小寫時回「找不到這個專案(已有只差大小寫的其他專案)」;專案檔最多讀 5 MB + 1 位元組;`load_version` 的版本 id 須符合 `\d{8}-\d{6}-\d{3}-[0-9a-f]{4}`(ASCII);`list_history` 只列符合 `HISTORY_RE` 的一般檔,依(時間戳, mtime_ns, 檔名)排序;`list_projects` 略過點開頭、名稱不合規則、不是目錄(含連結)、沒有一般檔 `project.json` 的項目,依名稱碼位排序;`disk_usage` 只計 `assets/`、`audio/` 內一般檔。錯誤訊息逐字與 Python 相同(`parity` 的讀取類 5 個單元與 `tests/read.rs`)。D-7:以 Windows 保留名稱(`CON`、`COM1` 等 24 個)建立新專案,Rust 三平台一律拒絕(T6)、Python 接受;D-8:Windows 上開啟名稱為保留裝置名的既有專案時 Rust 回「專案名稱是 Windows 保留裝置名,無法在 Windows 上開啟」、`list_projects` 略過,macOS / Linux 照常載入;非 UTF-8 目錄項(代決 16):`list_projects`、`_case_variant`、`list_history` 略過,`disk_usage` 照常計入(與 Python 以 `surrogateescape` 名稱的結果相同)。使用者 Mac 唯讀比對(退出條件 (2)):`crates/project/py/readonly_check.py` 與 `project-readonly-dump` 只讀、只印數量,比對前後以檔案清單、大小、修改時間與 SHA-256 證明 `projects/` 沒有任何改動(雜湊值只在記憶體中,不印、不寫檔)。
 
 ### 產出檔(`outputs/`,不入 git)〔觀察〕
 
