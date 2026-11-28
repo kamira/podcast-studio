@@ -15,6 +15,9 @@
 # list_history、list_projects、disk_usage;合成檔案樹,結果另含呼叫後的樹與 changed(須為空))與 crates/project/tests/read.rs
 # (「Rust 載入既有專案的結果與 Python 相同且不改動任何檔案」);crates/project/tests/readonly_tool.rs(Unix,「唯讀比對只回報數量」:
 # 六行輸出與前後雜湊清單),非 UTF-8 目錄項見 crates/project/tests/non_utf8.rs,Windows 保留裝置名見 crates/project/tests/windows.rs
+# T5 · 對應測試:crates/project/tests/cross_lang_lock.rs(Unix,「Python 持專案鎖時 Rust 等待,反之亦然」:Python
+# _project_lock 持鎖時 Rust 在 0.5 秒觀察期內不返回、Python 寫出 releasing 後才取得,反向相同;Python 被終止後 Rust 取得;
+# Linux 區辨測試),Rust 對 Rust 跨行程見 crates/project/tests/cross_process_lock.rs(三平台),同行程與鎖檔見 crates/project/tests/lock.rs
 # T1 新增第一個場景;T2~T7 各補場景(CHG-20261128-01「### Behaviour spec」)
 功能: 專案資料模型的 Rust 移植
 
@@ -47,3 +50,9 @@
   場景: 唯讀比對只回報數量
     當 唯讀比對工具跑完
     那麼 輸出只有專案數、版本數、一致與不一致的筆數與雜湊是否一致,沒有任何專案名稱或內容
+
+  場景: Python 持專案鎖時 Rust 等待,反之亦然
+    假設 在 macOS 或 Linux 上,Python 網頁版持有某專案的 .lock
+    當 Rust 取同一專案的鎖
+    那麼 Rust 等到 Python 釋放後才取得
+    而且 反過來 Rust 持鎖時 Python 也等待

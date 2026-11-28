@@ -128,8 +128,8 @@ fn is_fs_not_found(e: &Error) -> bool {
     e.kind() == ErrorKind::Fs(safe_fs::ErrorKind::NotFound)
 }
 
-/// 讀檔時的 I/O 錯誤(Python 直接丟出的 `OSError`);訊息只有錯誤碼,不含路徑。
-fn io_error(e: &std::io::Error) -> Error {
+/// 讀檔時的 I/O 錯誤(Python 直接丟出的 `OSError`);訊息只有錯誤碼,不含路徑。專案鎖的上鎖錯誤也用此轉換(T5)。
+pub(crate) fn io_error(e: &std::io::Error) -> Error {
     let code = e.raw_os_error();
     let message = match code {
         Some(c) => format!("作業系統錯誤(錯誤碼 {c})"),
