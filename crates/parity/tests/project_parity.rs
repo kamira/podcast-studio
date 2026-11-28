@@ -6,14 +6,18 @@
 //! - macOS / Linux:**Python 實際結果等於表**(表以 Python 為錨,由真轉接器產生,不能憑空寫);
 //! - 三平台:**Rust 實際結果等於表中該平台的預期**——`project.py` 頂層 import `fcntl`,Python 端在 Windows
 //!   無法執行(事實 H),Windows 的 Rust 行為因此經由表間接等於 macOS / Linux 上的 Python 行為;
-//! - 每個 fixture 案例都有預期;`windows` 欄只出現在「### 行為差異清單」列出的案例(T1、T2 為 0 筆,以常數鎖住);
+//! - 每個 fixture 案例都有預期;`windows` 欄只出現在「### 行為差異清單」列出的案例(T1~T3 為 0 筆;T4 起為 D-8 的
+//!   保留裝置名既有專案 7 筆,以常數鎖住);
+//! - T4 讀取類單元在合成檔案樹上執行;Windows 無法建立符號連結時 Rust 端回 `error symlink_privilege`,本機印出略過數,
+//!   CI 上先 `assert!(!in_ci())` 判失敗(Global Constraints「略過與證據」);
 //! - 每份 fixture 的案例數以常數寫明,且不低於該 task L2 的下限;`project.validate_text`(T2)另固定接受 / 拒絕筆數;
 //! - L2(macOS / Linux):以真 `parity` 執行檔跑每份 `fixtures/project/*.json`,exit 0、最後一行「結論:一致」。
 //!   對應 `features/project_rust.feature`「數值四捨五入與錯誤訊息與 Python 相同」(T1)、
 //!   「專案檔驗證結果與錯誤訊息與 Python 相同」「Rust 寫出的位元組與 Python 相同」(T2,`validate_text.json`)、
 //!   「分句與合成文字與 Python 相同」(T3,`split_segments`、`escape_text`、`tts_text`、`fused_out`、`model_units`、
 //!   `shift_marks`)、「後製鍵與 Python 相同」(T3,`post_params`、`post_key`、`is_post_fresh`、`is_default_post`、
-//!   `effective`)。
+//!   `effective`)、「Rust 載入既有專案的結果與 Python 相同且不改動任何檔案」(T4,`load`、`load_version`、
+//!   `list_history`、`list_projects`、`disk_usage`;結果另含呼叫後的樹與 `changed`(呼叫前後有任何不同的路徑,須為空))。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -24,11 +28,20 @@ use parity::py::{self, Adapter, DEFAULT_TIMEOUT_SECS};
 use parity::{Fixture, Outcome, Registry};
 use serde_json::Value;
 
-/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1~T3 沒有(T3 純函式不碰檔案系統)。
-const WINDOWS_CASES: &[(&str, &str, &str)] = &[];
+/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1~T3 沒有(T3 純函式不碰檔案系統),
+/// T4 為 D-8:Windows 上名稱為保留裝置名的既有專案開啟時明確失敗、`list_projects` 略過。
+const WINDOWS_CASES: &[(&str, &str, &str)] = &[
+    ("project.load", "ok_reserved_con", "D-8"),
+    ("project.load", "ok_reserved_nul", "D-8"),
+    ("project.load", "ok_reserved_com1", "D-8"),
+    ("project.load_version", "ok_reserved_con", "D-8"),
+    ("project.list_history", "reserved_con", "D-8"),
+    ("project.list_projects", "reserved_names", "D-8"),
+    ("project.disk_usage", "reserved_con", "D-8"),
+];
 
 /// `windows` 欄的筆數(與 `WINDOWS_CASES` 相同;改動差異清單時兩者一起改)。
-const WINDOWS_ENTRY_COUNT: usize = 0;
+const WINDOWS_ENTRY_COUNT: usize = 7;
 
 /// 每份 fixture 的(單元、檔名、案例數、該 task L2 的下限)。
 const FIXTURES: &[(&str, &str, usize, usize)] = &[
@@ -56,11 +69,27 @@ const FIXTURES: &[(&str, &str, usize, usize)] = &[
     ("project.is_post_fresh", "is_post_fresh.json", 17, 15),
     ("project.is_default_post", "is_default_post.json", 22, 15),
     ("project.effective", "effective.json", 20, 15),
+    // T4:讀取(L2 下限:`load` ≥ 40,含保留名稱 `CON`、`nul`、`COM1`;其餘每份 ≥ 15)
+    ("project.load", "load.json", 61, 40),
+    ("project.load_version", "load_version.json", 27, 15),
+    ("project.list_history", "list_history.json", 22, 15),
+    ("project.list_projects", "list_projects.json", 17, 15),
+    ("project.disk_usage", "disk_usage.json", 18, 15),
 ];
 
 /// `project.validate_text`(T2)的接受 / 拒絕筆數(以預期結果表計)。
 const VALIDATE_TEXT_ACCEPTED: usize = 61;
 const VALIDATE_TEXT_REJECTED: usize = 204;
+
+/// CI 上執行(`GITHUB_ACTIONS == "true"`):略過路徑一律判失敗。
+fn in_ci() -> bool {
+    std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true")
+}
+
+/// Windows 無法建立符號連結時 Rust 讀取類單元的結果(只會出現在 Windows)。
+fn symlink_privilege(o: &Outcome) -> bool {
+    matches!(o, Outcome::Error { class } if class == parity::units_project::FS_SYMLINK_PRIVILEGE)
+}
 
 fn platform() -> &'static str {
     if cfg!(target_os = "linux") {
@@ -289,10 +318,16 @@ fn rust_matches_expected_on_this_platform() {
     let registry = Registry::builtin();
     let plat = platform();
     let mut checked = 0;
+    let mut skipped = 0;
     let mut failures = Vec::new();
     for f in fixtures() {
         for c in &f.cases {
             let got = registry.run(&f.unit, &c.input).expect("已登錄");
+            if symlink_privilege(&got) {
+                assert!(!in_ci(), "CI 上無法建立符號連結,判失敗:{} {}", f.unit, c.id);
+                skipped += 1;
+                continue;
+            }
             let want = expected(&table[&f.unit][&c.id], plat);
             if got != want {
                 failures.push(format!(
@@ -311,7 +346,7 @@ fn rust_matches_expected_on_this_platform() {
         "Rust 與預期不同:\n{}",
         failures.join("\n")
     );
-    println!("Rust 等於預期({plat}):{checked} 個案例");
+    println!("Rust 等於預期({plat}):{checked} 個案例;無法建立符號連結而略過:{skipped} 個");
 }
 
 fn adapter() -> Adapter {

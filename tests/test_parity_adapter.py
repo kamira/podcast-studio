@@ -12,7 +12,8 @@ L1:示範單元 `demo.parse_count`、`demo.parse_count_drift` 各案例的 Pytho
 L2(提供方側):轉接器輸出符合 JSON 行協定——每行一個 JSON 物件、換行一律 `\\n`、UTF-8、
 三型回應欄位齊全、id 依序對應;未知單元 exit 2;`demo.sleep` 只在 `PARITY_TEST_SLEEP=1` 時登錄;
 轉接器 import 的 `value_checks`、`names`、`safe_fs` 是 repo 根目錄的產品模組。
-`project.*` 18 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`、T3 純函式 11 個;`validate_text` 案例結束後轉接器的暫存目錄不存在):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
+`project.*` 23 個單元(CHG-20261128-01 T1 六個、T2 `validate_text`、T3 純函式 11 個、T4 讀取 5 個;`validate_text` 與
+T4 讀取類案例結束後轉接器的暫存目錄不存在、`project.ROOT` 還原,讀取前後合成檔案樹沒有任何改變):fixture 每個案例的 Python 結果等於以 Python 為錨的預期結果表
 (`crates/parity/tests/data/project_expected.json`);轉接器載入的 `project`、`breezy_worker` 是 repo 根目錄的
 產品模組(`project.py` 頂層 import `fcntl`,這些測試在 Windows 略過)。
 約束:轉接器只 import 標準函式庫與明列的產品模組 `{names, value_checks, safe_fs, project}`(CHG-20261124-01 代決 13、
@@ -463,7 +464,9 @@ PROJECT_UNITS = ["constants", "normalize_speed", "normalize_pause", "check_zhuyi
                  "py_json", "validate_text",
                  # T3:純函式
                  "split_segments", "escape_text", "tts_text", "fused_out", "model_units", "shift_marks",
-                 "post_params", "post_key", "is_post_fresh", "is_default_post", "effective"]
+                 "post_params", "post_key", "is_post_fresh", "is_default_post", "effective",
+                 # T4:讀取(合成檔案樹)
+                 "load", "load_version", "list_history", "list_projects", "disk_usage"]
 needs_posix_project = pytest.mark.skipif(
     sys.platform == "win32", reason="project.py 頂層 import fcntl,在 Windows 無法載入(CHG-20261128-01 事實 H)")
 
@@ -603,6 +606,41 @@ def test_project_文字欄位的_parts_輸入與結果精簡():
         {"id": "p", "input": {"text": {"parts": [{"repeat": "字", "count": 500}]}}}]))]
     assert got[0]["value"]["value"][0] == {"text": {"parts": [{"repeat": "字", "count": 500}]}, "break": "end",
                                            "start": 0, "end": 500}
+
+
+def _project_fs_work_dirs():
+    return {p.name for p in Path(tempfile.gettempdir()).glob("parity-project-fs-py-*")}
+
+
+@needs_posix_project
+def test_project_讀取類單元_暫存目錄刪除且讀取前後樹不變():
+    """T4:讀取類 5 個單元的每個案例,`changed` 為空(讀取不改動任何東西)、樹含 root/ 與 outside/;
+    案例結束後工作目錄不存在。"""
+    before = _project_fs_work_dirs()
+    for name in ("load", "load_version", "list_history", "list_projects", "disk_usage"):
+        fixture = json.loads((PROJECT_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        got = responses_split_on_newline(run_adapter(f"project.{name}", fixture["cases"]))
+        for case, resp in zip(fixture["cases"], got):
+            if resp["outcome"] != "ok":
+                assert resp == {"id": case["id"], "outcome": "error", "class": "type"}, case["id"]
+                continue
+            assert resp["value"]["changed"] == [], case["id"]
+            assert ["root", "dir", None] in resp["value"]["tree"], case["id"]
+    assert _project_fs_work_dirs() <= before
+
+
+@needs_posix_project
+def test_project_讀取類單元的輸入格式():
+    reqs = [{"id": "no_tree", "input": {"name": "a"}}, {"id": "bad_tree", "input": {"tree": 5, "name": "a"}},
+            {"id": "bad_item", "input": {"tree": [{"path": "a", "type": "fifo"}], "name": "a"}},
+            {"id": "dotdot", "input": {"tree": [{"path": "../x", "type": "dir"}], "name": "a"}},
+            {"id": "bad_mtime", "input": {"tree": [{"path": "a", "type": "file", "mtime": 1.5}], "name": "a"}},
+            {"id": "name_int", "input": {"tree": [], "name": 1}},
+            {"id": "ok", "input": {"tree": [], "name": "a"}}]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.load", reqs))]
+    assert got[:6] == [error("type")] * 6
+    assert got[6] == ok({"result": {"class": "not_found", "errors": ["找不到這個專案"]},
+                         "tree": [["outside", "dir", None], ["root", "dir", None]], "changed": []})
 
 
 @needs_posix_project

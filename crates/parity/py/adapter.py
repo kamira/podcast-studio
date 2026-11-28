@@ -48,6 +48,11 @@ T3 加純函式 11 個單元:`project.split_segments`(`{"text": 字串或 {"part
 (`_project_compact_strings`;與 Rust 同一規則);
 片段類輸入 `{"segment"}`,先放進 `{"schema_version": 2, "name": "p", "segments": [segment]}` 以 `validate`
 (`effective` 以 `Project.from_dict`)驗證,失敗回 `{"class", "errors"}`,通過才對驗證後的片段呼叫函式。
+T4 加讀取 5 個單元:`project.load`、`project.load_version`、`project.list_history`、`project.list_projects`、
+`project.disk_usage`——輸入 `{"tree", "outside"?, "name"?, "vid"?}`,在自己以 `tempfile.mkdtemp` 建立的工作目錄
+(前綴 `parity-project-fs-py-`)下建立 `root/`(暫時設為 `project.ROOT`)與 `outside/` 的合成檔案樹,呼叫前後各取快照,
+回 `{"result", "tree", "changed"}`(`changed` 為前後有任何不同的路徑,讀取不得改動任何東西);案例結束即刪除工作目錄、
+還原 `project.ROOT`。
 """
 from __future__ import annotations
 
@@ -925,6 +930,189 @@ def project_effective(value):
     return _value_result({"speed": pj.effective_speed(proj, segment), "pause": pj.effective_pause(proj, segment)})
 
 
+# ---------- T4:讀取(合成檔案樹) ----------
+# 輸入 `{"tree", "outside"?, "name"?, "vid"?}`;工作目錄(`tempfile.mkdtemp`,前綴 `parity-project-fs-py-`,先 realpath)
+# 下放 `root/`(= `project.ROOT`)與 `outside/`;輸出 `{"result", "tree", "changed"}`;與 Rust 端同一規則
+# (`crates/parity/src/units_project.rs`「T4:讀取」)。案例結束即刪除工作目錄,`project.ROOT` 還原。
+
+PROJECT_FS_PREFIX = "parity-project-fs-py-"
+PROJECT_DEFAULT_MTIME_MS = 1_767_225_600_000
+INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
+
+
+class _ProjectFsWork:
+    """讀取類單元的暫存工作目錄:root/(資料根目錄)、outside/、missing(不存在,懸空連結用)。"""
+
+    def __init__(self):
+        self.base = os.path.realpath(tempfile.mkdtemp(prefix=PROJECT_FS_PREFIX))
+        self.root = os.path.join(self.base, "root")
+        self.outside = os.path.join(self.base, "outside")
+        self.missing = os.path.join(self.base, "missing")
+        os.mkdir(self.root)
+        os.mkdir(self.outside)
+
+    def target(self, token):
+        if token == "@missing":
+            return self.missing
+        for prefix, base in (("@root", self.root), ("@outside", self.outside)):
+            if token == prefix:
+                return base
+            if isinstance(token, str) and token.startswith(prefix + "/"):
+                return os.path.join(base, *_rel_parts(token[len(prefix) + 1:]))
+        raise _type_error()
+
+    def token(self, target):
+        if target == self.missing:
+            return "@missing"
+        for prefix, base in (("@root", self.root), ("@outside", self.outside)):
+            if target == base:
+                return prefix
+            if target.startswith(base + os.sep):
+                return prefix + "/" + target[len(base) + 1:].replace(os.sep, "/")
+        return "@other"
+
+    def build(self, base, items):
+        if items is None:
+            return
+        if not isinstance(items, list):
+            raise _type_error()
+        for item in items:
+            if not isinstance(item, dict):
+                raise _type_error()
+            path = os.path.join(base, *_rel_parts(item.get("path")))
+            kind = item.get("type")
+            if kind == "dir":
+                os.makedirs(path, exist_ok=True)
+            elif kind == "file":
+                content = _project_text_bytes(item["content"]) if "content" in item else b""
+                mtime = item.get("mtime", PROJECT_DEFAULT_MTIME_MS)
+                if not isinstance(mtime, int) or isinstance(mtime, bool) or not INT64_MIN <= mtime <= INT64_MAX:
+                    raise _type_error()
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(content)
+                os.utime(path, ns=(mtime * 1_000_000, mtime * 1_000_000))
+            elif kind == "symlink":
+                link_kind = item.get("kind")
+                if link_kind not in ("dir", "file"):
+                    raise _type_error()
+                target = self.target(item.get("target"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                os.symlink(target, path, target_is_directory=(link_kind == "dir"))
+            else:
+                raise _type_error()
+
+    def snapshot(self):
+        """工作目錄下的快照(不跟隨連結):[(相對路徑, 輸出列, 狀態)],依相對路徑排序。"""
+        out = []
+
+        def walk(directory, rel):
+            with os.scandir(directory) as it:
+                items = list(it)
+            for e in items:
+                r = e.name if rel == "" else rel + "/" + e.name
+                st = os.lstat(e.path)
+                if stat.S_ISLNK(st.st_mode):
+                    token = self.token(os.readlink(e.path))
+                    out.append((r, [r, "symlink", token], ("symlink", st.st_mtime_ns, token.encode("utf-8"))))
+                elif stat.S_ISDIR(st.st_mode):
+                    out.append((r, [r, "dir", None], ("dir", st.st_mtime_ns, None)))
+                    walk(e.path, r)
+                elif stat.S_ISREG(st.st_mode):
+                    with open(e.path, "rb") as f:
+                        data = f.read()
+                    out.append((r, [r, "file", None], ("file", st.st_mtime_ns, data)))
+                else:
+                    out.append((r, [r, "other", None], ("other", st.st_mtime_ns, None)))
+
+        walk(self.base, "")
+        out.sort(key=lambda x: x[0])
+        return out
+
+    def close(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+
+def _project_read_error(e, pj):
+    """讀取 API 的例外 → 結果:ProjectError → `{"class", "errors"}`,OSError → `{"class": "os_error"}`。"""
+    if isinstance(e, pj.ProjectError):
+        return _project_error_result(e, pj)
+    return {"class": "os_error"}
+
+
+def _project_loaded(pj, fn, *args):
+    try:
+        p = fn(*args)
+    except (pj.ProjectError, OSError) as e:
+        return _project_read_error(e, pj)
+    return {"dump": _project_compact_dump(pj._dump(pj.validate(p.to_dict())).decode("utf-8"))}
+
+
+def _project_value_call(pj, fn, *args):
+    try:
+        return {"value": fn(*args)}
+    except (pj.ProjectError, OSError) as e:
+        return _project_read_error(e, pj)
+
+
+def _project_str_arg(value, key):
+    v = value.get(key)
+    if not isinstance(v, str):
+        raise _type_error()
+    return v
+
+
+def _project_fs_case(value, action):
+    """建樹 → 快照 → 呼叫(`project.ROOT` 指向 root/)→ 快照;案例結束一律刪除工作目錄並還原 `project.ROOT`。"""
+    import project as pj
+    if not isinstance(value, dict) or not isinstance(value.get("tree"), list):
+        raise _type_error()
+    work = _ProjectFsWork()
+    saved = pj.ROOT
+    try:
+        work.build(work.root, value["tree"])
+        work.build(work.outside, value.get("outside"))
+        before = work.snapshot()
+        pj.ROOT = Path(work.root)
+        try:
+            result = action(pj, value)
+        finally:
+            pj.ROOT = saved
+        after = work.snapshot()
+        b = {r: st for r, _, st in before}
+        a = {r: st for r, _, st in after}
+        changed = sorted(k for k in set(b) | set(a) if b.get(k) != a.get(k))
+        return {"result": result, "tree": [row for _, row, _ in after], "changed": changed}
+    finally:
+        work.close()
+
+
+def project_load(value):
+    """project.load(T4):`{"tree", "name"}` → `{"dump"}` 或 `{"class", "errors"}`。"""
+    return _project_fs_case(value, lambda pj, v: _project_loaded(pj, pj.load, _project_str_arg(v, "name")))
+
+
+def project_load_version(value):
+    """project.load_version(T4):`{"tree", "name", "vid"}`。"""
+    return _project_fs_case(value, lambda pj, v: _project_loaded(
+        pj, pj.load_version, _project_str_arg(v, "name"), _project_str_arg(v, "vid")))
+
+
+def project_list_history(value):
+    """project.list_history(T4):`{"tree", "name"}` → `{"value": [版本 id…]}`。"""
+    return _project_fs_case(value, lambda pj, v: _project_value_call(pj, pj.list_history, _project_str_arg(v, "name")))
+
+
+def project_list_projects(value):
+    """project.list_projects(T4):`{"tree"}` → `{"value": [{"name", "updated"}…]}`。"""
+    return _project_fs_case(value, lambda pj, v: _project_value_call(pj, pj.list_projects))
+
+
+def project_disk_usage(value):
+    """project.disk_usage(T4):`{"tree", "name"}` → `{"value": 位元組數}`。"""
+    return _project_fs_case(value, lambda pj, v: _project_value_call(pj, pj.disk_usage, _project_str_arg(v, "name")))
+
+
 def build_units(environ=None):
     """單元登錄字典(單元名 → 函式)。路線圖第 2 筆起,各模組的 Python 端單元在此登錄。"""
     environ = os.environ if environ is None else environ
@@ -968,6 +1156,11 @@ def build_units(environ=None):
         "project.is_post_fresh": project_is_post_fresh,
         "project.is_default_post": project_is_default_post,
         "project.effective": project_effective,
+        "project.load": project_load,
+        "project.load_version": project_load_version,
+        "project.list_history": project_list_history,
+        "project.list_projects": project_list_projects,
+        "project.disk_usage": project_disk_usage,
     }
     if environ.get("PARITY_TEST_SLEEP") == "1":
         units["demo.sleep"] = demo_sleep
