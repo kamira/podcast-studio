@@ -131,7 +131,10 @@ impl Registry {
     /// `safe_fs.entries`、`safe_fs.unlink`、`safe_fs.rmtree`、`safe_fs.rename`、`safe_fs.replace`、`safe_fs.link`
     /// (T2;見 [`units_safe_fs`]);
     /// `project.constants`、`project.normalize_speed`、`project.normalize_pause`、`project.check_zhuyin`、
-    /// `project.check_pitch_points`、`project.py_json`(CHG-20261128-01 T1)與 `project.validate_text`(T2;見 [`units_project`]);
+    /// `project.check_pitch_points`、`project.py_json`(CHG-20261128-01 T1)、`project.validate_text`(T2)與
+    /// `project.split_segments`、`project.escape_text`、`project.tts_text`、`project.fused_out`、`project.model_units`、
+    /// `project.shift_marks`、`project.post_params`、`project.post_key`、`project.is_post_fresh`、
+    /// `project.is_default_post`、`project.effective`(T3;見 [`units_project`]);
     /// 環境變數 `PARITY_TEST_SLEEP=1` 時另登錄測試專用的 `demo.sleep`。
     /// 路線圖第 2 筆起,各模組的 Rust 單元在此登錄。
     pub fn builtin() -> Self {
@@ -179,6 +182,26 @@ impl Registry {
             "project.validate_text",
             units_project::project_validate_text,
         );
+        r.register(
+            "project.split_segments",
+            units_project::project_split_segments,
+        );
+        r.register("project.escape_text", units_project::project_escape_text);
+        r.register("project.tts_text", units_project::project_tts_text);
+        r.register("project.fused_out", units_project::project_fused_out);
+        r.register("project.model_units", units_project::project_model_units);
+        r.register("project.shift_marks", units_project::project_shift_marks);
+        r.register("project.post_params", units_project::project_post_params);
+        r.register("project.post_key", units_project::project_post_key);
+        r.register(
+            "project.is_post_fresh",
+            units_project::project_is_post_fresh,
+        );
+        r.register(
+            "project.is_default_post",
+            units_project::project_is_default_post,
+        );
+        r.register("project.effective", units_project::project_effective);
         if std::env::var_os("PARITY_TEST_SLEEP").is_some_and(|v| v == "1") {
             r.register("demo.sleep", demo::sleep);
         }

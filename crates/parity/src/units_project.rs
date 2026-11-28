@@ -15,6 +15,30 @@
 //! | `project.check_pitch_points` | `{"points", "where"}` | `{"value": [[位置, 半音], …], "repr"}` |
 //! | `project.py_json` | 任意 JSON 值 | `{"dump": _dump 字串, "sorted": 緊湊排序字串}` |
 //! | `project.validate_text` | JSON 原文字串(以 UTF-8 編碼)、`{"hex": 位元組的十六進位}` 或 `{"parts": [片段…]}` | `{"dump": _dump(validate(…)) 字串或 {"parts"}}` |
+//! | `project.split_segments` | `{"text": 字串或 {"parts"}, "forced"?: [整數…]}` | `{"value": [{"text", "break", "start", "end"}…]}` |
+//! | `project.escape_text` | 字串 | `{"value": 字串}` |
+//! | `project.tts_text` | `{"segment"}` | `{"value": 合成文字}` |
+//! | `project.fused_out` | `{"segment"}` | `{"value": [索引…](遞增)}` |
+//! | `project.model_units` | `{"segment"}` | `{"value": [索引…]}` |
+//! | `project.shift_marks` | `{"segment", "old": 字串, "new": 字串}` | `{"value": {"fusions", "fusion_off", "cleared"}}` |
+//! | `project.post_params` | `{"segment"}` | `{"value": 後製參數, "repr"}` |
+//! | `project.post_key` | `{"segment"}` | `{"value": 64 碼後製鍵}` |
+//! | `project.is_post_fresh` | `{"segment"}` | `{"value": 布林}` |
+//! | `project.is_default_post` | `{"segment"}` | `{"value": 布林}` |
+//! | `project.effective` | `{"segment", "defaults"?}` | `{"value": {"speed", "pause"}, "repr"}` |
+//!
+//! 片段類單元(T3):兩邊都把 `segment` 放進 `{"schema_version": 2, "name": "p", "segments": [segment]}`(`effective` 另把
+//! 給定的 `defaults` 放進去)以 `validate` 驗證——Python 呼叫端傳入的就是驗證後的片段;驗證失敗時回 `validate` 的
+//! `{"class", "errors"}`,通過時對驗證後的片段呼叫函式(Rust `project::text` / `project::post`,Python 同名函式;
+//! `effective` 為 `effective_speed` 與 `effective_pause`,Python 以 `Project.from_dict` 建立專案)。
+//! `split_segments` 的 `forced` 只接受整數(不含布林、64 位元範圍內):Rust API 為 `&[i64]`,非整數由型別排除
+//! (D-12 T3 補記),兩邊都回 `error type`。
+//!
+//! 片段類與文字類單元的精簡形式(T3 補記,同字元連續上限 64):輸入中的文字欄位——`split_segments` 的 `text`、
+//! `escape_text` 的輸入本身、片段類的 `segment.text`、`shift_marks` 的 `old` / `new`——可為字串或 `{"parts": [片段…]}`
+//! ([`text_value`],展開規則同 [`parts_text`];不合格為 `error type`,片段的 `text` 在驗證前展開);接受時的 `value` 內
+//! 每個字串有同一字元連續 [`RUN_MIN`](65)個以上時改為 `{"parts": […]}`([`compact_strings`],以 [`compact_dump`]
+//! 的規則逐一轉換,可逆且確定)。轉接器的 `_project_text_value`、`_project_compact_strings` 是同一規則。
 //!
 //! `project.validate_text`(T2):兩邊各自解析原文——Rust 以 [`project::validate::parse_project_json`]
 //! (= Python `_read_project_file` 讀到位元組之後的部分:5 MB 上限、UTF-8、JSON、須為物件),Python 端把位元組寫進
@@ -22,14 +46,15 @@
 //!
 //! 精簡形式(DIR-6 第 1 輪 F-1):超長的重複內容不直接寫進 fixture 與預期結果表。輸入 `{"parts": [片段…]}` 的片段為
 //! 字串或 `{"repeat": 非空字串, "count": 1~5242881}`,依序串接後以 UTF-8 編碼([`parts_text`]);接受時的 dump 有同一
-//! 字元連續 1000 個以上時改回 `{"dump": {"parts": […]}}`([`compact_dump`],以 [`parts_text`] 展開即得原字串)。
+//! 字元連續 65 個以上(T3 補記:原為 1000)時改回 `{"dump": {"parts": […]}}`([`compact_dump`],以 [`parts_text`] 展開即得原字串)。
 //! 轉接器的 `_project_parts_text`、`_project_compact_dump` 是同一規則。
 //!
 //! `project.py_json` 的物件鍵:fixture 經 `serde_json` 解析後鍵已依碼位排序,送給 Python 的請求也是排序後的鍵,
 //! 兩邊收到同一個鍵順序(依建構順序寫出由 `crates/project/tests/pyjson.rs` 的 `Entries` 與結構測試鎖住)。
 
+use project::model::Segment;
 use project::pyjson::{self, Entries};
-use project::{Error, checks, constants, pystr, validate};
+use project::{Error, Project, checks, constants, post, pystr, text, validate};
 use serde_json::{Map, Value, json};
 
 use crate::Outcome;
@@ -229,8 +254,8 @@ pub fn project_py_json(input: &Value) -> Outcome {
 
 /// `{"repeat", "count"}` 的 `count` 上限(5 MB + 1)。
 pub const REPEAT_MAX: u64 = 5_242_881;
-/// dump 中同一字元連續達此長度才改用 `parts`。
-pub const RUN_MIN: usize = 1000;
+/// 結果中同一字元連續達此長度才改用 `parts`(T3 補記:原為 1000;fixture 與預期結果表的同字元連續上限為 64)。
+pub const RUN_MIN: usize = 65;
 
 /// `{"parts": [片段…]}` 的片段陣列展開成字串;空陣列、未知鍵、布林、0、超過上限等回 `None`(→ `error type`)。
 pub fn parts_text(parts: &Value) -> Option<String> {
@@ -316,6 +341,160 @@ pub fn project_validate_text(input: &Value) -> Outcome {
             Err(_) => type_error(),
         },
         Err(e) => error_result(&e),
+    }
+}
+
+// ---------- T3:純函式 ----------
+
+/// 文字欄位:字串或 `{"parts": [片段…]}`(恰此一鍵,[`parts_text`] 展開);其他回 `None`(→ `error type`)。
+pub fn text_value(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) if o.len() == 1 && o.contains_key("parts") => parts_text(&o["parts"]),
+        _ => None,
+    }
+}
+
+/// 接受時的值:每個字串依 [`compact_dump`] 的規則轉換(同字元連續 ≥ [`RUN_MIN`] 改為 `{"parts"}`),陣列與物件遞迴處理。
+pub fn compact_strings(v: Value) -> Value {
+    match v {
+        Value::String(s) => compact_dump(&s),
+        Value::Array(list) => Value::Array(list.into_iter().map(compact_strings).collect()),
+        Value::Object(obj) => Value::Object(
+            obj.into_iter()
+                .map(|(k, x)| (k, compact_strings(x)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// `{"value": 精簡後的值}`。
+fn text_ok(v: Value) -> Outcome {
+    Outcome::Ok(json!({ "value": compact_strings(v) }))
+}
+
+/// 片段類單元的輸入:`{"segment", "defaults"?}` → 交給 `validate` 的專案;缺 `segment` 回 `None`(→ `error type`)。
+fn segment_project(input: &Value, with_defaults: bool) -> Option<Value> {
+    let obj = input.as_object()?;
+    let mut segment = obj.get("segment")?.clone();
+    if let Some(t) = segment.get_mut("text")
+        && t.is_object()
+    {
+        *t = Value::String(text_value(t)?);
+    }
+    let mut data = json!({"schema_version": 2, "name": "p", "segments": [segment]});
+    if with_defaults && let Some(d) = obj.get("defaults") {
+        data["defaults"] = d.clone();
+    }
+    Some(data)
+}
+
+/// 驗證後的專案(片段在 `segments[0]`);輸入格式不符回 `Err(type_error)`、驗證失敗回 `Err(錯誤結果)`。
+fn validated(input: &Value, with_defaults: bool) -> Result<Project, Outcome> {
+    let data = segment_project(input, with_defaults).ok_or_else(type_error)?;
+    validate::validate(&data).map_err(|e| error_result(&e))
+}
+
+fn on_segment(input: &Value, f: impl FnOnce(&Segment) -> Outcome) -> Outcome {
+    match validated(input, false) {
+        Ok(p) => p.segments.first().map_or_else(type_error, f),
+        Err(o) => o,
+    }
+}
+
+/// `project.split_segments`:`{"text": 字串或 {"parts"}, "forced"?: [整數…]}`。
+pub fn project_split_segments(input: &Value) -> Outcome {
+    let Some(obj) = input.as_object() else {
+        return type_error();
+    };
+    let Some(text) = obj.get("text").and_then(text_value) else {
+        return type_error();
+    };
+    let forced: Vec<i64> = match obj.get("forced") {
+        None => Vec::new(),
+        Some(Value::Array(list)) => match list.iter().map(Value::as_i64).collect() {
+            Some(v) => v,
+            None => return type_error(),
+        },
+        Some(_) => return type_error(),
+    };
+    match text::split_segments(&text, &forced) {
+        Ok(pieces) => text_ok(json!(pieces)),
+        Err(e) => error_result(&e),
+    }
+}
+
+/// `project.escape_text`:輸入為字串或 `{"parts"}`。
+pub fn project_escape_text(input: &Value) -> Outcome {
+    match text_value(input) {
+        Some(s) => text_ok(json!(text::escape_text(&s))),
+        None => type_error(),
+    }
+}
+
+/// `project.tts_text`。
+pub fn project_tts_text(input: &Value) -> Outcome {
+    on_segment(input, |s| match text::tts_text(s) {
+        Ok(t) => text_ok(json!(t)),
+        Err(e) => error_result(&e),
+    })
+}
+
+/// `project.fused_out`(遞增排序的索引)。
+pub fn project_fused_out(input: &Value) -> Outcome {
+    on_segment(input, |s| text_ok(json!(text::fused_out(s))))
+}
+
+/// `project.model_units`。
+pub fn project_model_units(input: &Value) -> Outcome {
+    on_segment(input, |s| text_ok(json!(text::model_units(s))))
+}
+
+/// `project.shift_marks`:另需 `old`、`new`(字串或 `{"parts"}`)。
+pub fn project_shift_marks(input: &Value) -> Outcome {
+    let (Some(old), Some(new)) = (
+        input.get("old").and_then(text_value),
+        input.get("new").and_then(text_value),
+    ) else {
+        return type_error();
+    };
+    on_segment(input, |s| text_ok(json!(text::shift_marks(s, &old, &new))))
+}
+
+/// `project.post_params`。
+pub fn project_post_params(input: &Value) -> Outcome {
+    on_segment(input, |s| value_result(post::post_params(s).to_value()))
+}
+
+/// `project.post_key`。
+pub fn project_post_key(input: &Value) -> Outcome {
+    on_segment(input, |s| match post::post_key(s) {
+        Ok(k) => text_ok(json!(k)),
+        Err(e) => error_result(&e),
+    })
+}
+
+/// `project.is_post_fresh`。
+pub fn project_is_post_fresh(input: &Value) -> Outcome {
+    on_segment(input, |s| text_ok(json!(post::is_post_fresh(s))))
+}
+
+/// `project.is_default_post`。
+pub fn project_is_default_post(input: &Value) -> Outcome {
+    on_segment(input, |s| text_ok(json!(post::is_default_post(s))))
+}
+
+/// `project.effective`:`effective_speed` 與 `effective_pause`(專案的 `defaults` 可由輸入給定)。
+pub fn project_effective(input: &Value) -> Outcome {
+    match validated(input, true) {
+        Ok(p) => p.segments.first().map_or_else(type_error, |s| {
+            value_result(json!({
+                "speed": post::effective_speed(&p, s),
+                "pause": post::effective_pause(&p, s),
+            }))
+        }),
+        Err(o) => o,
     }
 }
 
@@ -431,7 +610,7 @@ mod tests {
         let multi = format!(
             "{}中{}{}",
             "字".repeat(1500),
-            " ".repeat(999),
+            " ".repeat(RUN_MIN - 1),
             "z".repeat(RUN_MIN + 7)
         );
         let c = compact_dump(&multi);
@@ -439,7 +618,7 @@ mod tests {
         assert_eq!(parts_text(&c["parts"]), Some(multi.clone()));
         assert_eq!(compact_dump(&multi), c, "確定性");
         assert_eq!(compact_dump(""), json!(""));
-        // 實際的 validate_text:script 999 個字元照舊為字串、1000 個改為 parts
+        // 實際的 validate_text:script 64 個字元照舊為字串、65 個改為 parts
         for (n, compact) in [(RUN_MIN - 1, false), (RUN_MIN, true)] {
             let input = json!({"parts": [r#"{"schema_version": 2, "name": "x", "script": ""#, {"repeat": "a", "count": n}, r#""}"#]});
             let Outcome::Ok(v) = project_validate_text(&input) else {
@@ -452,6 +631,77 @@ mod tests {
             };
             assert!(full.contains(&format!("\"script\": \"{}\",", "a".repeat(n))));
         }
+    }
+
+    #[test]
+    fn text_units_accept_parts_and_compact_long_runs() {
+        // 門檻 64 / 65:64 個連續照舊為字串、65 個改為 parts,展開即得原字串
+        let s64 = "字".repeat(RUN_MIN - 1);
+        let s65 = "字".repeat(RUN_MIN);
+        assert_eq!(compact_strings(json!([s64.clone()])), json!([s64]));
+        let c = compact_strings(json!({"a": [s65.clone()], "n": 1, "b": true}));
+        assert_eq!(
+            c,
+            json!({"a": [{"parts": [{"repeat": "字", "count": 65}]}], "n": 1, "b": true})
+        );
+        assert_eq!(parts_text(&c["a"][0]["parts"]), Some(s65.clone()));
+        // 文字欄位:字串或 {"parts"};其他(含多餘的鍵、不合格的片段)為 None
+        assert_eq!(text_value(&json!("x")), Some("x".to_string()));
+        assert_eq!(
+            text_value(&json!({"parts": ["a", {"repeat": "b", "count": 2}]})),
+            Some("abb".to_string())
+        );
+        for bad in [
+            json!(1),
+            json!(null),
+            json!({"parts": []}),
+            json!({"parts": [{"repeat": "", "count": 1}]}),
+            json!({"parts": ["a"], "x": 1}),
+            json!({"text": "a"}),
+        ] {
+            assert_eq!(text_value(&bad), None, "{bad}");
+        }
+        let parts = json!({"parts": [{"repeat": "[", "count": 70}]});
+        assert_eq!(
+            project_escape_text(&parts),
+            Outcome::Ok(json!({"value": {"parts": [{"repeat": "［", "count": 70}]}}))
+        );
+        assert_eq!(project_escape_text(&json!({"parts": []})), type_error());
+        // 片段類:segment.text 可為 parts(驗證前展開);不合格為 error type
+        let seg = |text: Value| json!({"segment": {"id": "0123456789abcdef", "text": text}});
+        let long = json!({"parts": [{"repeat": "字", "count": 499}, "。"]});
+        let Outcome::Ok(v) = project_tts_text(&seg(long)) else {
+            panic!("預期 ok");
+        };
+        assert_eq!(
+            v,
+            json!({"value": {"parts": [{"repeat": "字", "count": 499}, "。"]}})
+        );
+        assert_eq!(project_tts_text(&seg(json!({"parts": [1]}))), type_error());
+        assert_eq!(project_tts_text(&seg(json!({"x": "a"}))), type_error());
+        assert_eq!(
+            project_tts_text(&seg(json!({"parts": ["好"]}))),
+            project_tts_text(&seg(json!("好")))
+        );
+        // shift_marks 的 old / new 與 split_segments 的 text 同樣可為 parts
+        let shift = json!({"segment": {"id": "0123456789abcdef", "text": "好"},
+                           "old": {"parts": [{"repeat": "a", "count": 3}]}, "new": "aaab"});
+        assert_eq!(
+            project_shift_marks(&shift),
+            Outcome::Ok(json!({"value": {"fusions": [], "fusion_off": [], "cleared": 0}}))
+        );
+        let shift_bad = json!({"segment": {"id": "0123456789abcdef", "text": "好"}, "old": {"parts": []}, "new": ""});
+        assert_eq!(project_shift_marks(&shift_bad), type_error());
+        let Outcome::Ok(v) =
+            project_split_segments(&json!({"text": {"parts": [{"repeat": "字", "count": 500}]}}))
+        else {
+            panic!("預期 ok");
+        };
+        assert_eq!(
+            v["value"][0]["text"],
+            json!({"parts": [{"repeat": "字", "count": 500}]})
+        );
+        assert_eq!(v["value"][0]["end"], json!(500));
     }
 
     #[test]

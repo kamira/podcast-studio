@@ -10,7 +10,10 @@
 //! - 每份 fixture 的案例數以常數寫明,且不低於該 task L2 的下限;`project.validate_text`(T2)另固定接受 / 拒絕筆數;
 //! - L2(macOS / Linux):以真 `parity` 執行檔跑每份 `fixtures/project/*.json`,exit 0、最後一行「結論:一致」。
 //!   對應 `features/project_rust.feature`「數值四捨五入與錯誤訊息與 Python 相同」(T1)、
-//!   「專案檔驗證結果與錯誤訊息與 Python 相同」「Rust 寫出的位元組與 Python 相同」(T2,`validate_text.json`)。
+//!   「專案檔驗證結果與錯誤訊息與 Python 相同」「Rust 寫出的位元組與 Python 相同」(T2,`validate_text.json`)、
+//!   「分句與合成文字與 Python 相同」(T3,`split_segments`、`escape_text`、`tts_text`、`fused_out`、`model_units`、
+//!   `shift_marks`)、「後製鍵與 Python 相同」(T3,`post_params`、`post_key`、`is_post_fresh`、`is_default_post`、
+//!   `effective`)。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -21,7 +24,7 @@ use parity::py::{self, Adapter, DEFAULT_TIMEOUT_SECS};
 use parity::{Fixture, Outcome, Registry};
 use serde_json::Value;
 
-/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1、T2 沒有。
+/// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1~T3 沒有(T3 純函式不碰檔案系統)。
 const WINDOWS_CASES: &[(&str, &str, &str)] = &[];
 
 /// `windows` 欄的筆數(與 `WINDOWS_CASES` 相同;改動差異清單時兩者一起改)。
@@ -41,6 +44,18 @@ const FIXTURES: &[(&str, &str, usize, usize)] = &[
     ),
     ("project.py_json", "py_json.json", 47, 40),
     ("project.validate_text", "validate_text.json", 265, 150),
+    // T3:純函式(L2 下限:每份 ≥ 15,`post_key` ≥ 60、`split_segments` ≥ 40、`tts_text` ≥ 40)
+    ("project.split_segments", "split_segments.json", 53, 40),
+    ("project.escape_text", "escape_text.json", 20, 15),
+    ("project.tts_text", "tts_text.json", 43, 40),
+    ("project.fused_out", "fused_out.json", 26, 15),
+    ("project.model_units", "model_units.json", 27, 15),
+    ("project.shift_marks", "shift_marks.json", 23, 15),
+    ("project.post_params", "post_params.json", 22, 15),
+    ("project.post_key", "post_key.json", 61, 60),
+    ("project.is_post_fresh", "is_post_fresh.json", 17, 15),
+    ("project.is_default_post", "is_default_post.json", 22, 15),
+    ("project.effective", "effective.json", 20, 15),
 ];
 
 /// `project.validate_text`(T2)的接受 / 拒絕筆數(以預期結果表計)。
@@ -203,12 +218,14 @@ fn validate_text_expectations_split_into_accept_and_reject() {
     println!("project.validate_text:接受 {accepted} 筆、拒絕 {rejected} 筆");
 }
 
-/// 審議轉送的上限(DIR-6 第 1 輪 F-1):每行最多字元數、同一字元最多連續數。
+/// 審議轉送的上限(DIR-6 第 1 輪 F-1):每行最多字元數、同一字元最多連續數(T3 補記:連續上限由 999 降為 64——
+/// 轉送者手抄連續 500 個同一字元時數錯,無法逐字交付)。
 const MAX_LINE_CHARS: usize = 12000;
-const MAX_RUN: usize = 999;
+const MAX_RUN: usize = 64;
 
-/// 守門:`fixtures/project/*.json` 與預期結果表每行 ≤ 12000 字元、同一字元連續 ≤ 999 個——超長的重複內容
-/// 一律改用 `validate_text` 的 `{"parts"}` 精簡形式(輸入)與 `{"dump": {"parts"}}`(結果)。
+/// 守門:`fixtures/project/*.json` 與預期結果表每行 ≤ 12000 字元、同一字元連續 ≤ 64 個——超長的重複內容
+/// 一律改用 `{"parts"}` 精簡形式:輸入(`validate_text` 的原文,與 T3 文字類 / 片段類單元的文字欄位)與結果
+/// (`{"dump": {"parts"}}`,與 T3 單元 `value` 內同字元連續 ≥ 65 的字串)。
 #[test]
 fn fixture_and_table_lines_stay_short() {
     let mut files: Vec<PathBuf> = std::fs::read_dir(fixture_dir())

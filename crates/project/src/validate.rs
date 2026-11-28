@@ -652,8 +652,12 @@ fn validate_segment(
     })
 }
 
-/// Python `_check_annotations`。
-fn check_annotations(chars: &[char], anns: Option<&Value>, label: &str) -> Result<Vec<Annotation>> {
+/// Python `_check_annotations`(`tts_text` 也以位置名稱「片段」呼叫,T3)。
+pub(crate) fn check_annotations(
+    chars: &[char],
+    anns: Option<&Value>,
+    label: &str,
+) -> Result<Vec<Annotation>> {
     let list = match anns {
         None | Some(Value::Null) => return Ok(Vec::new()),
         Some(Value::Array(list)) => list,
@@ -880,8 +884,8 @@ fn check_post(post: Option<&Value>, label: &str) -> Result<Option<Post>> {
     }))
 }
 
-/// Python `_check_fusions`。
-fn check_fusions(
+/// Python `_check_fusions`(`tts_text` 也以位置名稱「片段」呼叫,T3)。
+pub(crate) fn check_fusions(
     chars: &[char],
     items: Option<&Value>,
     annotations: &[Annotation],

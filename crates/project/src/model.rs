@@ -152,6 +152,15 @@ impl Segment {
     }
 }
 
+impl Segment {
+    /// 片段的 JSON 值(Python 驗證後的片段 dict;`Project::to_dict` 的 `segments[i]`)。
+    ///
+    /// [`crate::text::tts_text`] 以它重新檢查標註與合音(Python `tts_text` 對 dict 的檢查,T3)。
+    pub fn to_value(&self) -> Value {
+        segment_value(self)
+    }
+}
+
 /// 畫面軌的圖片(`{"id", "asset", "start", "end"}`)。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Image {
