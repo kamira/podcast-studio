@@ -128,8 +128,10 @@ fn stamp_ms_validity_matches_python_strptime() {
     {
         use common::{PyOut, call};
         use serde_json::json;
-        let reqs: Vec<(&str, Vec<serde_json::Value>)> =
-            cases.iter().map(|(s, _)| ("_stamp_ms", vec![json!(s)])).collect();
+        let reqs: Vec<(&str, Vec<serde_json::Value>)> = cases
+            .iter()
+            .map(|(s, _)| ("_stamp_ms", vec![json!(s)]))
+            .collect();
         for ((s, _), got) in cases.iter().zip(call(&reqs)) {
             match stamp_ms(s) {
                 Some(ms) => assert_eq!(got, PyOut::Value(json!(ms)), "{s}"),
@@ -167,7 +169,8 @@ fn eleventh_save_keeps_10_history() {
     let vids: Vec<String> = ids[1..].iter().map(|v| v.clone().expect("版本")).collect();
     assert_eq!(names_in(&t).len(), HISTORY_KEEP);
     assert_eq!(read::list_history(&t.path, P).expect("列出"), vids[1..]);
-    let newest = std::fs::read_to_string(hist(&t).join(format!("{}.json", vids[10]))).expect("讀取");
+    let newest =
+        std::fs::read_to_string(hist(&t).join(format!("{}.json", vids[10]))).expect("讀取");
     assert!(newest.contains("\"script\": \"第 10 版\""));
     for name in names_in(&t) {
         assert!(read::history_stamp(&name).is_some(), "{name}");
@@ -199,8 +202,12 @@ fn same_millisecond_12_saves_are_strictly_increasing() {
     let mut files: Vec<String> = vids[1..].iter().map(|v| format!("{v}.json")).collect();
     files.sort();
     assert_eq!(names_in(&t), files);
-    assert!(!hist(&t).join(format!("{}.json", vids[0])).exists(), "被刪的是最舊的那一個");
-    let newest = std::fs::read_to_string(hist(&t).join(format!("{}.json", vids[10]))).expect("讀取");
+    assert!(
+        !hist(&t).join(format!("{}.json", vids[0])).exists(),
+        "被刪的是最舊的那一個"
+    );
+    let newest =
+        std::fs::read_to_string(hist(&t).join(format!("{}.json", vids[10]))).expect("讀取");
     assert!(newest.contains("\"script\": \"第 10 版\""));
 }
 
@@ -209,11 +216,22 @@ fn same_millisecond_12_saves_are_strictly_increasing() {
 fn clock_going_backwards_uses_latest_plus_one() {
     let (_g, t) = setup();
     let clock = TestClock::at(BASE_MS + 10_000);
-    assert_eq!(write::save(&t.path, &proj(""), &clock).expect("存檔").version, None);
-    let v1 = write::save(&t.path, &proj(""), &clock).expect("存檔").version.expect("版本");
+    assert_eq!(
+        write::save(&t.path, &proj(""), &clock)
+            .expect("存檔")
+            .version,
+        None
+    );
+    let v1 = write::save(&t.path, &proj(""), &clock)
+        .expect("存檔")
+        .version
+        .expect("版本");
     assert_eq!(stamp_of(&v1), "20261027-120010-000");
     clock.set(BASE_MS);
-    let v2 = write::save(&t.path, &proj(""), &clock).expect("存檔").version.expect("版本");
+    let v2 = write::save(&t.path, &proj(""), &clock)
+        .expect("存檔")
+        .version
+        .expect("版本");
     assert_eq!(stamp_of(&v2), "20261027-120010-001");
     assert_eq!(read::list_history(&t.path, P).expect("列出"), [v1, v2]);
 }
@@ -223,7 +241,12 @@ fn clock_going_backwards_uses_latest_plus_one() {
 fn collision_retries_with_a_new_random_code_only() {
     let (_g, t) = setup();
     let clock = TestClock::with_rand(BASE_MS, &["aaaa", "aaaa", "bbbb", "cccc"]);
-    assert_eq!(write::save(&t.path, &proj(""), &clock).expect("存檔").version, None);
+    assert_eq!(
+        write::save(&t.path, &proj(""), &clock)
+            .expect("存檔")
+            .version,
+        None
+    );
     let blocker = hist(&t).join("20261027-120000-001-aaaa.json");
     std::fs::create_dir_all(&blocker).expect("建立目錄");
     let v: Vec<String> = (0..3)
@@ -243,7 +266,11 @@ fn collision_retries_with_a_new_random_code_only() {
         ]
     );
     assert!(blocker.is_dir());
-    assert_eq!(std::fs::read_dir(&blocker).expect("讀取").count(), 0, "沒有覆寫該目錄");
+    assert_eq!(
+        std::fs::read_dir(&blocker).expect("讀取").count(),
+        0,
+        "沒有覆寫該目錄"
+    );
 }
 
 /// 撞名重試 16 次仍失敗 → `Invalid`「無法建立不重複的版本檔名」;`project.json` 與 `history/` 不變。
@@ -268,7 +295,10 @@ fn rotation_deletes_only_the_oldest_matching_regular_files() {
     let h = format!("projects/{P}/history");
     t.file(&format!("projects/{P}/project.json"), &pjson(P));
     for i in 0..11 {
-        t.file(&format!("{h}/20260101-0000{i:02}-000-abcd.json"), format!("舊 {i}").as_bytes());
+        t.file(
+            &format!("{h}/20260101-0000{i:02}-000-abcd.json"),
+            format!("舊 {i}").as_bytes(),
+        );
     }
     // 名稱不符(全部用比版本更舊的 2024 年:若被誤計入會最先被刪)
     let unrelated = [
@@ -288,15 +318,26 @@ fn rotation_deletes_only_the_oldest_matching_regular_files() {
         t.file(&format!("{h}/{n}"), "不相干".as_bytes());
     }
     // 名稱符合但不是一般檔:目錄(含內容)
-    t.file(&format!("{h}/20250101-000000-000-dddd.json/inner.txt"), "目錄內".as_bytes());
+    t.file(
+        &format!("{h}/20250101-000000-000-dddd.json/inner.txt"),
+        "目錄內".as_bytes(),
+    );
     // 名稱符合的連結(指向檔案、目錄、不存在的目標)
     t.file("outside/old.json", b"outside");
     t.file("outside/dir/x.txt", b"outside-dir");
     let mut links = 0;
     for (n, target, dir) in [
-        ("20250101-000000-001-eeee.json", t.join("outside/old.json"), false),
+        (
+            "20250101-000000-001-eeee.json",
+            t.join("outside/old.json"),
+            false,
+        ),
         ("20250101-000000-002-ffff.json", t.join("outside/dir"), true),
-        ("20250101-000000-003-aaaa.json", t.join("outside/missing"), false),
+        (
+            "20250101-000000-003-aaaa.json",
+            t.join("outside/missing"),
+            false,
+        ),
     ] {
         if t.symlink(&format!("{h}/{n}"), &target, dir) {
             links += 1;
@@ -332,7 +373,9 @@ fn rotation_deletes_only_the_oldest_matching_regular_files() {
     let others_before = t
         .snapshot()
         .into_iter()
-        .filter(|(k, _)| k.starts_with(&format!("{h}/")) && !k.starts_with(&format!("{h}/20260101-")))
+        .filter(|(k, _)| {
+            k.starts_with(&format!("{h}/")) && !k.starts_with(&format!("{h}/20260101-"))
+        })
         .collect::<BTreeMap<_, _>>();
     let saved = write::save(&t.path, &proj("新"), &clock).expect("存檔");
     assert_eq!(saved.version.as_deref(), Some("20261027-120000-000-abcd"));
@@ -343,7 +386,9 @@ fn rotation_deletes_only_the_oldest_matching_regular_files() {
         let p = format!("{h}/20260101-0000{i:02}-000-abcd.json");
         assert_eq!(after.contains_key(&p), i >= 2, "{p}");
     }
-    let mut want: Vec<String> = (2..11).map(|i| format!("20260101-0000{i:02}-000-abcd")).collect();
+    let mut want: Vec<String> = (2..11)
+        .map(|i| format!("20260101-0000{i:02}-000-abcd"))
+        .collect();
     want.push("20261027-120000-000-abcd".to_string());
     assert_eq!(read::list_history(&t.path, P).expect("列出"), want);
     for (k, v) in &others_before {
@@ -358,7 +403,10 @@ fn rotation_deletes_only_the_oldest_matching_regular_files() {
     assert!(std::fs::symlink_metadata(&fifo).is_ok(), "FIFO 不得刪除");
     #[cfg(target_os = "linux")]
     assert_eq!(std::fs::read(&raw).expect("非 UTF-8 名稱仍在"), b"raw");
-    println!("輪替選取規則:名稱不符 {} 個、目錄 1 個、連結 {links} 個不計入且未刪除", unrelated.len());
+    println!(
+        "輪替選取規則:名稱不符 {} 個、目錄 1 個、連結 {links} 個不計入且未刪除",
+        unrelated.len()
+    );
 }
 
 /// 同一時間戳時依 mtime、再依檔名排序(`(stamp, mtime_ns, 檔名)`,CHG-20261122-01)。
@@ -370,7 +418,11 @@ fn rotation_order_is_stamp_then_mtime_then_name() {
     write::save(&t.path, &proj(""), &clock).expect("存檔");
     // 名稱越大 mtime 越舊:最舊的是 000a(不是名稱最小的 0001)
     for i in 1..=10u64 {
-        t.file_at(&format!("{h}/20260101-000000-000-{i:04x}.json"), b"{}", 1_767_225_600_000 + (20 - i) * 1000);
+        t.file_at(
+            &format!("{h}/20260101-000000-000-{i:04x}.json"),
+            b"{}",
+            1_767_225_600_000 + (20 - i) * 1000,
+        );
     }
     write::save(&t.path, &proj("新"), &clock).expect("存檔");
     assert!(!hist(&t).join("20260101-000000-000-000a.json").exists());
@@ -401,7 +453,11 @@ fn update_and_restore_are_strictly_increasing() {
     let stamps: Vec<&str> = v.iter().map(|x| stamp_of(x)).collect();
     assert_eq!(
         stamps,
-        ["20261027-120000-000", "20261027-120000-001", "20261027-120000-002"]
+        [
+            "20261027-120000-000",
+            "20261027-120000-001",
+            "20261027-120000-002"
+        ]
     );
     assert_eq!(read::list_history(&t.path, P).expect("列出"), v);
 
@@ -409,13 +465,26 @@ fn update_and_restore_are_strictly_increasing() {
     let mut p = proj("第 0 版");
     write::save(&t2.path, &p, &clock).expect("存檔");
     p.script = "第 1 版".to_string();
-    let v1 = write::save(&t2.path, &p, &clock).expect("存檔").version.expect("版本");
+    let v1 = write::save(&t2.path, &p, &clock)
+        .expect("存檔")
+        .version
+        .expect("版本");
     p.script = "第 2 版".to_string();
-    let v2 = write::save(&t2.path, &p, &clock).expect("存檔").version.expect("版本");
-    let v3 = write::restore(&t2.path, P, &v1, &clock).expect("還原").version.expect("版本");
+    let v2 = write::save(&t2.path, &p, &clock)
+        .expect("存檔")
+        .version
+        .expect("版本");
+    let v3 = write::restore(&t2.path, P, &v1, &clock)
+        .expect("還原")
+        .version
+        .expect("版本");
     assert_eq!(
         [stamp_of(&v1), stamp_of(&v2), stamp_of(&v3)],
-        ["20261027-120000-000", "20261027-120000-001", "20261027-120000-002"]
+        [
+            "20261027-120000-000",
+            "20261027-120000-001",
+            "20261027-120000-002"
+        ]
     );
     assert_eq!(read::list_history(&t2.path, P).expect("列出"), [v1, v2, v3]);
     assert_eq!(read::load(&t2.path, P).expect("載入").script, "第 0 版");
@@ -429,7 +498,10 @@ fn symlinked_project_or_history_refuses_save_and_rotation() {
         for i in 0..12 {
             t.file(&format!("outside/20260101-0000{i:02}-000-abcd.json"), b"{}");
         }
-        t.file("outside/project.json", br#"{"schema_version": 2, "name": "x"}"#);
+        t.file(
+            "outside/project.json",
+            br#"{"schema_version": 2, "name": "x"}"#,
+        );
         let made = if which == "project" {
             t.symlink(&format!("projects/{P}"), &t.join("outside"), true)
         } else {
@@ -441,21 +513,36 @@ fn symlinked_project_or_history_refuses_save_and_rotation() {
             continue;
         }
         let outside = |s: &BTreeMap<String, common::Entry>| -> BTreeMap<String, common::Entry> {
-            s.iter().filter(|(k, _)| k.starts_with("outside")).map(|(k, v)| (k.clone(), v.clone())).collect()
+            s.iter()
+                .filter(|(k, _)| k.starts_with("outside"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
         };
         let before = outside(&t.snapshot());
         let e = write::save(&t.path, &proj("新內容"), &TestClock::at(BASE_MS)).expect_err("拒絕");
         assert_eq!(e.kind(), ErrorKind::UnsafePath, "{which}");
-        let label = if which == "project" { "專案" } else { "history" };
-        assert_eq!(e.errors(), [format!("資料目錄「{label}」是符號連結,不接受")]);
+        let label = if which == "project" {
+            "專案"
+        } else {
+            "history"
+        };
+        assert_eq!(
+            e.errors(),
+            [format!("資料目錄「{label}」是符號連結,不接受")]
+        );
         assert_eq!(outside(&t.snapshot()), before, "{which}");
         if which == "history" {
             let dir = read::open_project(&t.path, P).expect("開啟");
             let mut warnings = Vec::new();
-            assert_eq!(write::rotate(&dir, P, &mut warnings).expect("輪替"), Vec::<String>::new());
+            assert_eq!(
+                write::rotate(&dir, P, &mut warnings).expect("輪替"),
+                Vec::<String>::new()
+            );
             assert_eq!(
                 warnings,
-                [format!("專案「{P}」的 history 目錄不安全,拒絕輪替:資料目錄「history」是符號連結,不接受")]
+                [format!(
+                    "專案「{P}」的 history 目錄不安全,拒絕輪替:資料目錄「history」是符號連結,不接受"
+                )]
             );
             assert_eq!(outside(&t.snapshot()), before);
         }
@@ -473,22 +560,39 @@ fn history_that_is_not_a_directory_is_refused() {
     assert_eq!(e.errors(), ["資料目錄「history」不在預期位置"]);
     let dir = read::open_project(&t.path, P).expect("開啟");
     let mut warnings = Vec::new();
-    assert!(write::rotate(&dir, P, &mut warnings).expect("輪替").is_empty());
+    assert!(
+        write::rotate(&dir, P, &mut warnings)
+            .expect("輪替")
+            .is_empty()
+    );
     assert_eq!(
         warnings,
-        [format!("專案「{P}」的 history 目錄不安全,拒絕輪替:資料目錄「history」不在預期位置")]
+        [format!(
+            "專案「{P}」的 history 目錄不安全,拒絕輪替:資料目錄「history」不在預期位置"
+        )]
     );
-    assert_eq!(std::fs::read(hist(&t)).expect("讀取"), "不是目錄".as_bytes());
+    assert_eq!(
+        std::fs::read(hist(&t)).expect("讀取"),
+        "不是目錄".as_bytes()
+    );
     // 沒有 history/ 時輪替什麼都不做
     std::fs::remove_file(hist(&t)).expect("刪除");
-    assert!(write::rotate(&dir, P, &mut warnings).expect("輪替").is_empty());
+    assert!(
+        write::rotate(&dir, P, &mut warnings)
+            .expect("輪替")
+            .is_empty()
+    );
 }
 
 /// D-5:`history/` 內有符合 `HISTORY_RE` 但日期無效的版本檔名時 Rust 拒絕存檔、不寫入任何東西
 /// (Python `_stamp_ms` 丟 `ValueError`;macOS / Linux 以 Python 子程序確認)。
 #[test]
 fn invalid_history_date_refuses_save() {
-    for bad in ["20261332-000000-000-abcd", "20250229-000000-000-abcd", "20261027-120060-000-abcd"] {
+    for bad in [
+        "20261332-000000-000-abcd",
+        "20250229-000000-000-abcd",
+        "20261027-120060-000-abcd",
+    ] {
         let (_g, t) = setup();
         let clock = TestClock::at(BASE_MS);
         write::save(&t.path, &proj("舊"), &clock).expect("存檔");
@@ -524,7 +628,10 @@ fn stamp_out_of_range_refuses_save() {
     assert_eq!(e.errors(), [STAMP_OUT_OF_RANGE]);
     assert_eq!(t.snapshot(), before);
     clock.set(BASE_MS);
-    t.file(&format!("projects/{P}/history/99991231-235959-999-abcd.json"), b"{}");
+    t.file(
+        &format!("projects/{P}/history/99991231-235959-999-abcd.json"),
+        b"{}",
+    );
     let before = t.snapshot();
     let e = write::save(&t.path, &proj("新"), &clock).expect_err("拒絕");
     assert_eq!(e.errors(), [STAMP_OUT_OF_RANGE]);

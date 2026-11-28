@@ -52,13 +52,22 @@ fn reserved_names_cannot_be_created_and_nothing_is_created() {
         let before = t.snapshot();
         for name in &names {
             reserved_err(write::create(&t.path, name, "一。", None, &clock), name);
-            reserved_err(write::save(&t.path, &Project::new(name.as_str()), &clock), name);
+            reserved_err(
+                write::save(&t.path, &Project::new(name.as_str()), &clock),
+                name,
+            );
             reserved_err(write::open_project_create(&t.path, name), name);
-            reserved_err(write::open_subdir_create(&t.path, name, Subdir::Audio), name);
+            reserved_err(
+                write::open_subdir_create(&t.path, name, Subdir::Audio),
+                name,
+            );
             assert_eq!(t.snapshot(), before, "{name}:不建立任何目錄");
         }
     }
-    println!("保留名稱 {} 種寫法 × 4 個建立路徑:全部拒絕、沒有建立任何目錄", names.len());
+    println!(
+        "保留名稱 {} 種寫法 × 4 個建立路徑:全部拒絕、沒有建立任何目錄",
+        names.len()
+    );
 }
 
 #[test]
@@ -66,7 +75,9 @@ fn prefixes_and_extensions_of_reserved_names_are_allowed() {
     let _g = ProjectsGuard::new();
     let t = TempTree::new("project-t6-names-");
     let clock = TestClock::at(BASE_MS);
-    for name in ["CONX", "COM10", "LPT", "NULL", "AUXX", "CON1", "con_1", "PRN-2"] {
+    for name in [
+        "CONX", "COM10", "LPT", "NULL", "AUXX", "CON1", "con_1", "PRN-2",
+    ] {
         write::create(&t.path, name, "一。", None, &clock).unwrap_or_else(|e| panic!("{name}:{e}"));
         assert_eq!(read::load(&t.path, name).expect("載入").name, name);
     }
@@ -120,6 +131,9 @@ fn python_accepts_reserved_names_for_new_projects() {
     let _g = ProjectsGuard::new();
     let t = TempTree::new("project-t6-names-py-");
     let got = call_in(&t.path, &[("create", vec![json!("CON"), json!("一。")])]);
-    assert!(matches!(&got[0], PyOut::Value(v) if v["dump"].as_str().is_some_and(|d| d.contains("\"name\": \"CON\""))), "{got:?}");
+    assert!(
+        matches!(&got[0], PyOut::Value(v) if v["dump"].as_str().is_some_and(|d| d.contains("\"name\": \"CON\""))),
+        "{got:?}"
+    );
     assert!(t.join("projects/CON/project.json").is_file());
 }

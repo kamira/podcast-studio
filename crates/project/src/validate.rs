@@ -299,7 +299,8 @@ fn slice(chars: &[char], a: usize, b: usize) -> &[char] {
     &chars[a.min(b)..b]
 }
 
-fn validate_and_dump(data: &Value) -> Result<(Project, Vec<u8>)> {
+/// [`validate`] 與 [`dump_validated`] 的共同本體:驗證後的專案與寫出位元組(寫入 API 一次取得兩者,T6)。
+pub(crate) fn validate_and_dump(data: &Value) -> Result<(Project, Vec<u8>)> {
     let Value::Object(obj) = data else {
         return Err(Error::invalid(NOT_OBJECT));
     };

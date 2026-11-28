@@ -147,7 +147,18 @@ pub(crate) fn io_error(e: &std::io::Error) -> Error {
 /// 「資料目錄「label」不在預期位置」;不存在 → `Fs(NotFound)`(Python `FileNotFoundError(label)`,由呼叫端轉換);
 /// Windows 保留裝置名 → `Invalid`([`RESERVED_DEVICE`],D-8);其他作業系統錯誤 → `Fs`。
 pub(crate) fn child(dir: &SafeDir, part: &str, label: &str) -> Result<SafeDir> {
-    match dir.open_child(part, DirOptions::default()) {
+    child_in(dir, part, label, DirOptions::default())
+}
+
+/// [`child`] 的一般形式:`opts.create` 時不存在就建立(Python `_child(..., create=True)`;只供寫入 API 使用,T6)。
+/// 錯誤的對應與 [`child`] 相同。
+pub(crate) fn child_in(
+    dir: &SafeDir,
+    part: &str,
+    label: &str,
+    opts: DirOptions,
+) -> Result<SafeDir> {
+    match dir.open_child(part, opts) {
         Ok(d) => Ok(d),
         Err(e) => match e.kind() {
             safe_fs::ErrorKind::Unsafe => {

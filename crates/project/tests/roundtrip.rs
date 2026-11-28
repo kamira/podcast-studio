@@ -22,10 +22,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use common::{BASE_MS, ProjectsGuard, PyOut, TempTree, TestClock, call_each};
+use project::Project;
 use project::read;
 use project::validate::{parse_project_json, validate};
 use project::write;
-use project::Project;
 use serde_json::{Value, json};
 use studio_core::names::is_windows_reserved;
 
@@ -79,7 +79,10 @@ fn corpus() -> (Vec<(String, Project)>, usize) {
         }
         accepted += 1;
         let data = parse_project_json(&text_bytes(&c["input"])).expect("接受案例可解析");
-        out.push((format!("validate_text {id}"), validate(&data).expect("接受案例可驗證")));
+        out.push((
+            format!("validate_text {id}"),
+            validate(&data).expect("接受案例可驗證"),
+        ));
     }
     let table: Value = serde_json::from_str(
         &std::fs::read_to_string(parity_dir().join("tests/data/project_expected.json"))
@@ -129,7 +132,10 @@ fn dump_of(out: &PyOut) -> Option<String> {
 fn rust_and_python_round_trip_each_other() {
     let _g = ProjectsGuard::new();
     let (corpus, accepted) = corpus();
-    assert!(corpus.len() >= accepted, "語料不少於 validate_text 的接受案例數");
+    assert!(
+        corpus.len() >= accepted,
+        "語料不少於 validate_text 的接受案例數"
+    );
     let base = TempTree::new("project-t6-roundtrip-");
     let clock = TestClock::at(BASE_MS);
 
@@ -140,18 +146,25 @@ fn rust_and_python_round_trip_each_other() {
         let root = base.join(&format!("r{i}"));
         std::fs::create_dir_all(&root).expect("建立根目錄");
         if is_windows_reserved(&p.name) {
-            std::fs::create_dir_all(root.join("projects").join(&p.name)).expect("既有的保留名稱專案");
+            std::fs::create_dir_all(root.join("projects").join(&p.name))
+                .expect("既有的保留名稱專案");
         }
         write::save(&root, p, &clock).expect("Rust 存檔");
         rust_files.push(std::fs::read(project_file(&root, &p.name)).expect("讀取"));
         reqs.push((root, p.name.clone()));
     }
-    let calls: Vec<(&Path, &str, Vec<Value>)> =
-        reqs.iter().map(|(r, n)| (r.as_path(), "load", vec![json!(n)])).collect();
+    let calls: Vec<(&Path, &str, Vec<Value>)> = reqs
+        .iter()
+        .map(|(r, n)| (r.as_path(), "load", vec![json!(n)]))
+        .collect();
     let got = call_each(&calls);
     let mut r2p = 0;
     for (((what, _), bytes), out) in corpus.iter().zip(&rust_files).zip(&got) {
-        assert_eq!(dump_of(out).map(String::into_bytes).as_ref(), Some(bytes), "Rust → Python:{what}");
+        assert_eq!(
+            dump_of(out).map(String::into_bytes).as_ref(),
+            Some(bytes),
+            "Rust → Python:{what}"
+        );
         r2p += 1;
     }
 
@@ -178,7 +191,11 @@ fn rust_and_python_round_trip_each_other() {
     for ((root, (what, p)), rust_bytes) in roots.iter().zip(&corpus).zip(&rust_files) {
         let py_bytes = std::fs::read(project_file(root, &p.name)).expect("讀取 Python 寫出的檔案");
         let loaded = read::load(root, &p.name).expect("Rust 載入 Python 寫出的檔案");
-        assert_eq!(loaded.dump_bytes().expect("寫出"), py_bytes, "Python → Rust:{what}");
+        assert_eq!(
+            loaded.dump_bytes().expect("寫出"),
+            py_bytes,
+            "Python → Rust:{what}"
+        );
         assert_eq!(&py_bytes, rust_bytes, "兩版寫出的位元組相同:{what}");
         p2r += 1;
     }
@@ -210,7 +227,10 @@ fn history_written_by_one_side_reads_the_same_on_the_other() {
         (0..3)
             .map(|k| {
                 let mut q = p.clone();
-                q.script = format!("{}(第 {k} 版)", q.script.chars().take(100).collect::<String>());
+                q.script = format!(
+                    "{}(第 {k} 版)",
+                    q.script.chars().take(100).collect::<String>()
+                );
                 q
             })
             .collect()
@@ -230,14 +250,29 @@ fn history_written_by_one_side_reads_the_same_on_the_other() {
         assert_eq!(read::list_history(&root, &p.name).expect("列出"), vids);
         let mut calls: Vec<(&Path, &str, Vec<Value>)> =
             vec![(root.as_path(), "list_history", vec![json!(p.name)])];
-        calls.extend(vids.iter().map(|v| (root.as_path(), "load_version", vec![json!(p.name), json!(v)])));
+        calls.extend(vids.iter().map(|v| {
+            (
+                root.as_path(),
+                "load_version",
+                vec![json!(p.name), json!(v)],
+            )
+        }));
         let got = call_each(&calls);
         assert_eq!(got[0], PyOut::Value(json!(vids)), "{what}");
         for (k, v) in vids.iter().enumerate() {
-            let file = std::fs::read(root.join("projects").join(&p.name).join("history").join(format!("{v}.json")))
-                .expect("讀取版本檔");
+            let file = std::fs::read(
+                root.join("projects")
+                    .join(&p.name)
+                    .join("history")
+                    .join(format!("{v}.json")),
+            )
+            .expect("讀取版本檔");
             assert_eq!(file, vs[k].dump_bytes().expect("寫出"), "{what} {v}");
-            assert_eq!(dump_of(&got[k + 1]).map(String::into_bytes), Some(file), "{what} {v}");
+            assert_eq!(
+                dump_of(&got[k + 1]).map(String::into_bytes),
+                Some(file),
+                "{what} {v}"
+            );
         }
         rust_side += 1;
 
@@ -248,8 +283,10 @@ fn history_written_by_one_side_reads_the_same_on_the_other() {
             .iter()
             .map(|v| String::from_utf8(v.dump_bytes().expect("寫出")).expect("UTF-8"))
             .collect();
-        let mut calls: Vec<(&Path, &str, Vec<Value>)> =
-            texts.iter().map(|t| (root.as_path(), "@save_text", vec![json!(t)])).collect();
+        let mut calls: Vec<(&Path, &str, Vec<Value>)> = texts
+            .iter()
+            .map(|t| (root.as_path(), "@save_text", vec![json!(t)]))
+            .collect();
         calls.push((root.as_path(), "list_history", vec![json!(p.name)]));
         let got = call_each(&calls);
         let py_vids: Vec<String> = got[..3]
@@ -261,15 +298,26 @@ fn history_written_by_one_side_reads_the_same_on_the_other() {
             })
             .collect();
         assert_eq!(got[3], PyOut::Value(json!(py_vids)), "{what}");
-        assert_eq!(read::list_history(&root, &p.name).expect("列出"), py_vids, "{what}");
+        assert_eq!(
+            read::list_history(&root, &p.name).expect("列出"),
+            py_vids,
+            "{what}"
+        );
         for (k, v) in py_vids.iter().enumerate() {
-            let file = std::fs::read(root.join("projects").join(&p.name).join("history").join(format!("{v}.json")))
-                .expect("讀取版本檔");
+            let file = std::fs::read(
+                root.join("projects")
+                    .join(&p.name)
+                    .join("history")
+                    .join(format!("{v}.json")),
+            )
+            .expect("讀取版本檔");
             let loaded = read::load_version(&root, &p.name, v).expect("Rust 載入 Python 的版本");
             assert_eq!(loaded.dump_bytes().expect("寫出"), file, "{what} {v}");
             assert_eq!(file, texts[k].as_bytes(), "{what} {v}");
         }
         python_side += 1;
     }
-    println!("history 往返:Rust 寫 → Python 讀 {rust_side} 個專案、Python 寫 → Rust 讀 {python_side} 個專案,各 3 次存檔");
+    println!(
+        "history 往返:Rust 寫 → Python 讀 {rust_side} 個專案、Python 寫 → Rust 讀 {python_side} 個專案,各 3 次存檔"
+    );
 }

@@ -67,7 +67,11 @@ fn save_writes_dump_bytes_and_creates_layout() {
     assert_eq!(saved.version, None);
     assert!(saved.warnings.is_empty());
     let bytes = std::fs::read(pdir(&t).join("project.json")).expect("讀取");
-    assert_eq!(bytes, p.dump_bytes().expect("寫出"), "與 _dump(validate(to_dict())) 相同");
+    assert_eq!(
+        bytes,
+        p.dump_bytes().expect("寫出"),
+        "與 _dump(validate(to_dict())) 相同"
+    );
     let got = read::load(&t.path, P).expect("載入");
     assert_eq!(got.segments[0].speed, Some(1.25));
     assert_eq!(got.dump_bytes().expect("寫出"), bytes);
@@ -84,12 +88,22 @@ fn save_writes_dump_bytes_and_creates_layout() {
             format!("projects/{P}/project.json"),
         ]
     );
-    assert_eq!(snap[&format!("projects/{P}/.lock")].2.as_deref(), Some(&[][..]));
+    assert_eq!(
+        snap[&format!("projects/{P}/.lock")].2.as_deref(),
+        Some(&[][..])
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(pdir(&t).join("project.json")).expect("metadata").permissions().mode();
-        assert_eq!(mode & 0o777 & !0o644, 0, "暫存檔以 0o644 建立(受 umask 影響),不會多出其他權限位元:{mode:o}");
+        let mode = std::fs::metadata(pdir(&t).join("project.json"))
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777 & !0o644,
+            0,
+            "暫存檔以 0o644 建立(受 umask 影響),不會多出其他權限位元:{mode:o}"
+        );
     }
 }
 
@@ -99,11 +113,20 @@ fn second_save_archives_the_old_file_as_a_hard_link_copy() {
     let clock = TestClock::at(BASE_MS);
     write::save(&t.path, &proj("舊"), &clock).expect("存檔");
     let old = std::fs::read(pdir(&t).join("project.json")).expect("讀取");
-    let v = write::save(&t.path, &proj("新"), &clock).expect("存檔").version.expect("版本");
+    let v = write::save(&t.path, &proj("新"), &clock)
+        .expect("存檔")
+        .version
+        .expect("版本");
     assert_eq!(v, "20261027-120000-000-abcd");
-    assert_eq!(std::fs::read(pdir(&t).join(format!("history/{v}.json"))).expect("讀取"), old);
+    assert_eq!(
+        std::fs::read(pdir(&t).join(format!("history/{v}.json"))).expect("讀取"),
+        old
+    );
     assert_eq!(read::load(&t.path, P).expect("載入").script, "新");
-    assert_eq!(read::load_version(&t.path, P, &v).expect("載入版本").script, "舊");
+    assert_eq!(
+        read::load_version(&t.path, P, &v).expect("載入版本").script,
+        "舊"
+    );
     assert!(temp_files(&t).is_empty());
 }
 
@@ -123,9 +146,16 @@ fn atomic_write_failure_removes_the_temp_file() {
     let e = write::save(&t.path, &proj("新"), &clock).expect_err("取代失敗");
     assert!(matches!(e.kind(), ErrorKind::Fs(_)), "{e:?}");
     assert_eq!(e.class(), "os_error");
-    assert!(temp_files(&t).is_empty(), "暫存檔須被刪除:{:?}", temp_files(&t));
+    assert!(
+        temp_files(&t).is_empty(),
+        "暫存檔須被刪除:{:?}",
+        temp_files(&t)
+    );
     assert!(pdir(&t).join("project.json/inner").is_file());
-    assert_eq!(read::list_history(&t.path, P).expect("列出"), ["20261027-120000-000-abcd"]);
+    assert_eq!(
+        read::list_history(&t.path, P).expect("列出"),
+        ["20261027-120000-000-abcd"]
+    );
 }
 
 /// 暫存檔名撞名時換下一個隨機碼;重試 16 次仍撞名 → `Invalid`「無法建立暫存檔」(既有的同名檔不變)。
@@ -138,12 +168,23 @@ fn temp_name_collisions_retry_then_give_up() {
     t.file(&format!("projects/{P}/{next}"), "保留".as_bytes());
     write::save(&t.path, &proj("新"), &clock).expect("撞名重試後存檔");
     assert_eq!(read::load(&t.path, P).expect("載入").script, "新");
-    assert_eq!(std::fs::read(pdir(&t).join(&next)).expect("讀取"), "保留".as_bytes());
-    assert_eq!(temp_files(&t), [next.clone()]);
+    assert_eq!(
+        std::fs::read(pdir(&t).join(&next)).expect("讀取"),
+        "保留".as_bytes()
+    );
+    assert_eq!(temp_files(&t), std::slice::from_ref(&next));
 
     clock.fix_hex8(&format!("{:016x}", 2));
-    err(write::save(&t.path, &proj("更新"), &clock), ErrorKind::Invalid, &[NO_TEMP]);
-    assert_eq!(read::load(&t.path, P).expect("載入").script, "新", "project.json 不變");
+    err(
+        write::save(&t.path, &proj("更新"), &clock),
+        ErrorKind::Invalid,
+        &[NO_TEMP],
+    );
+    assert_eq!(
+        read::load(&t.path, P).expect("載入").script,
+        "新",
+        "project.json 不變"
+    );
     assert_eq!(temp_files(&t), [next]);
 }
 
@@ -183,9 +224,17 @@ fn open_project_create_and_open_subdir_create() {
     write::open_subdir_create(&root, P, Subdir::Audio).expect("開啟");
     assert!(root.join(format!("projects/{P}/audio/a.wav")).is_file());
     // 名稱、只差大小寫、不在預期位置
-    err(write::open_project_create(&root, "a/b"), ErrorKind::Invalid, &[NAME_HINT]);
+    err(
+        write::open_project_create(&root, "a/b"),
+        ErrorKind::Invalid,
+        &[NAME_HINT],
+    );
     write::open_project_create(&root, "Ep1").expect("建立");
-    err(write::open_project_create(&root, "ep1"), ErrorKind::Exists, &[CASE_EXISTS]);
+    err(
+        write::open_project_create(&root, "ep1"),
+        ErrorKind::Exists,
+        &[CASE_EXISTS],
+    );
     std::fs::write(root.join("projects/檔案"), b"x").expect("寫入");
     err(
         write::open_project_create(&root, "檔案"),
@@ -208,7 +257,10 @@ fn open_project_create_and_open_subdir_create() {
             ErrorKind::UnsafePath,
             &["資料目錄「tmp」是符號連結,不接受"],
         );
-        assert_eq!(std::fs::read_dir(t.join("outside")).expect("讀取").count(), 1);
+        assert_eq!(
+            std::fs::read_dir(t.join("outside")).expect("讀取").count(),
+            1
+        );
     } else {
         assert!(!in_ci(), "CI 上無法建立符號連結,判失敗");
         println!("略過(Windows 無權限建立符號連結):子目錄是連結");
@@ -264,7 +316,10 @@ fn update_does_not_save_on_error_invalid_or_rename() {
         &[RENAME_IN_UPDATE],
     );
     assert_eq!(t.snapshot(), before, "都不存檔");
-    assert_eq!(read::load(&t.path, P).expect("載入").defaults.speed, Defaults::default().speed);
+    assert_eq!(
+        read::load(&t.path, P).expect("載入").defaults.speed,
+        Defaults::default().speed
+    );
     err(
         write::update(&t.path, "沒有這個", &clock, |_| Ok(())),
         ErrorKind::NotFound,
@@ -303,7 +358,12 @@ fn concurrent_updates_do_not_overwrite_each_other() {
     for h in handles {
         h.join().expect("執行緒").expect("修改");
     }
-    let mut bytes: Vec<u64> = read::load(&t.path, P).expect("載入").assets.iter().map(|a| a.bytes).collect();
+    let mut bytes: Vec<u64> = read::load(&t.path, P)
+        .expect("載入")
+        .assets
+        .iter()
+        .map(|a| a.bytes)
+        .collect();
     bytes.sort_unstable();
     assert_eq!(bytes, (0..n).collect::<Vec<_>>());
 }
@@ -325,8 +385,12 @@ fn concurrent_saves_from_two_threads() {
                 (0..rounds)
                     .map(|i| {
                         let mut p = proj(&format!("{tag}-{i}").repeat(200));
-                        p.segments.push(Segment::new("0000000000000001", format!("{tag}第{i}句。")));
-                        write::save(&root, &p, &SystemClock).expect("存檔").version.expect("版本")
+                        p.segments
+                            .push(Segment::new("0000000000000001", format!("{tag}第{i}句。")));
+                        write::save(&root, &p, &SystemClock)
+                            .expect("存檔")
+                            .version
+                            .expect("版本")
                     })
                     .collect::<Vec<String>>()
             })
@@ -341,7 +405,9 @@ fn concurrent_saves_from_two_threads() {
     assert_eq!(unique.len(), 2 * rounds, "history 檔名不重複");
     let got = read::load(&t.path, P).expect("不是壞檔");
     assert!(["甲", "乙"].contains(&got.script.split('-').next().unwrap_or_default()));
-    let hist: Vec<_> = std::fs::read_dir(pdir(&t).join("history")).expect("讀取").collect();
+    let hist: Vec<_> = std::fs::read_dir(pdir(&t).join("history"))
+        .expect("讀取")
+        .collect();
     assert_eq!(hist.len(), HISTORY_KEEP);
     for v in read::list_history(&t.path, P).expect("列出") {
         read::load_version(&t.path, P, &v).expect("每個版本都可載入");
@@ -358,8 +424,12 @@ fn save_succeeds_while_another_handle_reads_project_json() {
     write::save(&t.path, &proj("舊"), &clock).expect("存檔");
     let old = std::fs::read(pdir(&t).join("project.json")).expect("讀取");
     let mut reader = std::fs::File::open(pdir(&t).join("project.json")).expect("唯讀開啟");
-    let v = write::save(&t.path, &proj("新"), &clock).expect("開著時存檔").version.expect("版本");
-    let mut reader2 = std::fs::File::open(pdir(&t).join(format!("history/{v}.json"))).expect("開啟版本");
+    let v = write::save(&t.path, &proj("新"), &clock)
+        .expect("開著時存檔")
+        .version
+        .expect("版本");
+    let mut reader2 =
+        std::fs::File::open(pdir(&t).join(format!("history/{v}.json"))).expect("開啟版本");
     write::save(&t.path, &proj("更新"), &clock).expect("再存檔");
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).expect("讀取");
@@ -368,7 +438,10 @@ fn save_succeeds_while_another_handle_reads_project_json() {
     reader2.read_to_end(&mut buf2).expect("讀取");
     assert_eq!(buf2, old);
     assert_eq!(read::load(&t.path, P).expect("載入").script, "更新");
-    println!("其他 handle 唯讀開著 project.json 時存檔:成功({})", std::env::consts::OS);
+    println!(
+        "其他 handle 唯讀開著 project.json 時存檔:成功({})",
+        std::env::consts::OS
+    );
 }
 
 #[test]
@@ -377,11 +450,17 @@ fn create_splits_script_with_ids_from_the_clock() {
     let clock = TestClock::at(BASE_MS);
     let p = write::create(&t.path, P, "大家好。今天天氣很好!\n第二段", None, &clock).expect("建立");
     let ids: Vec<&str> = p.segments.iter().map(|s| s.id.as_str()).collect();
-    assert_eq!(ids, ["0000000000000001", "0000000000000002", "0000000000000003"]);
+    assert_eq!(
+        ids,
+        ["0000000000000001", "0000000000000002", "0000000000000003"]
+    );
     let brk: Vec<&str> = p.segments.iter().map(|s| s.brk.as_str()).collect();
     assert_eq!(brk, ["sentence", "paragraph", "end"]);
     assert_eq!(read::load(&t.path, P).expect("載入"), p);
-    assert_eq!(read::list_history(&t.path, P).expect("列出"), Vec::<String>::new());
+    assert_eq!(
+        read::list_history(&t.path, P).expect("列出"),
+        Vec::<String>::new()
+    );
     // 建立時的暫存檔用下一個隨機碼,沒有殘留
     assert!(temp_files(&t).is_empty());
     let d = Defaults {
@@ -398,7 +477,11 @@ fn create_refuses_existing_and_creates_nothing_when_invalid() {
     let (_g, t) = setup();
     let clock = TestClock::at(BASE_MS);
     for bad in ["a/b", "", ".."] {
-        err(write::create(&t.path, bad, "一。", None, &clock), ErrorKind::Invalid, &[NAME_HINT]);
+        err(
+            write::create(&t.path, bad, "一。", None, &clock),
+            ErrorKind::Invalid,
+            &[NAME_HINT],
+        );
     }
     err(
         write::create(&t.path, P, &"字".repeat(50001), None, &clock),
@@ -419,11 +502,26 @@ fn create_refuses_existing_and_creates_nothing_when_invalid() {
         ErrorKind::Invalid,
         &["defaults.speed必須在 0.5~2.0 倍之間"],
     );
-    assert!(t.snapshot().is_empty(), "不合格時不建立任何東西(含 projects/)");
+    assert!(
+        t.snapshot().is_empty(),
+        "不合格時不建立任何東西(含 projects/)"
+    );
     write::create(&t.path, P, "一。", None, &clock).expect("建立");
-    err(write::create(&t.path, P, "", None, &clock), ErrorKind::Exists, &[EXISTS]);
+    err(
+        write::create(&t.path, P, "", None, &clock),
+        ErrorKind::Exists,
+        &[EXISTS],
+    );
     t.dir("projects/ep1");
-    err(write::create(&t.path, "Ep1", "", None, &clock), ErrorKind::Exists, &[EXISTS]);
+    err(
+        write::create(&t.path, "Ep1", "", None, &clock),
+        ErrorKind::Exists,
+        &[EXISTS],
+    );
     t.file("projects/檔案", b"x");
-    err(write::create(&t.path, "檔案", "", None, &clock), ErrorKind::Exists, &[EXISTS]);
+    err(
+        write::create(&t.path, "檔案", "", None, &clock),
+        ErrorKind::Exists,
+        &[EXISTS],
+    );
 }

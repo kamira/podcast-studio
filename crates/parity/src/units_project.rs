@@ -959,7 +959,8 @@ impl project::ids::Clock for SeqClock {
 
 fn lower_hex_len(v: &Value, n: usize) -> Option<String> {
     let s = v.as_str()?;
-    (s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).then(|| s.to_string())
+    (s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| s.to_string())
 }
 
 /// `clock` 欄位;格式不符回 `None`(→ `error type`)。
@@ -1135,7 +1136,10 @@ fn run_op(work: &FsWork, clock: &SeqClock, op: &Value) -> Result<Value, Outcome>
         return Err(type_error());
     };
     let root = work.root.as_path();
-    let kind = op.get("op").and_then(Value::as_str).ok_or_else(type_error)?;
+    let kind = op
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(type_error)?;
     let only = |allowed: &[&str]| {
         if keys_within(op, allowed) {
             Ok(())
@@ -1146,7 +1150,10 @@ fn run_op(work: &FsWork, clock: &SeqClock, op: &Value) -> Result<Value, Outcome>
     Ok(match kind {
         "save" => {
             only(&["op", "project", "script"])?;
-            let data = op.get("project").filter(|v| v.is_object()).ok_or_else(type_error)?;
+            let data = op
+                .get("project")
+                .filter(|v| v.is_object())
+                .ok_or_else(type_error)?;
             let script = match op.get("script") {
                 None => None,
                 Some(t) => Some(text_value(t).ok_or_else(type_error)?),
@@ -1224,11 +1231,7 @@ fn run_op(work: &FsWork, clock: &SeqClock, op: &Value) -> Result<Value, Outcome>
 }
 
 /// `create` 操作(`save_sequence` 與 `project.create` 共用)。
-fn create_step(
-    root: &Path,
-    op: &Map<String, Value>,
-    clock: &SeqClock,
-) -> Result<Value, Outcome> {
+fn create_step(root: &Path, op: &Map<String, Value>, clock: &SeqClock) -> Result<Value, Outcome> {
     let name = str_arg(op, "name")?;
     let script = match op.get("script") {
         None => String::new(),
@@ -1527,7 +1530,8 @@ mod tests {
 
     #[test]
     fn write_units_reject_malformed_input_as_type_error() {
-        let clock = json!({"now": [1_793_102_400_000i64], "rand4": ["abcd"], "hex8": ["0000000000000001"]});
+        let clock =
+            json!({"now": [1_793_102_400_000i64], "rand4": ["abcd"], "hex8": ["0000000000000001"]});
         let ok_ops = json!([{"op": "list_history", "name": "p"}]);
         let with = |k: &str, v: Value| {
             let mut c = clock.clone();
@@ -1564,7 +1568,9 @@ mod tests {
         }
         assert_eq!(
             project_save_sequence(&json!({"tree": [], "clock": clock, "ops": ok_ops})),
-            Outcome::Ok(json!({"steps": [{"value": []}], "tree": [["outside", "dir", null], ["root", "dir", null]]}))
+            Outcome::Ok(
+                json!({"steps": [{"value": []}], "tree": [["outside", "dir", null], ["root", "dir", null]]})
+            )
         );
     }
 
