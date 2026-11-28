@@ -177,8 +177,9 @@ pub(crate) fn child_in(
     }
 }
 
-/// Python `_root_fd(create=False)`:`root` 之下的 `projects/`;`root` 或 `projects/` 不存在 → `Fs(NotFound)`。
-fn root_dir(root: &Path) -> Result<SafeDir> {
+/// Python `_root_fd(create=False)`:`root` 之下的 `projects/`;`root` 或 `projects/` 不存在 → `Fs(NotFound)`
+/// (T7 起 `pub(crate)`,回收與清理共用)。
+pub(crate) fn root_dir(root: &Path) -> Result<SafeDir> {
     let top = safe_fs::open_dir(root, &[] as &[&str], DirOptions::default())?;
     child(&top, PROJECTS_NAME, PROJECTS_NAME)
 }
@@ -212,13 +213,19 @@ pub fn open_project(root: &Path, name: &str) -> Result<SafeDir> {
         }
         Err(e) => return Err(e),
     };
-    if case_variant(&projects, name)?.is_some() {
+    project_in(&projects, name)
+}
+
+/// Python `_project_fd(rfd, name, create=False)`:已開啟的 `projects/` 內的專案目錄(名稱已檢查;T7 起與回收共用)。
+/// 已有只差大小寫的其他專案 → `NotFound`([`CASE_VARIANT`]);不存在 → `NotFound`;是連結或不是目錄 → `UnsafePath`。
+pub(crate) fn project_in(projects: &SafeDir, name: &str) -> Result<SafeDir> {
+    if case_variant(projects, name)?.is_some() {
         return Err(Error::new(
             ErrorKind::NotFound,
             vec![CASE_VARIANT.to_string()],
         ));
     }
-    match child(&projects, name, PROJECT_LABEL) {
+    match child(projects, name, PROJECT_LABEL) {
         Err(e) if is_fs_not_found(&e) => {
             Err(Error::new(ErrorKind::NotFound, vec![NOT_FOUND.to_string()]))
         }

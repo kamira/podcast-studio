@@ -233,15 +233,19 @@ fn race_trash_dir_swapped_before_move_project_not_moved_outside() {
     });
     let dest = cleanup::trash(&t.path, P, true, &clock).expect("回收");
     assert_eq!(outside_snapshot(&t), before, "沒有搬進連結目標");
-    if swapped.load(Ordering::SeqCst) {
-        assert!(!cfg!(windows), "Windows 上開著 handle 的 .trash/ 不能改名");
+    let swapped = swapped.load(Ordering::SeqCst);
+    assert_eq!(
+        swapped,
+        !cfg!(windows),
+        "macOS / Linux 上替換成功;Windows 上開著 handle 的 .trash/ 不能改名"
+    );
+    if swapped {
         assert!(exists(
             &t,
             &format!("projects/.trash-moved/{dest}/project.json")
         ));
         println!("競態(.trash 換成連結):專案搬進原本的回收區(handle 相對),連結目標不變");
     } else {
-        assert!(cfg!(windows), "macOS / Linux 上替換應成功");
         assert!(exists(&t, &format!("projects/.trash/{dest}/project.json")));
         println!("競態(.trash 換成連結):Windows 上開著 handle 的 .trash/ 不能改名,回收照常");
     }
@@ -282,14 +286,14 @@ fn startup_cleanup_trash_30_day_boundary() {
     assert!(exists(&t, &format!("projects/.trash/{one_ms}")));
     let r = cleanup::startup_cleanup(&t.path, us(1000)).expect("剛好");
     assert_eq!(r.trash_removed, [one_ms]);
-    // 微秒以下捨去(Python `datetime` 只有微秒)
+    // 微秒以下捨去(Python `datetime` 只有微秒;早於紀元以 floor 取微秒;Windows 的 SystemTime 以 100 奈秒為單位)
     assert_eq!(
         cleanup::timestamp_seconds(UNIX_EPOCH + Duration::from_nanos(1_999)),
         1e-6
     );
     assert_eq!(
-        cleanup::timestamp_seconds(UNIX_EPOCH - Duration::from_nanos(1)),
-        -1e-6
+        cleanup::timestamp_seconds(UNIX_EPOCH - Duration::from_nanos(1_500)),
+        -2e-6
     );
     println!("30 天邊界:剛好滿 30 天刪除、差 1 毫秒與差 1 微秒保留");
 }
@@ -303,8 +307,8 @@ fn trash_created_by_trash_is_cleaned_after_30_days() {
     cleanup_at(&t, BASE_MS + 29 * DAY_MS + 23 * 3_600_000);
     assert!(exists(&t, &format!("projects/.trash/{name}")));
     let r = cleanup_at(&t, BASE_MS + 30 * DAY_MS);
-    assert_eq!(r.trash_removed, [name.clone()]);
     assert!(!exists(&t, &format!("projects/.trash/{name}")));
+    assert_eq!(r.trash_removed, [name]);
 }
 
 // ---------- 連結不跟隨 ----------
@@ -712,7 +716,8 @@ fn check_quota_boundary_and_errors() {
 /// Python `test_race_trash_entry_swapped_after_listing_not_followed` 與 `test_race_tmp_dir_swapped_after_open_...`:
 /// 列舉之後、刪除之前把過期回收項目(或 `tmp/`)換成指向外部的連結。Rust 沒有可注入的掛勾,改以另一個執行緒在
 /// 啟動清理進行中反覆替換(每回合重建夾具),斷言每一回合連結目標都不變;刪除以 handle 相對進行,被換成連結時只刪
-/// 連結本身(印出各結果的回合數)。
+/// 連結本身。刪完內容、最後以名稱刪除項目本身時該名稱已是連結(或替換中暫時不存在)者,`rmdir` 失敗、錯誤往上傳(與 Python
+/// `safe_fs.rmtree` 最後的 `os.rmdir` 相同),連結目標同樣不變(印出各結果的回合數)。
 #[test]
 fn race_entries_swapped_during_cleanup_never_touch_outside() {
     let _g = ProjectsGuard::new();
@@ -722,7 +727,7 @@ fn race_entries_swapped_during_cleanup_never_touch_outside() {
         return;
     }
     let before = outside_snapshot(&t);
-    let (mut link_left, mut removed) = (0, 0);
+    let (mut link_left, mut removed, mut failed) = (0, 0, 0);
     for round in 0..40 {
         let root = t.join(&format!("r{round}"));
         let expired = format!("過期-{}-abcd", stamp(BASE_MS - 31 * DAY_MS));
@@ -747,7 +752,22 @@ fn race_entries_swapped_during_cleanup_never_touch_outside() {
         });
         let r = cleanup::startup_cleanup(&root, at_ms(BASE_MS));
         swapper.join().expect("替換執行緒");
-        r.expect("清理");
+        match r {
+            Ok(_) => {}
+            // 刪完內容、最後以名稱刪除項目本身時該名稱已換成連結(或正在替換、暫時不存在):對該名稱的 rmdir 失敗(不跟隨),
+            // 錯誤往上傳——與 Python `os.rmdir(name, dir_fd=...)` 相同(「### 呼叫端指引」:啟動時的呼叫端記警告、下次再試)
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::Fs(safe_fs::ErrorKind::NotADirectory | safe_fs::ErrorKind::NotFound)
+                ) =>
+            {
+                failed += 1
+            }
+            // Windows:替換與刪除交錯時的共用違規一類錯誤同樣往上傳
+            Err(e) if cfg!(windows) && matches!(e.kind(), ErrorKind::Fs(_)) => failed += 1,
+            Err(e) => panic!("第 {round} 回合:{e:?}"),
+        }
         assert_eq!(outside_snapshot(&t), before, "第 {round} 回合連結目標改變");
         if std::fs::symlink_metadata(&entry).is_ok_and(|m| m.file_type().is_symlink()) {
             link_left += 1;
@@ -756,7 +776,7 @@ fn race_entries_swapped_during_cleanup_never_touch_outside() {
         }
     }
     println!(
-        "清理中替換成連結:40 回合連結目標皆不變(回收項目留下連結 {link_left} 回合、已不存在 {removed} 回合)"
+        "清理中替換成連結:40 回合連結目標皆不變(回收項目留下連結 {link_left} 回合、已不存在 {removed} 回合;其中錯誤往上傳 {failed} 回合)"
     );
 }
 
@@ -836,20 +856,44 @@ fn waiting_writer(
 fn trash_while_saving_never_corrupts() {
     let (_g, t) = setup("project-t7-stress-");
     let (mut ok, mut busy) = (0, 0);
+    let transient = Arc::new(AtomicUsize::new(0));
     for round in 0..10 {
         let root = t.join(&format!("r{round}"));
         std::fs::create_dir(&root).expect("root");
         write::save(&root, &Project::new(P), &SystemClock).expect("存檔");
         let stop = Arc::new(AtomicBool::new(false));
         let saves = Arc::new(AtomicUsize::new(0));
-        let (s2, n2, r2) = (Arc::clone(&stop), Arc::clone(&saves), root.clone());
+        let (s2, n2, r2, f2) = (
+            Arc::clone(&stop),
+            Arc::clone(&saves),
+            root.clone(),
+            Arc::clone(&transient),
+        );
         let b = std::thread::spawn(move || {
             let mut i = 0;
             while !s2.load(Ordering::SeqCst) {
                 let mut p = Project::new(P);
                 p.script = format!("第 {i} 版");
-                write::save(&r2, &p, &SystemClock).expect("B 存檔");
-                n2.fetch_add(1, Ordering::SeqCst);
+                match write::save(&r2, &p, &SystemClock) {
+                    Ok(_) => {
+                        n2.fetch_add(1, Ordering::SeqCst);
+                    }
+                    // Windows:回收的改名嘗試正以刪除權限開著專案目錄時,同時開啟其中的項目得到共用違規(錯誤碼 32,
+                    // 實測)或拒絕存取;這次存檔失敗、不寫入(原子寫入),下一次照常(D-9 T7 補記)
+                    Err(e)
+                        if cfg!(windows)
+                            && matches!(
+                                e.kind(),
+                                ErrorKind::Fs(
+                                    safe_fs::ErrorKind::Other(Some(32))
+                                        | safe_fs::ErrorKind::PermissionDenied
+                                )
+                            ) =>
+                    {
+                        f2.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) => panic!("B 存檔:{e:?}"),
+                }
                 i += 1;
             }
         });
@@ -863,7 +907,9 @@ fn trash_while_saving_never_corrupts() {
             Ok(_) => ok += 1,
             Err(e) => {
                 assert_eq!(e.errors(), [IN_USE], "{e}");
-                assert!(cfg!(windows), "只有 Windows 會回「使用中」");
+                if !cfg!(windows) {
+                    panic!("只有 Windows 會回「使用中」");
+                }
                 busy += 1;
             }
         }
@@ -878,7 +924,10 @@ fn trash_while_saving_never_corrupts() {
         }
         assert!(checked > 0);
     }
-    println!("存檔中回收:成功 {ok} 回合、使用中 {busy} 回合;每一份專案檔與版本檔都能載入");
+    println!(
+        "存檔中回收:成功 {ok} 回合、使用中 {busy} 回合、B 的存檔因共用違規失敗 {} 次;每一份專案檔與版本檔都能載入",
+        transient.load(Ordering::SeqCst)
+    );
 }
 
 /// Unix 上改名回 `PermissionDenied`(回收區沒有寫入權限)時同樣在鎖外重試一次,仍失敗回 [`IN_USE`](代決 14 不分平台;

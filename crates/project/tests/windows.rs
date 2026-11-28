@@ -157,7 +157,7 @@ fn d9_own_handles_block_the_rename_inside_the_lock_and_trash_retries_outside() {
     );
     assert_eq!(
         entries(&t, &format!("projects/.trash/{dest}")),
-        [".lock", "project.json"]
+        [".lock", "history", "project.json"]
     );
     assert!(!t.join(&format!("projects/{P}")).exists());
 }

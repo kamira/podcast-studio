@@ -29,6 +29,7 @@
 //! | `project.load`、`project.load_version`、`project.list_history`、`project.list_projects`、`project.disk_usage` | `{"tree", "outside"?, "name"?, "vid"?}`(合成檔案樹,T4) | `{"result", "tree", "changed"}`(見「T4:讀取」) |
 //! | `project.save_sequence` | `{"tree", "outside"?, "clock", "ops"}`(合成檔案樹、注入的時鐘與隨機碼、操作序列,T6) | `{"steps", "tree"}`(見「T6:寫入」) |
 //! | `project.create` | `{"tree", "outside"?, "clock", "name", "script"?, "defaults"?}`(T6) | `{"result", "tree"}` |
+//! | `project.trash`、`project.startup_cleanup`、`project.unlink_in`、`project.check_quota` | 合成檔案樹(`trash` 另有 `clock`、`name`、`confirm`;`startup_cleanup` 為 `now_us`;見「T7:回收與清理」) | `{"result", "tree"}`(`check_quota` 另有 `changed`) |
 //!
 //! 片段類單元(T3):兩邊都把 `segment` 放進 `{"schema_version": 2, "name": "p", "segments": [segment]}`(`effective` 另把
 //! 給定的 `defaults` 放進去)以 `validate` 驗證——Python 呼叫端傳入的就是驗證後的片段;驗證失敗時回 `validate` 的
@@ -1319,6 +1320,138 @@ pub fn project_create(input: &Value) -> Outcome {
     }
     run_write_case(input, |work, clock, obj| {
         Ok(json!({ "result": create_step(&work.root, obj, clock)? }))
+    })
+}
+
+// ---------- T7:回收與清理(合成檔案樹) ----------
+//
+// | 單元 | 輸入 | 呼叫 | 輸出 |
+// |------|------|------|------|
+// | `project.trash` | `{"tree", "outside"?, "clock", "name", "confirm"}`(`clock` 同 T6) | `cleanup::trash(root, name, confirm == true, clock)`(`confirm` 只有 JSON `true` 為真,與 Python `confirm is not True` 相同) | `{"result": {"value": 回收名稱} 或拒絕, "tree": 帶內容的樹}` |
+// | `project.startup_cleanup` | `{"tree", "outside"?, "now_us"}`(UNIX 紀元起微秒,0~[`NOW_MAX_US`] 的整數) | `cleanup::startup_cleanup(root, UNIX_EPOCH + now_us 微秒)` | `{"result": {"value": {"trash_removed", "tmp_cleared", "warnings"}} 或拒絕, "tree"}` |
+// | `project.unlink_in` | `{"tree", "outside"?, "name", "sub": "audio" / "assets" / "tmp", "filename"}` | `cleanup::unlink_in` | `{"result": {"value": null} 或拒絕, "tree"}` |
+// | `project.check_quota` | `{"tree", "outside"?, "name", "incoming": 0~2^64-1 的整數}` | `cleanup::check_quota` | `{"result", "tree", "changed"}`(同 T4 讀取類) |
+//
+// 工作目錄同 T4(`canonicalize`、案例結束即刪除);拒絕時 `{"class", "errors"}`(`os_error` 只有類別)。格式不符一律
+// `error type`(轉接器同一規則)。
+
+/// `now_us` 的上限(2099-12-31T23:59:59.999999Z)。
+pub const NOW_MAX_US: u64 = 4_102_444_799_999_999;
+
+fn null_result(r: project::Result<()>) -> Value {
+    match r {
+        Ok(()) => json!({ "value": null }),
+        Err(e) => write_error(&e),
+    }
+}
+
+/// 建樹 → 呼叫 → 帶內容的快照(`{"result", "tree"}`);案例結束一律刪除工作目錄。
+fn run_tree_case(
+    input: &Value,
+    allowed: &[&str],
+    action: impl FnOnce(&Path, &Map<String, Value>) -> Result<Value, Outcome>,
+) -> Outcome {
+    let Some(obj) = input.as_object() else {
+        return type_error();
+    };
+    if !keys_within(obj, allowed) || !matches!(obj.get("tree"), Some(Value::Array(_))) {
+        return type_error();
+    }
+    let work = match FsWork::new() {
+        Ok(w) => w,
+        Err(o) => return o,
+    };
+    if let Err(o) = work
+        .build(&work.root, obj.get("tree"))
+        .and_then(|()| work.build(&work.outside, obj.get("outside")))
+    {
+        return o;
+    }
+    let result = match action(&work.root, obj) {
+        Ok(v) => v,
+        Err(o) => return o,
+    };
+    match work.content_tree() {
+        Ok(tree) => Outcome::Ok(json!({"result": result, "tree": tree})),
+        Err(o) => o,
+    }
+}
+
+/// `project.trash`。
+pub fn project_trash(input: &Value) -> Outcome {
+    if let Some(obj) = input.as_object()
+        && !keys_within(obj, &["tree", "outside", "clock", "name", "confirm"])
+    {
+        return type_error();
+    }
+    run_write_case(input, |work, clock, obj| {
+        let name = str_arg(obj, "name")?;
+        let confirm = obj.get("confirm").ok_or_else(type_error)?;
+        let r = project::cleanup::trash(&work.root, name, *confirm == Value::Bool(true), clock);
+        Ok(json!({"result": match r {
+            Ok(dest) => json!({ "value": dest }),
+            Err(e) => write_error(&e),
+        }}))
+    })
+}
+
+/// `project.startup_cleanup`。
+pub fn project_startup_cleanup(input: &Value) -> Outcome {
+    run_tree_case(input, &["tree", "outside", "now_us"], |root, obj| {
+        let us = obj
+            .get("now_us")
+            .and_then(Value::as_u64)
+            .filter(|n| *n <= NOW_MAX_US)
+            .ok_or_else(type_error)?;
+        let now = UNIX_EPOCH + std::time::Duration::from_micros(us);
+        Ok(match project::cleanup::startup_cleanup(root, now) {
+            Ok(c) => json!({"value": {
+                "trash_removed": c.trash_removed,
+                "tmp_cleared": c.tmp_cleared,
+                "warnings": c.warnings,
+            }}),
+            Err(e) => write_error(&e),
+        })
+    })
+}
+
+/// `project.unlink_in`。
+pub fn project_unlink_in(input: &Value) -> Outcome {
+    use project::read::Subdir;
+    run_tree_case(
+        input,
+        &["tree", "outside", "name", "sub", "filename"],
+        |root, obj| {
+            let (name, filename) = (str_arg(obj, "name")?, str_arg(obj, "filename")?);
+            let sub = match obj.get("sub").and_then(Value::as_str) {
+                Some("audio") => Subdir::Audio,
+                Some("assets") => Subdir::Assets,
+                Some("tmp") => Subdir::Tmp,
+                _ => return Err(type_error()),
+            };
+            Ok(null_result(project::cleanup::unlink_in(
+                root, name, sub, filename,
+            )))
+        },
+    )
+}
+
+/// `project.check_quota`。
+pub fn project_check_quota(input: &Value) -> Outcome {
+    if let Some(obj) = input.as_object()
+        && !keys_within(obj, &["tree", "outside", "name", "incoming"])
+    {
+        return type_error();
+    }
+    run_fs_case(input, |root, obj| {
+        let name = str_arg(obj, "name")?;
+        let incoming = obj
+            .get("incoming")
+            .and_then(Value::as_u64)
+            .ok_or_else(type_error)?;
+        Ok(null_result(project::cleanup::check_quota(
+            root, name, incoming,
+        )))
     })
 }
 

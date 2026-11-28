@@ -217,6 +217,13 @@ impl Registry {
             units_project::project_save_sequence,
         );
         r.register("project.create", units_project::project_create);
+        r.register("project.trash", units_project::project_trash);
+        r.register(
+            "project.startup_cleanup",
+            units_project::project_startup_cleanup,
+        );
+        r.register("project.unlink_in", units_project::project_unlink_in);
+        r.register("project.check_quota", units_project::project_check_quota);
         if std::env::var_os("PARITY_TEST_SLEEP").is_some_and(|v| v == "1") {
             r.register("demo.sleep", demo::sleep);
         }
