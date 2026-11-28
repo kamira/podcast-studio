@@ -19,7 +19,9 @@
 //!   `effective`)、「Rust 載入既有專案的結果與 Python 相同且不改動任何檔案」(T4,`load`、`load_version`、
 //!   `list_history`、`list_projects`、`disk_usage`;結果另含呼叫後的樹與 `changed`(呼叫前後有任何不同的路徑,須為空))、
 //!   「同一毫秒連續存檔版本時間戳嚴格遞增、只留最近 10 版」(T6,`save_sequence`:注入的時鐘與隨機碼、操作序列,結果另含
-//!   最後帶內容的樹——輪替刪除的選取規則因此逐案與 Python 比對)與 `create`。
+//!   最後帶內容的樹——輪替刪除的選取規則因此逐案與 Python 比對)與 `create`、「回收區滿 30 天才清除、連結不跟隨」
+//!   (T7,`startup_cleanup`:30 天邊界、名稱內時間戳的解析、連結不跟隨、`tmp/` 清空;結果另含最後帶內容的樹——回收區與
+//!   `tmp/` 的刪除選取規則因此逐案與 Python 比對)與 `trash`、`unlink_in`、`check_quota`。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -32,7 +34,9 @@ use serde_json::Value;
 
 /// 「### 行為差異清單」允許出現在 `windows` 欄的案例(單元、案例 id、差異編號);T1~T3 沒有(T3 純函式不碰檔案系統),
 /// T4 為 D-8:Windows 上名稱為保留裝置名的既有專案開啟時明確失敗、`list_projects` 略過。T6 的寫入類案例沒有
-/// `windows` 欄(不含保留名稱;D-7 的刻意差異不進 fixture,由 `crates/project/tests/names_rules.rs` 鎖住)。
+/// `windows` 欄(不含保留名稱;D-7 的刻意差異不進 fixture,由 `crates/project/tests/names_rules.rs` 鎖住)。T7 的回收與
+/// 清理案例也沒有 `windows` 欄(Windows 的鎖外重試以同一個回收名稱進行,結果與 Python 相同;D-8、D-9 由
+/// `crates/project/tests/windows.rs` 鎖住)。
 const WINDOWS_CASES: &[(&str, &str, &str)] = &[
     ("project.load", "ok_reserved_con", "D-8"),
     ("project.load", "ok_reserved_nul", "D-8"),
@@ -81,6 +85,11 @@ const FIXTURES: &[(&str, &str, usize, usize)] = &[
     // T6:寫入(L2 下限:`save_sequence` ≥ 25、`create` ≥ 10)
     ("project.save_sequence", "save_sequence.json", 38, 25),
     ("project.create", "create.json", 16, 10),
+    // T7:回收與清理(L2 下限:`startup_cleanup` ≥ 20、`trash` ≥ 12、其餘每份 ≥ 6)
+    ("project.trash", "trash.json", 26, 12),
+    ("project.startup_cleanup", "startup_cleanup.json", 31, 20),
+    ("project.unlink_in", "unlink_in.json", 13, 6),
+    ("project.check_quota", "check_quota.json", 11, 6),
 ];
 
 /// `project.validate_text`(T2)的接受 / 拒絕筆數(以預期結果表計)。

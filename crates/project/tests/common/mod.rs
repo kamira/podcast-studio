@@ -21,7 +21,8 @@
 //! [`run_helper_if_requested`]。
 //!
 //! **寫入類**([`TestClock`]、[`BASE_MS`]、[`call_each`];T6):可控制的時鐘與隨機碼;Python 子程序另有四個特殊函式名
-//! (`@save_dict`、`@save_text`、`@set_script`、`@file`),每一筆請求各自指定 `project.ROOT`。
+//! (`@save_dict`、`@save_text`、`@set_script`、`@file`),每一筆請求各自指定 `project.ROOT`。T7 另加
+//! [`TestClock::before_next_now`](`now_ms` 取用前的一次性掛勾)。
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -64,6 +65,10 @@ try:
                 v = [vid, pj._dump(pj.validate(got.to_dict())).decode("utf-8")]
             elif fn == "@file":         # T6:讀 ROOT 下的檔案(相對路徑以 / 分隔),回十六進位
                 v = (pj.ROOT / args[0]).read_bytes().hex()
+            elif fn == "@decimal_zeros":  # T7:unicodedata 的版本與每組十進位數字 0 的碼位
+                import unicodedata
+                v = {"version": unicodedata.unidata_version,
+                     "zeros": [c for c in range(0x110000) if chr(c).isdecimal() and unicodedata.decimal(chr(c)) == 0]}
             else:
                 v = getattr(pj, fn)(*args)
             if isinstance(v, pj.Project):
@@ -239,6 +244,7 @@ pub struct TestClock {
     hex: std::cell::Cell<u64>,
     hex_fixed: std::cell::RefCell<Option<String>>,
     hook: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+    now_hook: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl TestClock {
@@ -254,6 +260,7 @@ impl TestClock {
             hex: std::cell::Cell::new(0),
             hex_fixed: std::cell::RefCell::new(None),
             hook: std::cell::RefCell::new(None),
+            now_hook: std::cell::RefCell::new(None),
         }
     }
 
@@ -270,10 +277,19 @@ impl TestClock {
     pub fn before_next_hex8(&self, f: impl FnOnce() + 'static) {
         *self.hook.borrow_mut() = Some(Box::new(f));
     }
+
+    /// 下一次 `now_ms` 取用前執行 `f` 一次(T7:`trash` 在開啟 `.trash/`、取得專案鎖之後、改名之前取用 `now_ms`,
+    /// 以此模擬「檢查完成、操作之前」的外部改動,與 Python 測試的 `_child_hook` 同一時點)。
+    pub fn before_next_now(&self, f: impl FnOnce() + 'static) {
+        *self.now_hook.borrow_mut() = Some(Box::new(f));
+    }
 }
 
 impl project::ids::Clock for TestClock {
     fn now_ms(&self) -> i64 {
+        if let Some(f) = self.now_hook.borrow_mut().take() {
+            f();
+        }
         self.now.get()
     }
 
@@ -376,43 +392,48 @@ impl TempTree {
 
     /// 不跟隨連結的快照:相對路徑(以 `/` 分隔)→ 狀態。
     pub fn snapshot(&self) -> BTreeMap<String, Entry> {
-        let mut out = BTreeMap::new();
-        let mut stack = vec![(self.path.clone(), String::new())];
-        while let Some((dir, rel)) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("read_dir") {
-                let entry = entry.expect("目錄項");
-                let name = entry.file_name().to_string_lossy().to_string();
-                let r = if rel.is_empty() {
-                    name
-                } else {
-                    format!("{rel}/{name}")
-                };
-                let path = entry.path();
-                let meta = std::fs::symlink_metadata(&path).expect("symlink_metadata");
-                let mtime = meta
-                    .modified()
-                    .map(project::read::mtime_ns)
-                    .unwrap_or_default();
-                let state: Entry = if meta.file_type().is_symlink() {
-                    let t = std::fs::read_link(&path).expect("read_link");
-                    (
-                        "symlink",
-                        mtime,
-                        Some(t.to_string_lossy().as_bytes().to_vec()),
-                    )
-                } else if meta.is_dir() {
-                    stack.push((path, r.clone()));
-                    ("dir", mtime, None)
-                } else if meta.is_file() {
-                    ("file", mtime, Some(std::fs::read(&path).expect("讀取")))
-                } else {
-                    ("other", mtime, None)
-                };
-                out.insert(r, state);
-            }
-        }
-        out
+        snapshot_of(&self.path)
     }
+}
+
+/// `dir` 之下不跟隨連結的快照(T7 起獨立成函式,[`TempTree::snapshot`] 呼叫它)。
+pub fn snapshot_of(dir: &Path) -> BTreeMap<String, Entry> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![(dir.to_path_buf(), String::new())];
+    while let Some((dir, rel)) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read_dir") {
+            let entry = entry.expect("目錄項");
+            let name = entry.file_name().to_string_lossy().to_string();
+            let r = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).expect("symlink_metadata");
+            let mtime = meta
+                .modified()
+                .map(project::read::mtime_ns)
+                .unwrap_or_default();
+            let state: Entry = if meta.file_type().is_symlink() {
+                let t = std::fs::read_link(&path).expect("read_link");
+                (
+                    "symlink",
+                    mtime,
+                    Some(t.to_string_lossy().as_bytes().to_vec()),
+                )
+            } else if meta.is_dir() {
+                stack.push((path, r.clone()));
+                ("dir", mtime, None)
+            } else if meta.is_file() {
+                ("file", mtime, Some(std::fs::read(&path).expect("讀取")))
+            } else {
+                ("other", mtime, None)
+            };
+            out.insert(r, state);
+        }
+    }
+    out
 }
 
 impl Drop for TempTree {
