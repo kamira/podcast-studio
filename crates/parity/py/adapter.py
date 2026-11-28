@@ -36,13 +36,16 @@ CHG-20261125-01 代決 11;
 `project.check_zhuyin`、`project.check_pitch_points`、`project.py_json`;T2 加 `project.validate_text`(輸入 JSON 原文,
 在自己以 `tempfile.mkdtemp` 建立的暫存目錄寫一個檔案,以 `_read_project_file` 讀回後 `validate`,接受時回
 `{"dump": _dump 字串}`,案例結束即刪除;輸入另可寫成 `{"hex"}` 或精簡形式 `{"parts"}`,dump 有同一字元連續
-1000 個以上時改回 `{"dump": {"parts": […]}}`,見 `_project_compact_dump`);結果一律以 `ok` 回傳——
+65 個以上(T3 補記:原為 1000)時改回 `{"dump": {"parts": […]}}`,見 `_project_compact_dump`);結果一律以 `ok` 回傳——
 接受時 `{"value", "repr"?}`(`repr` 為 `json.dumps(值, ensure_ascii=False, sort_keys=True)`,
 連 `-0.0` 與整數 / 浮點的寫法一起比對),拒絕時 `{"class", "errors"}`(錯誤類別與逐字的錯誤訊息清單)。
 T3 加純函式 11 個單元:`project.split_segments`(`{"text": 字串或 {"parts"}, "forced"?: [整數…]}`)、
 `project.escape_text`(字串),以及片段類的 `project.tts_text`、`project.fused_out`、`project.model_units`、
 `project.shift_marks`(另需 `old`、`new`)、`project.post_params`、`project.post_key`、`project.is_post_fresh`、
 `project.is_default_post`、`project.effective`(`effective_speed` 與 `effective_pause`,另可給 `defaults`)——
+文字欄位(`split_segments` 的 `text`、`escape_text` 的輸入、`segment.text`、`shift_marks` 的 `old` / `new`)可為字串或
+`{"parts"}`(`_project_text_value`),接受時 `value` 內同一字元連續 65 個以上的字串改為 `{"parts"}`
+(`_project_compact_strings`;與 Rust 同一規則);
 片段類輸入 `{"segment"}`,先放進 `{"schema_version": 2, "name": "p", "segments": [segment]}` 以 `validate`
 (`effective` 以 `Project.from_dict`)驗證,失敗回 `{"class", "errors"}`,通過才對驗證後的片段呼叫函式。
 """
@@ -692,7 +695,7 @@ def project_py_json(value):
 
 # 精簡形式(CHG-20261128-01 T2 DIR-6 第 1 輪 F-1):超長的重複內容不直接寫進 fixture 與預期結果表。
 PROJECT_REPEAT_MAX = 5242881      # `{"repeat", "count"}` 的 count 上限(= 5 MB + 1)
-PROJECT_RUN_MIN = 1000            # dump 中同一字元連續達此長度才改用 parts
+PROJECT_RUN_MIN = 65              # 結果中同一字元連續達此長度才改用 parts(T3 補記:原為 1000;上限 64)
 
 
 def _project_parts_text(parts):
@@ -781,11 +784,40 @@ def project_validate_text(value):
 PROJECT_I64 = 2 ** 63
 
 
+def _project_text_value(v):
+    """文字欄位:字串或 `{"parts": [片段…]}`(恰此一鍵,`_project_parts_text` 展開);其他 → error type。"""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict) and set(v) == {"parts"}:
+        return _project_parts_text(v["parts"])
+    raise _type_error()
+
+
+def _project_compact_strings(v):
+    """接受時的值:每個字串依 `_project_compact_dump` 轉換(同字元連續 ≥ PROJECT_RUN_MIN 改為 `{"parts"}`),
+    陣列與物件遞迴處理(與 Rust `units_project::compact_strings` 同一規則)。"""
+    if isinstance(v, str):
+        return _project_compact_dump(v)
+    if isinstance(v, list):
+        return [_project_compact_strings(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _project_compact_strings(x) for k, x in v.items()}
+    return v
+
+
+def _project_text_ok(v):
+    return {"value": _project_compact_strings(v)}
+
+
 def _project_segment_data(value, with_defaults=False):
-    """片段類單元的輸入 `{"segment", "defaults"?}` → 交給 `validate` 的專案;缺 `segment` → error type。"""
+    """片段類單元的輸入 `{"segment", "defaults"?}` → 交給 `validate` 的專案;缺 `segment` → error type。
+    `segment.text` 為物件時以 `_project_text_value` 展開(驗證前)。"""
     if not isinstance(value, dict) or "segment" not in value:
         raise _type_error()
-    data = {"schema_version": 2, "name": "p", "segments": [value["segment"]]}
+    segment = value["segment"]
+    if isinstance(segment, dict) and isinstance(segment.get("text"), dict):
+        segment = {**segment, "text": _project_text_value(segment["text"])}
+    data = {"schema_version": 2, "name": "p", "segments": [segment]}
     if with_defaults and "defaults" in value:
         data["defaults"] = value["defaults"]
     return data
@@ -808,34 +840,30 @@ def project_split_segments(value):
     import project as pj
     if not isinstance(value, dict):
         raise _type_error()
-    text = value.get("text")
-    if isinstance(text, dict) and set(text) == {"parts"}:
-        text = _project_parts_text(text["parts"])
-    if not isinstance(text, str):
+    if "text" not in value:
         raise _type_error()
+    text = _project_text_value(value["text"])
     forced = value.get("forced", [])
     if not isinstance(forced, list) or not all(
             isinstance(b, int) and not isinstance(b, bool) and -PROJECT_I64 <= b < PROJECT_I64 for b in forced):
         raise _type_error()
     try:
-        return {"value": pj.split_segments(text, forced)}
+        return _project_text_ok(pj.split_segments(text, forced))
     except pj.ProjectError as e:
         return _project_error_result(e, pj)
 
 
 def project_escape_text(value):
-    """project.escape_text:輸入為字串。"""
+    """project.escape_text:輸入為字串或 `{"parts"}`。"""
     import project as pj
-    if not isinstance(value, str):
-        raise _type_error()
-    return {"value": pj.escape_text(value)}
+    return _project_text_ok(pj.escape_text(_project_text_value(value)))
 
 
 def project_tts_text(value):
     """project.tts_text:`{"segment"}`(先驗證)。"""
     def run(pj, segment):
         try:
-            return {"value": pj.tts_text(segment)}
+            return _project_text_ok(pj.tts_text(segment))
         except pj.ProjectError as e:
             return _project_error_result(e, pj)
     return _project_on_segment(value, run)
@@ -843,19 +871,20 @@ def project_tts_text(value):
 
 def project_fused_out(value):
     """project.fused_out:`{"segment"}` → 遞增排序的索引。"""
-    return _project_on_segment(value, lambda pj, s: {"value": sorted(pj.fused_out(s))})
+    return _project_on_segment(value, lambda pj, s: _project_text_ok(sorted(pj.fused_out(s))))
 
 
 def project_model_units(value):
     """project.model_units:`{"segment"}`。"""
-    return _project_on_segment(value, lambda pj, s: {"value": pj.model_units(s)})
+    return _project_on_segment(value, lambda pj, s: _project_text_ok(pj.model_units(s)))
 
 
 def project_shift_marks(value):
-    """project.shift_marks:`{"segment", "old": 字串, "new": 字串}`。"""
-    if not isinstance(value, dict) or not isinstance(value.get("old"), str) or not isinstance(value.get("new"), str):
+    """project.shift_marks:`{"segment", "old", "new"}`(`old` / `new` 為字串或 `{"parts"}`)。"""
+    if not isinstance(value, dict) or "old" not in value or "new" not in value:
         raise _type_error()
-    return _project_on_segment(value, lambda pj, s: {"value": pj.shift_marks(s, value["old"], value["new"])})
+    old, new = _project_text_value(value["old"]), _project_text_value(value["new"])
+    return _project_on_segment(value, lambda pj, s: _project_text_ok(pj.shift_marks(s, old, new)))
 
 
 def project_post_params(value):
@@ -867,7 +896,7 @@ def project_post_key(value):
     """project.post_key:`{"segment"}`;自錄音檔或沒有音檔回 `{"class", "errors"}`。"""
     def run(pj, segment):
         try:
-            return {"value": pj.post_key(segment)}
+            return _project_text_ok(pj.post_key(segment))
         except pj.ProjectError as e:
             return _project_error_result(e, pj)
     return _project_on_segment(value, run)
@@ -875,12 +904,12 @@ def project_post_key(value):
 
 def project_is_post_fresh(value):
     """project.is_post_fresh:`{"segment"}`。"""
-    return _project_on_segment(value, lambda pj, s: {"value": pj.is_post_fresh(s)})
+    return _project_on_segment(value, lambda pj, s: _project_text_ok(pj.is_post_fresh(s)))
 
 
 def project_is_default_post(value):
     """project.is_default_post:`{"segment"}`。"""
-    return _project_on_segment(value, lambda pj, s: {"value": pj.is_default_post(s)})
+    return _project_on_segment(value, lambda pj, s: _project_text_ok(pj.is_default_post(s)))
 
 
 def project_effective(value):

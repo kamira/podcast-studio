@@ -546,18 +546,18 @@ def test_project_validate_text_的_parts_輸入():
 
 @needs_posix_project
 def test_project_validate_text_的_dump_精簡門檻與可逆性():
-    """dump 的同一字元連續 999 個照舊為字串、1000 個改為 `{"parts"}`;展開即得原 dump。"""
+    """dump 的同一字元連續 64 個照舊為字串、65 個改為 `{"parts"}`(T3 補記:原為 999 / 1000);展開即得原 dump。"""
     head, tail = '{"schema_version": 2, "name": "x", "script": "', '"}'
-    reqs = [{"id": str(n), "input": {"parts": [head, {"repeat": "a", "count": n}, tail]}} for n in (999, 1000, 50000)]
+    reqs = [{"id": str(n), "input": {"parts": [head, {"repeat": "a", "count": n}, tail]}} for n in (64, 65, 50000)]
     got = [strip(r) for r in responses_split_on_newline(run_adapter("project.validate_text", reqs))]
     assert isinstance(got[0]["value"]["dump"], str)
-    for n, r in zip((1000, 50000), got[1:]):
+    for n, r in zip((65, 50000), got[1:]):
         parts = r["value"]["dump"]["parts"]
         assert {"repeat": "a", "count": n} in parts
-        assert all(isinstance(p, str) or (len(p["repeat"]) == 1 and p["count"] >= 1000) for p in parts)
+        assert all(isinstance(p, str) or (len(p["repeat"]) == 1 and p["count"] >= 65) for p in parts)
         assert not any(isinstance(a, str) and isinstance(b, str) for a, b in zip(parts, parts[1:])), "相鄰字串段須合併"
         assert f'"script": "{"a" * n}",' in _parts_expand(parts)
-    assert _parts_expand(got[1]["value"]["dump"]["parts"]).replace("a" * 1000, "a" * 999) == got[0]["value"]["dump"]
+    assert _parts_expand(got[1]["value"]["dump"]["parts"]).replace("a" * 65, "a" * 64) == got[0]["value"]["dump"]
 
 
 @needs_posix_project
@@ -573,6 +573,36 @@ def test_project_片段類單元先驗證再呼叫():
                    error("type"), error("type")]
     got = [strip(r) for r in responses_split_on_newline(run_adapter("project.fused_out", reqs[:1]))]
     assert got == [ok({"value": [2]})], "set 以遞增陣列回傳"
+
+
+@needs_posix_project
+def test_project_文字欄位的_parts_輸入與結果精簡():
+    """T3 補記(同字元連續上限 64):`escape_text` 的輸入、`segment.text`、`shift_marks` 的 `old` / `new`、
+    `split_segments` 的 `text` 可為 `{"parts"}`;接受時 `value` 內同字元連續 64 個照舊、65 個改為 `{"parts"}`(可逆)。"""
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.escape_text", [
+        {"id": "64", "input": {"parts": [{"repeat": "[", "count": 64}]}},
+        {"id": "65", "input": "[" * 65},
+        {"id": "bad", "input": {"parts": []}},
+        {"id": "extra", "input": {"parts": ["a"], "x": 1}}]))]
+    assert got == [ok({"value": "［" * 64}), ok({"value": {"parts": [{"repeat": "［", "count": 65}]}}),
+                   error("type"), error("type")]
+    seg = {"id": "0123456789abcdef", "text": {"parts": [{"repeat": "字", "count": 499}, "。"]}}
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.tts_text", [
+        {"id": "p", "input": {"segment": seg}},
+        {"id": "bad", "input": {"segment": {**seg, "text": {"parts": [1]}}}},
+        {"id": "obj", "input": {"segment": {**seg, "text": {"x": "a"}}}}]))]
+    assert got[0] == ok({"value": {"parts": [{"repeat": "字", "count": 499}, "。"]}})
+    assert _parts_expand(got[0]["value"]["value"]["parts"]) == "字" * 499 + "。"
+    assert got[1:] == [error("type"), error("type")]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.shift_marks", [
+        {"id": "p", "input": {"segment": {"id": "0123456789abcdef", "text": "好"},
+                              "old": {"parts": [{"repeat": "a", "count": 3}]}, "new": "aaab"}},
+        {"id": "bad", "input": {"segment": {"id": "0123456789abcdef", "text": "好"}, "old": {"parts": []}, "new": ""}}]))]
+    assert got == [ok({"value": {"fusions": [], "fusion_off": [], "cleared": 0}}), error("type")]
+    got = [strip(r) for r in responses_split_on_newline(run_adapter("project.split_segments", [
+        {"id": "p", "input": {"text": {"parts": [{"repeat": "字", "count": 500}]}}}]))]
+    assert got[0]["value"]["value"][0] == {"text": {"parts": [{"repeat": "字", "count": 500}]}, "break": "end",
+                                           "start": 0, "end": 500}
 
 
 @needs_posix_project

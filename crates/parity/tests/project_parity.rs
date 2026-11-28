@@ -218,12 +218,14 @@ fn validate_text_expectations_split_into_accept_and_reject() {
     println!("project.validate_text:接受 {accepted} 筆、拒絕 {rejected} 筆");
 }
 
-/// 審議轉送的上限(DIR-6 第 1 輪 F-1):每行最多字元數、同一字元最多連續數。
+/// 審議轉送的上限(DIR-6 第 1 輪 F-1):每行最多字元數、同一字元最多連續數(T3 補記:連續上限由 999 降為 64——
+/// 轉送者手抄連續 500 個同一字元時數錯,無法逐字交付)。
 const MAX_LINE_CHARS: usize = 12000;
-const MAX_RUN: usize = 999;
+const MAX_RUN: usize = 64;
 
-/// 守門:`fixtures/project/*.json` 與預期結果表每行 ≤ 12000 字元、同一字元連續 ≤ 999 個——超長的重複內容
-/// 一律改用 `validate_text` 的 `{"parts"}` 精簡形式(輸入)與 `{"dump": {"parts"}}`(結果)。
+/// 守門:`fixtures/project/*.json` 與預期結果表每行 ≤ 12000 字元、同一字元連續 ≤ 64 個——超長的重複內容
+/// 一律改用 `{"parts"}` 精簡形式:輸入(`validate_text` 的原文,與 T3 文字類 / 片段類單元的文字欄位)與結果
+/// (`{"dump": {"parts"}}`,與 T3 單元 `value` 內同字元連續 ≥ 65 的字串)。
 #[test]
 fn fixture_and_table_lines_stay_short() {
     let mut files: Vec<PathBuf> = std::fs::read_dir(fixture_dir())
